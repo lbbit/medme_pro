@@ -1,0 +1,14 @@
+[package]
+name = "poc"
+version = "0.0.1"
+edition = "2021"
+
+[[bin]]
+name = "import_demo"
+path = "src/import_demo.rs"
+
+[dependencies]
+core-model = { path = "../upstream-medme/packages/core-model" }
+parser     = { path = "../upstream-medme/packages/parser" }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }

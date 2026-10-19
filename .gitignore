@@ -1,0 +1,6 @@
+# D-011:本仓首次checkpoint化。target/(upstream+poc+ehr-api合计~5G)与运行时日志不进版本库。
+target/
+*.log
+.DS_Store
+# ehr-api/poc 若改用共享 CARGO_TARGET_DIR(medme-shared-target,在仓库外)则天然不入库；此规则兜底本地直编
+upstream-medme/

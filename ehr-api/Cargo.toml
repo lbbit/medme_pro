@@ -1,0 +1,32 @@
+[package]
+name = "ehr-api"
+version = "0.0.1"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[[bin]]
+name = "ehr-api"
+path = "src/main.rs"
+
+[lib]
+name = "ehr_api"
+path = "src/lib.rs"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[dependencies]
+core-model = { path = "../upstream-medme/packages/core-model" }
+parser     = { path = "../upstream-medme/packages/parser" }
+axum = { version = "0.8", features = ["multipart"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+utoipa = { version = "5", features = ["axum_extras"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
