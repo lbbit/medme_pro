@@ -30,18 +30,25 @@ async fn main() -> Result<()> {
     let home_in = std::path::PathBuf::from(std::env::var("EHR_HOME").unwrap_or_else(|_| "./ehr-home".into()));
     // dry-run 与 serve 都要求 EHR_HOME 已存在——只校验不创建(dry-run 不落任何状态；
     // serve 仅在其下建派生 vaults/ 子目录，registry/persons.jsonl 首写时才建)。
-    let st = ehr_api::prepare_home_and_state(&home_in, !print_openapi)?;
+    // T4：鉴权表从 env 读（EHR_API_TOKENS / EHR_API_TOKEN）。格式错误 ⇒ 启动失败（D5：配置错误不静默退化）。
+    let (st, token_set) = ehr_api::prepare_home_and_state_auth(&home_in, !print_openapi)?;
     // D1：生效地址单点计算一次，[证据]行与实际 bind 用同一个值。
     let addr = addr_arg.or_else(|| std::env::var("EHR_ADDR").ok()).unwrap_or_else(|| "127.0.0.1:8443".into());
 
     // ⚠️证据行走 **stderr**：dry-run 模式下 stdout 是机器数据(openapi.json),混入日志行会毒死管道消费方
     // (ehtest.sh A2/F1 首跑实锤——「Expecting value char 1」正是 [证据] 前缀字节)。POSIX 惯例:D4-b机制化。
     eprintln!(
-        "[证据] ehr-api v{} | mode={} | EHR_HOME={} | ADDR={}",
+        "[证据] ehr-api v{} | mode={} | EHR_HOME={} | ADDR={} | auth={}",
         env!("CARGO_PKG_VERSION"),
         if print_openapi { "dry-run(print-openapi)" } else { "serve" },
         st.home.display(),
         addr,
+        if token_set.is_open() {
+            // open 模式必须显式可见：杜绝「以为开了鉴权其实没开」
+            format!("open(tokens=0) ⚠️未配置 token，所有请求放行")
+        } else {
+            format!("bearer(tokens={})", token_set.len())
+        },
     );
 
     if print_openapi {

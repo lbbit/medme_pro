@@ -2,7 +2,10 @@
 
 真源：`ehr-api` 运行时 `GET /openapi.json`（现合成，paths=16）。本文件是人类可读镜像；改动须两边同步。
 Base：`$EHR_API_BASE/api/v1`（默认 `http://127.0.0.1:8585/api/v1`）。
-鉴权：当前版本**尚未**实现 token 中间件（T4 待做）；`EHR_API_TOKEN` 预留，设置后 helper 会带 `Authorization: Bearer`。
+鉴权：T4 已落地。服务端配置 token 后，所有路径（除 `/healthz`、`/openapi.json`、Web 首页）都要求 `Authorization: Bearer <token>`。
+- `EHR_API_TOKEN`：单 token（等价读写权限）。
+- 服务端多 token/只读分权：请求头里的 token 决定权限；只读 token 遇写操作 ⇒ **403**（不是 401）。
+- helper 侧只需设 `EHR_API_TOKEN`；未配置 token 的服务端（open 模式）不带头也能通。
 
 ## 路径与关键返回字段
 

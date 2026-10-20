@@ -1,5 +1,22 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-022 2026-10-21 · **T4 API token 鉴权交付：静态 Bearer + ro/rw 分权 + 统一中间件**（零新依赖）
+**为什么做**：T3（D-021）交付的「零维护接入」在 skill 侧预留了 `EHR_API_TOKEN`，但**服务端不校验 ⇒ 填了也不生效**——这正是本项目最反感的形态（"参数传进去≠生效"）。T4 是「升级不改配置」的最后一环，也是把服务放到公网前的安全底线。
+**关键结构决策①：鉴权 = 一个中间件层，不是每 handler 各写一遍**。做法：`axum::middleware::from_fn_with_state(st, auth_layer)` 挂在**最外层 Router**（`/api/v1/*` 与 `/mcp` 一次覆盖），token 的 scope 通过 `request.extensions` 下传。理由与 D-017「薄适配层」同形：**权限判定只有一处 ⇒ 不存在"某条路径忘了校验"的漏账**。D5 式代价：中间件只能按 HTTP 方法判读写，**故 `/mcp` 例外**（HTTP 是 POST，但读侧工具应当放行）⇒ MCP 内部按**工具粒度**二次判定。
+**关键结构决策②：401 与 403 必须分开**。401 = 缺 token / token 错（动作=换 token）；403 = token 有效但 scope 不足（动作=换**读写** token）。混成一个码，agent 就只会盲目重试——正是 SKILL.md「错误即指引」原则的背面。MCP 侧同理但用 JSON-RPC 码 **`-32004`**（新码，区别于 `-32602` 参数错 / `-32001` 查无此人 / `-32003` 类型不支持）——因为 MCP 的 HTTP 状态恒为 200，权限信息只能走协议层。
+**关键结构决策③：token 表手写实现，不引 subtle/argon2**。理由同 D-019 base64：鉴权协议面小到能自己钉死（解析/拒绝带原因/常量时间比较共 5 个单测）；且**静态 token 本身不提供抗爆破能力**，加哈希库也只是心理安慰——真正的防线是「不裸奔 + 定期轮换」。**`Cargo.lock` 未改动（零新依赖）**，可验事实。
+**关键结构决策④：未配置 token ⇒ open 模式，但必须「响亮地诚实」**。为不破坏既有门禁/本地开发，默认放行；但启动 `[证据]` 行必须打 **`auth=open(tokens=0) ⚠️未配置 token，所有请求放行`**。理由：D5 的「不假装」——「以为开了鉴权其实没开」是本项目最贵的漏账形态。
+**公开路径白名单（免鉴权）**：`/api/v1/healthz`（部署自检）、`/openapi.json`（文档）、`/`（Web 首页）。Web 首页虽免鉴权，但其 XHR 必须带 token ⇒ 页面加了 token 输入框（存 localStorage 或 `?token=` 打开）。
+**证据链（缺一即不算交付）**：
+①`cargo test --all-targets` 全绿：**auth 模块单测 5 门**（scope/名字解析、非法输入带原因拒绝、权限矩阵、认证拒绝路径、常量时间比较）+ **`tests/auth.rs` 7 门**（无 token 401 于 persons/timeline/labs/`/mcp`；错 token 401；裸 token 401；ro 读 200；ro 写 403；rw 写 201；MCP ro→写工具 -32004、ro→读工具 ok；openapi 声明 `bearerAuth`；open 模式放行）。
+②**`auth-e2e.sh`（新增门禁）真进程 21 门 PASS / fails=0**：真 env 注入 `EHR_API_TOKENS=rwsecret:rw,rosecret:ro` 起服务 → `[证据]` 行显示 **`auth=bearer(tokens=2)`**（证明参数真生效）→ 无/错/裸 token 全 401 → 公开路径 200 → ro/rw 读 200 → **ro 写 403 / rw 写 201** → **被拒的写不留半成品**（persons 中查无被拒记录）→ MCP 工具粒度 `-32004` → openapi 含 `bearerAuth` + 全局 `security` → **open 模式**放行且 `[证据]` 标 `auth=open`。
+③**旧门禁全绿未被破坏**：`ehtest.sh` 34 门 fails=0、`mcp-e2e.sh` 22 门 fails=0、`skill-rest-check.sh` fails=0、`skill-contract-check.sh` fails=0、`web-e2e.sh` fails=0。
+④**配置面已贯通**：三个 compose 文件均注入 `EHR_API_TOKENS`/`EHR_API_TOKEN`（`docker compose config` 实测可见）；`deploy/.env.sample` 给了多 token + 分权样例；README + SKILL.md + `references/rest-contracts.md` 同步 401/403 语义（skill 侧错误即指引更新）。
+**新坑两则（D4 同族）**：
+①**改 `[证据]` 行格式 ⇒ 旧门禁的「行尾锚定」假失败**：`ehtest.sh` B1 门原本用 `ADDR=127.0.0.1:PORT$` 行尾正则匹配证据行；T4 给证据行追加 `| auth=...` 后，ADDR 后面多了内容 ⇒ B1 **假 FAIL**。修法：改成 `ADDR=127.0.0.1:PORT( |$)` 字段级锚定。教训：**门禁要断言字段，不是断言整行**——整行匹配必然被无关字段变更打断（与 D-016「字段名逐个核对」同源，但方向相反：字段级匹配才抗漂移）。
+②**测试用 `#[tokio::test]`（单线程）会撞 `block_in_place` panic**：`block_in_place` 只在 multi_thread runtime 合法 ⇒ 新测试文件 7 门全红且错信息是 `can call blocking only when running on the multi-threaded runtime`（看着像业务 bug，实为测试骨架错）。修法：与 `tests/mcp.rs` 一致用 `#[tokio::test(flavor = "multi_thread")]`。**红门先查门禁自身**（D-011 教训又一次应验）。
+**未销账/下一步**：①静态 token 无过期/无撤销列表/无抗爆破 ⇒ 定位是「最小安全基线」，非 IAM；生产建议轮换 + TLS 反代；②`EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token（否则 open 模式裸奔）；③T5 Web 管理端正式化（选型先报方案再动手）；④ghcr 包可见性仍 private；⑤真·第三方 MCP 客户端互通仍未验。
+
 ## D-021 2026-10-20 · **T3「免维护接入」交付：SKILL 由 MCP 优先改为 REST 优先 + 真·第三方 agent 端到端兑现**
 **为什么做**：D-018 已把定位改成"skill=全部、MCP=可选"，但 T3 落地时发现一个未消解的矛盾：仓库里的 `SKILL.md` 通篇在讲 **MCP 8 个工具**（`list_persons`/`get_timeline`/…），而 D-018 的原则是"skill = 纯 markdown + curl，任何能执行 shell 的 agent 装上即用"。**照旧实现交付的会是一个"只能在 MCP 宿主里用"的 skill**——与 D-018 自己的结论矛盾。
 **关键结构决策①：SKILL.md 的主路径改为 REST 命令（`ehr.sh`），MCP 降为"可选壳"并给出 REST↔MCP 一一对照表**。理由：REST 是**唯一事实源**（OpenAPI 16 路径已自动生成），MCP 只是薄适配层（D-017/D-019 定的同真相层结构）。让 skill 讲事实源，比让它讲某个适配层更抗漂移。

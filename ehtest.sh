@@ -31,7 +31,8 @@ echo "== Phase B · serve + [证据]行核验"
 EHR_HOME="$H" "$BIN" --addr="127.0.0.1:${PORT}" >"$WORK/serve.log" 2>&1 & SRV_PID=$!
 for i in $(seq 1 40); do curl -fsS "$BASE/openapi.json" >/dev/null 2>&1 && break; sleep 0.25; done
 # (D4自查抓到本次编辑误删:B1证据行守卫差点没了——恢复如下,勿再丢)
-grep -q "\[证据\].*ADDR=127.0.0.1:${PORT}$" "$WORK/serve.log" && ok=y||ok=n; g "B1 evidence line ADDR matches(--addr真生效)" "$ok" "$(head -3 "$WORK/serve.log")"
+# T4 起 [证据] 行追加了 auth= 字段 ⇒ 不能再用行尾锚定 $，改为「ADDR=... 后跟空格或行尾」
+grep -qE "\[证据\].*ADDR=127.0.0.1:${PORT}( |$)" "$WORK/serve.log" && ok=y||ok=n; g "B1 evidence line ADDR matches(--addr真生效)" "$ok" "$(head -3 "$WORK/serve.log")"
 # B2 ⚠️教训(本轮两连败元凶):服务挂 nest("/api/v1")后 healthz 在 **$API** 之下;$BASE裸路径必404——勿再回退!
 # (另:上轮sed批量加 --max-time 只改了带空格的调用,for循环内的漏网——批量替换需事后grep自证,D4)
 ok=n; for i in $(seq 1 30); do curl --max-time 5 -fsS "$API/healthz" | grep -q '"status":"ok"' && { ok=y; break; }; sleep 0.5; done

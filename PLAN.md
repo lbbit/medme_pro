@@ -35,7 +35,7 @@
 | 2 | person 层设计 + ehr-api 骨架（axum, OpenAPI）——**已完成** | /api/v1 MVP；curl版抽查对齐POC证据链(D-011:34门全绿) | ✅ GREEN(2026-10-20) |
 | 3 | docker-compose（server+web）+ Web 管理端最小版 | 一键部署可用 | ✅ GREEN(2026-10-20，D-014/D-016) |
 | 4 | MCP server + QwenPaw SKILL | agent 可按人查档/写档 | 🔄 MCP 读侧 6 + **写侧 2 已交付**（D-017/D-019）；SKILL 已写（D-018），注册进 skill_pool 待验 |
-| 5 | 认证与多客户端（token/token scope），手机客户端预留 | 安全基线 | ⬜ |
+| 5 | 认证与多客户端（token/token scope），手机客户端预留 | 安全基线 | 🔄 T4 静态 Bearer token 已交付（D-022）；多客户端/手机端待做 |
 
 ## 已知事实（已核实，来源 README/GitHub 页面 2026-10-19）
 
@@ -54,7 +54,18 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
-## 当前状态（2026-10-20 · **T3 免维护接入已交付（D-021）**）
+## 当前状态（2026-10-21 · **T4 API token 鉴权已交付（D-022）**）
+
+- ✅ **T4 交付（静态 Bearer token 鉴权）**：①新增 `ehr-api/src/auth.rs`——env 注入的静态 token 表（`EHR_API_TOKENS` 多 token / `EHR_API_TOKEN` 单 token 兼容），**scope 分权 ro/rw**，手写常量时间比较，**零新依赖**；②`axum` 统一鉴权中间件 `auth_layer`（`from_fn_with_state`）挂在最外层 Router ⇒ `/api/v1/*`、`/mcp` 一次覆盖；③**401 vs 403 分开**（401=缺/错 token⇒换 token；403=只读 token 想写⇒换读写 token）；④MCP 侧**工具粒度分权**（ro token 调写侧工具 ⇒ JSON-RPC `-32004`，不是 HTTP 403）；⑤OpenAPI 注入 `components.securitySchemes.bearerAuth` + 全局 `security`，`/healthz` 显式 `security: []`；⑥Web 管理端加 token 输入框（localStorage / `?token=`），页面本身仍免鉴权但 XHR 带 token。
+- ✅ **证据链（缺一即不算交付）**：
+  - ①`cargo test --all-targets` 全绿：**auth 单测 5 门**（scope 解析/拒绝带原因/权限矩阵/认证拒绝/常量时间比较）+ **tests/auth.rs 7 门**（无 token 401 于 persons/timeline/labs//mcp；错 token 401；裸 token 401；ro 读 200；ro 写 403；rw 写 201；MCP ro→写工具 -32004 / ro→读工具 ok；openapi 声明 bearerAuth；open 模式放行）；**旧门禁未被破坏**：`ehtest.sh` **34 门 fails=0**、`mcp-e2e.sh` 22 门 fails=0、`skill-rest-check.sh` fails=0、`skill-contract-check.sh` fails=0、`web-e2e.sh` fails=0。
+  - ②**`auth-e2e.sh`（新增门禁）真进程 21 门 PASS / fails=0**：起真服务（`EHR_API_TOKENS=rwsecret:rw,rosecret:ro`）→ 启动 `[证据]` 行显示 **`auth=bearer(tokens=2)`** → 无/错/裸 token 全 401 → 公开路径（healthz/openapi/首页）200 → ro/rw 读全 200 → **ro 写 403、rw 写 201** → **被拒的写不留半成品**（persons 里查无「只读不该建成」）→ MCP ro 调写侧工具 `-32004` → openapi 含 bearerAuth → **open 模式**（不配 token）放行且 `[证据]` 行标 `auth=open`。
+  - ③**零新依赖**：`Cargo.lock` 未改动（依赖数不变）——鉴权面手写实现（token 表解析 + 常量时间比较）不引 subtle/argon2。
+  - ④**参数生效有证据**：`EHR_API_TOKENS` 通过真实 env 注入后，`[证据]` 行的 token 计数与实际放行行为**逐条对齐**（tokens=2 ⇒ 两个 token 各自的行为符合 scope 矩阵）；compose 三个编排文件均已注入 `EHR_API_TOKENS`/`EHR_API_TOKEN`（`docker compose config` 实测可见）。
+- 🔄 **下一步**：①T5 Web 管理端正式化（选型先报方案再动手）；②公网暴露前的运维项：`EHR_BIND_ADDR` 由 `127.0.0.1` 改 `0.0.0.0` 前必须先设 token（否则 open 模式裸奔）；③ghcr 包可见性仍 private；④真·第三方 MCP 客户端互通仍未验（MCP 已降为可选壳，优先级下调）。
+- ⚠️ 未销账：`EHR_API_TOKEN` 是**静态 token**（无过期/无撤销列表/无抗爆破）⇒ 定位是「最小可用安全基线」，不是 IAM；生产建议定期轮换 + 走 TLS 反代。`.dcm`/OCR worker 未做；volume 内累计人档历轮验收遗留。
+
+### 历史状态（2026-10-20 · **T3 免维护接入已交付（D-021）**）
 
 - ✅ **T3 交付（免维护接入）**：①README 全新「一键部署」块（ghcr 编排 + local 编排双写法 + 部署后自检口径 + 数据落 volume 说明）+「AI agent 接入」块（clone → export EHR_API_BASE/EHR_API_TOKEN → 放 skill 目录的宿主对照表）；②**SKILL 重写为 REST 优先**（新增 `skills/medme-ehr/scripts/ehr.sh` 纯 curl helper + `references/rest-contracts.md` 字段契约；MCP 降为可选壳并给出 REST↔MCP 工具一一对照表）。**验收口径=「升级不改配置」**：API base 与 token 全走 env，skill 内不写死地址/token（门禁逐条断言）。
 - ✅ **证据链（缺一即不算交付）**：
@@ -118,5 +129,5 @@
 - [x] T1 GitHub Actions CI：打 tag(v*) → 自动 build 多阶段镜像 → push ghcr.io/lbbit/medme_pro:<tag>（GH_TOKEN 权限/GCR 写入需验证；tag 触发规则、缓存策略写入 workflow 注释）—— **D-020：CI run success，镜像可 pull**
 - [x] T2 双编排文件：`deploy/docker-compose.local.yml`(本地 build) + `deploy/docker-compose.ghcr.yml`(引用 ghcr 镜像,免构建一键起)；共用 .env 样例 —— **D-020：ghcr 编排端到端 GREEN**
 - [ ] T3 部署/接入方式"免维护设计"：README 提供一键复制粘贴的 部署块 + **SKILL 接入块（MCP 不交付，见 D-018：skill=纯md+curl，Copilot CLI 实测，归档 repo 内随版本走）**（skill 文件放仓库固定路径、API base 用 env、SKILL 内不写死 token——升级不改配置才算达标）—— **D-021：已交付（README 部署块+接入块 / REST 优先 SKILL / agent-e2e 真 agent 兑现）**
-- [ ] T4 API token 鉴权（面向公网）：静态 Bearer token(env 注入,可多 token 按只读/读写分权),中间件层统一拦截,OpenAPI 标 securitySchemes；验收=无 token 401、对 token 全绿
+- [x] T4 API token 鉴权（面向公网）：静态 Bearer token(env 注入,可多 token 按只读/读写分权),中间件层统一拦截,OpenAPI 标 securitySchemes；验收=无 token 401、对 token 全绿 —— **D-022：已交付（auth-e2e 21 门 PASS / fails=0；单测 7+5 门；Cargo.lock 零新依赖）**
 - [ ] T5 Web 管理端：人员/时间线/上传/检索最小可用（技术栈选型时先报方案再动手）

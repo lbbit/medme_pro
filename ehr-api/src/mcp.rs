@@ -14,7 +14,7 @@
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::{b64, vaults, ApiError, AppState, PersonNew, StatusCode};
+use crate::{auth::Scope, b64, vaults, ApiError, AppState, PersonNew, StatusCode};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -28,6 +28,8 @@ const ERR_NO_SUCH_PERSON: i64 = -32001;
 const ERR_INTERNAL: i64 = -32002;
 /// 写入侧的类型不支持（如 .dcm 需 ocr/dicom worker）——与「服务坏了」区分开，agent 据此换格式。
 const ERR_UNSUPPORTED_TYPE: i64 = -32003;
+/// 权限不足（只读 token 调写侧工具）——与「参数错了」区分开，agent 据此换 token 而不是改参数。
+const ERR_FORBIDDEN: i64 = -32004;
 
 /// 写侧单件上限（解码后字节数）。防止 agent 一口气塞 500MB 把内存打爆。
 /// 32MB 覆盖绝大多数病历 PDF/影像元数据；超出即 -32602（改参数，不重试）。
@@ -62,6 +64,15 @@ fn tool_err(id: Value, code: i64, message: String) -> Value {
 
 /// 单个 JSON-RPC 消息 → 可选响应（notification 无 id ⇒ 返回 None）。
 pub fn handle_message(st: &Arc<AppState>, msg: &Value) -> Option<Value> {
+    handle_message_with_scope(st, msg, Scope::Rw)
+}
+
+/// 带请求作用域的消息处理。scope 来自鉴权中间件（ro token 只能调读侧工具）。
+pub fn handle_message_with_scope(
+    st: &Arc<AppState>,
+    msg: &Value,
+    scope: Scope,
+) -> Option<Value> {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let is_notification = msg.get("id").is_none();
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -81,6 +92,17 @@ pub fn handle_message(st: &Arc<AppState>, msg: &Value) -> Option<Value> {
         "tools/call" => {
             let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            // 工具粒度权限：ro token 调写侧工具 ⇒ -32004（明确是权限问题，不是参数问题）
+            if !scope.allows_tool(&name) {
+                return Some(tool_err(
+                    id.clone(),
+                    ERR_FORBIDDEN,
+                    format!(
+                        "tool `{name}` requires a read-write token (current scope: {})",
+                        scope.as_str()
+                    ),
+                ));
+            }
             call_tool(st, id.clone(), &name, &args)
         }
         "" => err_obj(id.clone(), INVALID_REQUEST, "missing method"),
@@ -95,9 +117,14 @@ pub fn handle_message(st: &Arc<AppState>, msg: &Value) -> Option<Value> {
 
 /// POST /mcp 入口：批量(Batch)或单条；非法 JSON → -32700。
 pub fn handle_http(st: &Arc<AppState>, body: &Value) -> Value {
+    handle_http_with_scope(st, body, Scope::Rw)
+}
+
+/// 带作用域的 HTTP 入口（鉴权中间件把 token scope 传进来）。
+pub fn handle_http_with_scope(st: &Arc<AppState>, body: &Value, scope: Scope) -> Value {
     let out: Vec<Value> = match body {
-        Value::Array(items) => items.iter().filter_map(|m| handle_message(st, m)).collect(),
-        single @ Value::Object(_) => handle_message(st, single).into_iter().collect(),
+        Value::Array(items) => items.iter().filter_map(|m| handle_message_with_scope(st, m, scope)).collect(),
+        single @ Value::Object(_) => handle_message_with_scope(st, single, scope).into_iter().collect(),
         _ => return err_obj(Value::Null, INVALID_REQUEST, "body must be a JSON-RPC object or array"),
     };
     if out.is_empty() {

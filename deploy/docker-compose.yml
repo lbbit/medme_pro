@@ -36,6 +36,9 @@ services:
     environment:
       EHR_HOME: /home/ehr                           # uid=appuser(非 root),由 boot 预建属主 —— 见上 E6/P2
       RUST_LOG: info
+      # T4 鉴权：留空 = open 模式（[证据] 行会显式提示）；生产请设置 EHR_API_TOKENS
+      EHR_API_TOKENS: ${EHR_API_TOKENS:-}
+      EHR_API_TOKEN: ${EHR_API_TOKEN:-}
     volumes:
       - ehr-home:/home/ehr                          # D-01x P3：host bind 会遮蔽镜像骨架，故用 named volume(+boot chown)
 

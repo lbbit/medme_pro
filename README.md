@@ -37,7 +37,7 @@ curl -s http://127.0.0.1:8585/api/v1/healthz      # {"status":"ok",...}
 ```bash
 git clone https://github.com/lbbit/medme_pro.git
 export EHR_API_BASE=http://127.0.0.1:8585      # API 地址走环境变量，升级/换机器不改文件
-# token（T4 鉴权落地后启用；当前服务端尚未校验，留空即可）
+# token（服务端配置了 token 时必填；未配置=open 模式可留空）
 export EHR_API_TOKEN=
 export PATH="$PWD/medme_pro/skills/medme-ehr/scripts:$PATH"
 ehr.sh persons
@@ -68,6 +68,22 @@ ehr.sh detail  <person_id> <sha256>  # 文档详情（OCR 文本层）
 ```
 
 Web 管理端最小版随镜像提供：<http://127.0.0.1:8585/>（建档/时间线/上传/指标/检索）。
+服务端配置了 token 时，页面右上角有 token 输入框（存 localStorage，或用 `?token=…` 打开）。
+
+## API 鉴权（T4）
+
+服务端用**静态 Bearer token**（env 注入），多 token 可按只读/读写分权：
+
+```bash
+# 部署侧（deploy/.env）：<token>[:ro|rw] 逗号分隔；或 <name>=<token>[:ro|rw]
+EHR_API_TOKENS=mainrw:rw,agent:ro
+# 客户端侧
+export EHR_API_TOKEN=mainrw
+```
+
+- 未配置任何 token ⇒ **open 模式**（放行全部请求；启动 `[证据]` 行会标 `auth=open` 警示）。
+- 401 = 缺/错 token；403 = 只读 token 试图写（读写操作需 rw token）。
+- 例外（免鉴权）：`/api/v1/healthz`、`/openapi.json`、Web 首页。
 
 ## 文档
 
@@ -84,6 +100,6 @@ Web 管理端最小版随镜像提供：<http://127.0.0.1:8585/>（建档/时间
 ## 状态
 
 阶段 1~3 已交付（内核 POC / REST API 16 路径 / docker-compose + Web 最小版），
-阶段 4（SKILL + MCP）进行中，阶段 5（token 鉴权）待做。详见 `PLAN.md`。
+阶段 4（SKILL + MCP）已交付，阶段 5（token 鉴权 T4）已交付。详见 `PLAN.md`。
 
 License: AGPL-3.0（跟随上游）。本项目不是医疗器械，不提供诊断结论本身。

@@ -39,6 +39,10 @@ services:
     environment:
       EHR_HOME: ${EHR_HOME:-/home/ehr}              # uid=appuser(非 root),由 boot 预建属主 —— 见上 E6/P2
       EHR_ADDR: ${EHR_CONTAINER_ADDR:-0.0.0.0:8443}
+      # T4 鉴权：静态 Bearer token（逗号分隔，格式 <token>[:ro|rw] 或 <name>=<token>[:ro|rw]）
+      # 留空 = open 模式（不放行提示会写进容器 stderr 的 [证据] 行）。生产必须设置。
+      EHR_API_TOKENS: ${EHR_API_TOKENS:-}
+      EHR_API_TOKEN: ${EHR_API_TOKEN:-}
       RUST_LOG: info
     volumes:
       - ehr-home:/home/ehr                          # D-01x P3：host bind 会遮蔽镜像骨架，故用 named volume(+boot chown)

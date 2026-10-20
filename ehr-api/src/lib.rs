@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use utoipa::OpenApi;
 
+pub mod auth; // T4：静态 Bearer token 鉴权（env 注入，ro/rw 分权，零新依赖）
 mod persons;
 pub use persons::{Person, PersonNew, PersonStore};
 pub mod vaults;
@@ -20,17 +21,33 @@ mod b64; // base64 解码（写侧工具传二进制原件用；零新依赖，�
 pub mod mcp; // 阶段4：MCP server（零新依赖 JSON-RPC over POST /mcp，薄适配层复用 vaults）
 pub use vaults::UploadReply; // 供 utoipa path!宏体解析(同 PersonNew 惯例)
 use axum::extract::{Path as AxPath, Query};
+use axum::extract::FromRequest; // mcp_endpoint 手动解 Json 以便先取 scope
 
 pub struct AppState {
     pub home: std::path::PathBuf,
     pub store: PersonStore,
+    /// T4：token 表。空表 = open 模式（未配置 token ⇒ 放行，但启动 [证据] 行显式标 auth=open）
+    pub auth: auth::TokenSet,
 }
 
 impl AppState {
     /// 测试/hook 用构造（bin 走 prepare_home_and_state，带 canonicalize+校验）
     pub fn from_home(home: impl Into<std::path::PathBuf>) -> Arc<AppState> {
         let home = home.into();
-        Arc::new(AppState { store: PersonStore::new(home.clone()), home })
+        Arc::new(AppState {
+            store: PersonStore::new(home.clone()),
+            home,
+            auth: auth::TokenSet::default(),
+        })
+    }
+
+    /// 带鉴权表构造（测试/门禁用）。非空 token 表 ⇒ 开启鉴权。
+    pub fn from_home_with_auth(
+        home: impl Into<std::path::PathBuf>,
+        auth: auth::TokenSet,
+    ) -> Arc<AppState> {
+        let home = home.into();
+        Arc::new(AppState { store: PersonStore::new(home.clone()), home, auth })
     }
 }
 
@@ -422,6 +439,29 @@ fn merge_path(paths: &mut serde_json::Map<String, Value>, path: &str, item: Valu
     }
 }
 
+/// 合成 OpenAPI 时追加的 securitySchemes（T4）。
+/// 刻意手写注入而非 utoipa derive 的 modifier：注入点在 openapi_json() 一处，
+/// 可被 tests/auth.rs 直接断言（避免"文档声称有鉴权、实际没有"这类漏账，D5）。
+fn inject_security_schemes(doc: &mut Value) {
+    let comps = doc
+        .get_mut("components")
+        .and_then(|c| c.as_object_mut())
+        .expect("components object");
+    comps.insert(
+        "securitySchemes".to_string(),
+        json!({
+            "bearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "description": "静态 Bearer token（env 注入）。scope: ro=只读 / rw=读写。EHR_API_TOKENS 逗号分隔，格式 <token>[:ro|rw] 或 <name>=<token>[:ro|rw]。"
+            }
+        }),
+    );
+    // 全局安全要求：除公开路径（healthz/openapi.json/首页）外都需要 bearerAuth。
+    // 公开路径在各自 operation 上用 security: [] 覆盖。
+    doc["security"] = json!([{ "bearerAuth": [] }]);
+}
+
 pub fn openapi_json() -> Value {
     // utoipa OpenApi 结构自带 serde(Serialize)，经字符串中转落为通用 Value(便于并入手写契约 stub)
     let s = ApiDoc::openapi().to_json().expect("openapi serialize");
@@ -432,6 +472,18 @@ pub fn openapi_json() -> Value {
             merge_path(paths, pth, stub_item(op, tag, summary));
         }
     } // 交还借用，doc 可被移动返回
+    inject_security_schemes(&mut doc);
+    // 公开路径显式声明 security: [] （免鉴权），否则全局 bearerAuth 会误导客户端去取 token
+    {
+        let paths = doc["paths"].as_object_mut().expect("paths object");
+        if let Some(ops) = paths.get_mut("/api/v1/healthz").and_then(|o| o.as_object_mut()) {
+            for (_, op) in ops.iter_mut() {
+                if let Some(op) = op.as_object_mut() {
+                    op.insert("security".to_string(), json!([]));
+                }
+            }
+        }
+    }
     doc
 }
 
@@ -455,6 +507,80 @@ async fn web_index() -> Response {
         .into_response()
 }
 
+
+// ---------- T4 鉴权中间件（统一拦截层） ----------
+/// 请求作用域（由 auth_layer 注入 request extensions；MCP 侧按工具粒度二次判定）
+#[derive(Clone, Copy, Debug)]
+pub struct AuthScope(pub auth::Scope);
+
+/// 从 request extensions 取本次请求的 token 作用域；取不到 ⇒ open（未走中间件的直接调用场景）
+pub fn scope_of(parts: &axum::http::request::Parts) -> auth::Scope {
+    parts
+        .extensions
+        .get::<AuthScope>()
+        .map(|s| s.0)
+        .unwrap_or(auth::Scope::Rw)
+}
+
+/// 无 token ⇒ 401；token 无效 ⇒ 401；token 有效但 scope 不足 ⇒ 403。
+/// D5：401（没凭证）与 403（凭证不够）必须分开，否则 agent 不知道该「补 token」还是「换 token」。
+fn unauthorized(msg: &str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer")],
+        Json(json!({ "error": msg })),
+    )
+        .into_response()
+}
+
+fn forbidden(msg: &str) -> Response {
+    (StatusCode::FORBIDDEN, Json(json!({ "error": msg }))).into_response()
+}
+
+/// 免鉴权路径：健康检查（部署自检用）、OpenAPI 文档、Web 管理端首页。
+/// 其余全部要 token（含 /mcp）。
+fn is_public_path(path: &str) -> bool {
+    matches!(path, "/api/v1/healthz" | "/openapi.json" | "/")
+}
+
+/// 鉴权中间件：open 模式直接放行；否则必须带合法 Bearer。
+/// 写操作（POST/PUT/PATCH/DELETE）额外要求 rw scope（ro token ⇒ 403）。
+/// /mcp 例外：HTTP 方法是 POST，但权限按 **工具** 判定（读侧工具 ro 即可）⇒ 交由 mcp.rs 内二次判定。
+async fn auth_layer(
+    State(st): State<Arc<AppState>>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if st.auth.is_open() {
+        return next.run(req).await;
+    }
+    let path = req.uri().path().to_string();
+    if is_public_path(&path) {
+        return next.run(req).await;
+    }
+    let Some(bearer) = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok())
+    else {
+        return unauthorized("missing Authorization: Bearer <token>");
+    };
+    let Some((_name, scope)) = st.auth.authenticate(bearer) else {
+        return unauthorized("invalid bearer token");
+    };
+    // /mcp：仅校验 token 有效，工具粒度权限在 mcp.rs 判定（ro 允许读侧工具）
+    let is_mcp = path == "/mcp";
+    if !is_mcp {
+        let method = req.method().as_str();
+        if !scope.allows(method) {
+            return forbidden(&format!(
+                "token scope '{}' does not allow {} (need rw)",
+                scope.as_str(),
+                method
+            ));
+        }
+    }
+    req.extensions_mut().insert(AuthScope(scope));
+    next.run(req).await
+}
+
 // ---------- router（判据：新增路由必同时进 CONTRACT —— 反向保险见 tests/contract.rs）----------
 async fn openapi_route() -> Json<Value> {
     Json(openapi_json())
@@ -462,10 +588,24 @@ async fn openapi_route() -> Json<Value> {
 
 /// POST /mcp —— MCP(Streamable HTTP, 无 session) 入口。刻意 **不进 /openapi.json**：
 /// 它不是 REST 契约面而是 JSON-RPC 协议面；工具契约由 tools/list 自身公布 + tests/mcp.rs 守卫。
-async fn mcp_endpoint(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+async fn mcp_endpoint(
+    State(st): State<Arc<AppState>>,
+    req: axum::extract::Request,
+) -> Result<Json<Value>, ApiError> {
+    // scope 从 request extensions 取（鉴权中间件注入）；open 模式 ⇒ Rw（放行一切，与旧行为一致）
+    let (parts, body) = req.into_parts();
+    let scope = scope_of(&parts);
+    let Json(body) = Json::<Value>::from_request(
+        axum::http::Request::from_parts(parts, body),
+        &st,
+    )
+    .await
+    .map_err(|e| {
+        ApiError(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}"))
+    })?;
     // JSON 解析失败由 axum 的 Json 拒绝器回 400（非 JSON-RPC 形状）——协议层与 REST 层边界诚实：
     // 客户端发错 content-type/体时，2025-06-18 允许 HTTP 层先行拒绝。
-    Ok(Json(mcp::handle_http(&st, &body)))
+    Ok(Json(mcp::handle_http_with_scope(&st, &body, scope)))
 }
 
 pub fn router(st: Arc<AppState>) -> Router {
@@ -499,6 +639,8 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/mcp", post(mcp_endpoint))
         // 顶层 Router 无 state 参数 ⇒ 挂 /mcp 时须显式 with_state（内层 api 已消费 st，这里 clone 一个 Arc）
         .with_state(st.clone())
+        // T4：统一鉴权拦截层（open 模式下自动放行）。挂在最外层 ⇒ /mcp、/api/v1、/openapi.json 一次覆盖。
+        .layer(axum::middleware::from_fn_with_state(st.clone(), auth_layer))
     }
 
 /// serve/dry-run 共用的 home 校验：canonicalize、要求已存在、建 vaults/ 派生目录。
@@ -513,5 +655,21 @@ pub fn prepare_home_and_state(home_in: &std::path::Path, mkdir_vaults: bool) -> 
     if mkdir_vaults {
         std::fs::create_dir_all(home.join("vaults")).context("mkdir vaults")?;
     }
-    Ok(Arc::new(AppState { store: PersonStore::new(home.clone()), home }))
+    Ok(Arc::new(AppState { store: PersonStore::new(home.clone()), home, auth: auth::TokenSet::default() }))
+}
+
+/// serve 用：home 校验 + 注入 env 里的 token 表。token 表格式错误 ⇒ 直接启动失败
+/// （D5：配置错误必须在启动时暴露，不能默默退化成 open 模式）。
+pub fn prepare_home_and_state_auth(
+    home_in: &std::path::Path,
+    mkdir_vaults: bool,
+) -> Result<(Arc<AppState>, auth::TokenSet)> {
+    let st = prepare_home_and_state(home_in, mkdir_vaults)?;
+    let set = auth::TokenSet::from_env().map_err(|e| anyhow::anyhow!("bad token config: {e}"))?;
+    let st = Arc::new(AppState {
+        home: st.home.clone(),
+        store: PersonStore::new(st.home.clone()),
+        auth: set.clone(),
+    });
+    Ok((st, set))
 }

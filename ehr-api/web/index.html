@@ -31,6 +31,7 @@
   <h1>medme-ehr 管理端</h1>
   <span class="ver" id="ver">…</span>
   <span class="ver" style="margin-left:auto">真相层 = 原件 CAS + 事件日志 · 派生索引可重建</span>
+  <span class="ver" id="tokwrap" style="margin-left:12px">token: <input id="token" type="password" placeholder="Bearer token（可留空=未开鉴权）" style="width:220px"></span>
 </header>
 <main>
 <aside>
@@ -49,7 +50,22 @@
 const API = location.origin + "/api/v1";
 let persons = [], cur = null, tab = "timeline";
 
+// T4 鉴权：token 来自 URL ?token= 或 localStorage（不写死在页面里）。
+// 页面本身是公开路径（免鉴权），但它的 XHR 必须带 token，否则 401。
+function tok() {
+  const u = new URL(location.href).searchParams.get("token");
+  if (u) return u;
+  try { return localStorage.getItem("ehr_token") || ""; } catch (e) { return ""; }
+}
+function setTok(v) {
+  try { v ? localStorage.setItem("ehr_token", v) : localStorage.removeItem("ehr_token"); } catch (e) {}
+  location.reload();
+}
 async function j(path, opt) {
+  opt = opt || {};
+  const t = tok();
+  opt.headers = Object.assign({}, opt.headers || {});
+  if (t) opt.headers["Authorization"] = "Bearer " + t;
   const r = await fetch(API + path, opt);
   const t = await r.text();
   let d; try { d = JSON.parse(t); } catch (e) { d = { raw: t }; }
@@ -136,6 +152,9 @@ document.getElementById("btnAdd").onclick = async () => {
 };
 
 (async () => {
+  const ti = document.getElementById("token");
+  ti.value = tok();
+  ti.onchange = () => setTok(ti.value.trim());
   try { const o = await (await fetch("/openapi.json")).json();
     document.getElementById("ver").textContent = `${o.info.title} v${o.info.version} · paths=${Object.keys(o.paths||{}).length}`;
   } catch (e) { document.getElementById("ver").textContent = "openapi 不可达"; }
