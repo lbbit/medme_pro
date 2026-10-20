@@ -14,12 +14,16 @@ services:
       - ehr-home:/home/ehr
 
   ehr-api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"         # 宿主 mihomo(allow-lan 后监听 *:7890)，docker0 网关可达
     build:
       context: ..                                   # 仓库根（含 ehr-api + upstream-medme/packages/*）
       dockerfile: deploy/Dockerfile
       args:                                         # D1：镜像源 URL 唯一定义处，Dockerfile 只做拼装模板
         CARGO_SPARSE_URL: https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/
-        CARGO_STATIC_ROOT: https://mirrors.tuna.tsinghua.edu.cn/crates.io/static
+        CARGO_STATIC_ROOT: https://static.crates.io            # D-016: 允许联网，static 直连官方(经下方代理)
+        HTTPS_PROXY: http://host.docker.internal:7890          # 容器→宿主 mihomo(7890 mixed-port)。置空=直连
+        HTTP_PROXY: http://host.docker.internal:7890
         APT_MIRROR: https://mirrors.tuna.tsinghua.edu.cn/debian
       cache_from:
         - rust:1-slim-bookworm                      # 基础层复用本地已 pull 的官方标签(daocloud mirror)

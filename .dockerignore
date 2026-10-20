@@ -1,10 +1,10 @@
 # Build context = repo root。白名单式：只保留构建所需(D-011 upstream 整树不入库→此文件直接管文件系统 context)。
+# D-016: 在线路线为主,vendor 不进 context(兜底时手动加回此行)
 *
 !ehr-api/Cargo.toml
 !ehr-api/Cargo.lock
 !ehr-api/src/
 !ehr-api/.cargo/config.toml
-!ehr-api/vendor/
 !upstream-medme/Cargo.toml
 !upstream-medme/Cargo.lock
 !upstream-medme/packages/

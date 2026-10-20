@@ -11,6 +11,12 @@ FROM ${RUST_IMAGE} AS build
 ARG CARGO_SPARSE_URL
 ARG CARGO_STATIC_ROOT
 ARG APT_MIRROR
+ARG HTTPS_PROXY
+ARG HTTP_PROXY
+# D-016: 构建期允许联网。代理指向宿主 mihomo(host.docker.internal→docker0 网关, allow-lan 已开);
+# 置空 ARG 即全直连。cargo 走小写 env,CIO_* 是老版本 cargo 的等价名。
+ENV https_proxy=${HTTPS_PROXY} http_proxy=${HTTP_PROXY} \
+    CIO_PROXY=${HTTPS_PROXY} NO_PROXY=localhost,127.0.0.1,host.docker.internal
 
 # cargo 通道(D-007)：sparse index + static 下载双段镜像；--locked 用已提交的 Cargo.lock 固定版本
 RUN mkdir -p /usr/local/cargo && printf '[source.crates-io]\nreplace-with = "tuna"\n\n[source.tuna]\nregistry = "sparse+%s"\n\n[registries.tuna-static]\nregistry = "sparse+%s"\n' \
@@ -24,15 +30,17 @@ COPY upstream-medme/packages /src/upstream-medme/packages
 # workspace 父 Cargo.toml 覆盖子 crate —— 需要整棵 workspace 才能编译 ehr-api 的 path 依赖
 # 注意：ehr-api 不在 upstream workspace 内（独立 workspace），path 依赖按普通 crate 编译。
 #
-# 依赖获取路线（2026-10-20 实测, BUILD-NOTES 表为准）：容器网络对 static.crates.io(TUNA static 段同)不通，
-# 宿主 `cargo vendor` 已把全部依赖(199 crates, 200MB)收进 ehr-api/vendor —— 镜像内离线编译，
-# 不再依赖构建期网络（vendor 由 .cargo/config.toml 的 vendored-sources 指向，随 COPY 进入镜像）。
-COPY ehr-api/.cargo/config.toml ./ehr-api/.cargo/config.toml
-COPY ehr-api/vendor /src/ehr-api/vendor
-RUN cd ehr-api && cargo fetch --offline && echo "[证据] vendored deps resolvable offline"
+# 依赖获取(D-016): 构建期**允许联网**，主路线=在线拉包(镜像源由 compose build-args 注入上方 config.toml)。
+# ehr-api/.cargo/config.toml(若存在,vendored-sources)会覆盖 source——在线路线必须先移除它;
+# vendor/ 目录仅作网络不可达时的兜底(git-ignored,宿主 cargo vendor 可再生),在线成功则不进镜像。
+COPY ehr-api/Cargo.toml ehr-api/Cargo.lock ./ehr-api/
+RUN rm -f /src/ehr-api/.cargo/config.toml && cd ehr-api && cargo fetch && echo "[证据] deps fetched (network route)"
 
 COPY ehr-api /src/ehr-api
 # ↑ 整目录拷贝含 web/index.html（include_str! 内嵌，D-016）；Dockerfile 行尾注释会被当参数解析
+# 整目录 COPY 把 .cargo/config.toml(vendored-sources→vendor/)也带了回来，而 vendor/ 不进 context
+# (D-016 在线路线)——再次删除，让 cargo 用上一步已 fetch 的缓存。
+RUN rm -f /src/ehr-api/.cargo/config.toml
 # dry-run 探针: --print-openapi 仍校验 EHR_HOME(启动前置同一代码路径),给个临时目录即可;
 # 用 mktemp -d 而非写死路径,避免污染层。
 RUN cd ehr-api && cargo build --release --locked && \

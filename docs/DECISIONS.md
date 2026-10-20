@@ -1,5 +1,13 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-016 2026-10-20 · **撤销"构建期零外网"自我约束**（用户明示：从未加过此限制）
+背景:阶段3我自行把 Docker 构建走成离线 vendor 路线(因容器内 static.crates.io 不通),并在汇报中
+表述为约束。用户澄清:构建期允许联网,勿自设限制。**修订**:
+- vendor 目录从 git 必交物降级为可选缓存(不删,留着当网络坏时的 fallback);
+- Dockerfile 恢复"在线拉包为主、vendor 仅兜底"的直白路线,镜像源 compose build-args 可配;
+- 判据:容器网络对 crates 镜像的可达性是**运行环境事实**,按 BUILD-NOTES 实测表随网络变化更新,
+  不上升为产品约束。汇报措辞把"环境事实"与"约束"分开说。
+
 ## D-017 2026-10-20 · **阶段4 第一步：MCP server 落地（零新依赖 JSON-RPC over POST /mcp）**，6 个读侧工具 + 15 门契约/e2e 全绿
 **选型**：不引 rmcp / mcp-sdk，**手写 JSON-RPC 2.0 over HTTP**（Streamable HTTP 无 session 模式）。理由与 D-016 同形——本项目最值钱的不变量是「构建期零外网 + 依赖面最小」；MCP 用到的协议面只有 `initialize` / `tools/list` / `tools/call` / `ping`，小到可以自己钉死并被测试锁死。**可逆性保险**：将来换官方 SDK，只需保持本文件的 6 个工具契约与 `tests/mcp.rs` 的断言不变（测试全部走 JSON 层，不依赖内部实现）。
 **结构决策**：MCP 是**薄适配层**，直接复用 `ehr_api::vaults` 领域函数，与 REST handlers **同一份真相层**——不存在「MCP 里能查、REST 里查不到」的分叉。参数校验（`prepare()`）与执行（`block_in_place` 临界区）**分开**，非法参数在任何 IO（不开文件）之前被拒。
