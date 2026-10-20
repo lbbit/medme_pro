@@ -10,7 +10,6 @@ use tower::ServiceExt; // 无需真 bind 端口。注意:本测试是 CONTRACT �
 async fn contract_paths_are_routed_and_documented() {
     // 与 main.rs CONTRACT 保持手工同步的唯一副本；若两者漂移由下方 openapi 交叉检查兜底
     const CONTRACT: &[(&str, &str)] = &[
-        ("get", "/api/v1/persons/{pid}/labs"),
         ("get", "/api/v1/persons/{pid}/medications"),
         ("get", "/api/v1/persons/{pid}/conditions"),
         ("get", "/api/v1/persons/{pid}/measurements"),

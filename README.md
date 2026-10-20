@@ -113,7 +113,8 @@ docker compose -f docker-compose.ghcr.yml run --rm --no-deps ehr-api --rebuild-i
 |---|---|
 | `PLAN.md` | 阶段计划与当前状态（开工先读） |
 | `docs/DECISIONS.md` | 架构决策记录（ADR-lite，新决策在上） |
-| `docs/API-DESIGN.md` | API 设计 |
+| `docs/API.md` | **API 接口文档（人类可读，自动生成）** — 唯一事实源=运行时 OpenAPI；改接口后跑 `./api-doc-check.sh --write` 重新生成 |
+| `docs/API-DESIGN.md` | API 设计稿（"应该有什么"，非"现在有什么"） |
 | `docs/upstream-study.md` | MedMe 上游源码勘察报告 |
 | `skills/medme-ehr/references/rest-contracts.md` | REST 字段契约（人类可读） |
 | `skills/medme-ehr/references/tool-contracts.md` | MCP 工具契约 |

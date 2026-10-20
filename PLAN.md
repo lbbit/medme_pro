@@ -9,7 +9,7 @@
 - [ ] REST API（OpenAPI 自动生成）覆盖：人员 CRUD、指定人员的健康事件/报告/指标查询、数据维护写入
 - [ ] QwenPaw SKILL + MCP server 接入，AI agent 可按人查询并辅助诊断
 - [ ] 原件(CAS)+事件日志是唯一真相；派生索引可全量重建（有重建脚本证明）
-- [ ] docs/API.md 人类可读接口文档
+- [x] docs/API.md 人类可读接口文档 —— **D-025：从运行时 OpenAPI 自动生成 + 漂移门禁**
 
 ## 架构方向（初稿，待源码勘察后定稿）
 
@@ -54,7 +54,21 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
-## 当前状态（2026-10-22 · **T7 重建期写互斥已交付（D-024）· T6 全量重建已交付（D-023）**）
+## 当前状态（2026-10-22 · **T8 人类可读接口文档已交付（D-025）· 目标验收⑤销账**）
+
+- ✅ **T8 交付（目标验收⑤「docs/API.md 人类可读接口文档」销账）**：①新增 `ehr-api/src/apidoc.rs`——**从运行时 OpenAPI 渲染 Markdown**（唯一事实源 = 服务端现合成的 `/openapi.json`，不是手抄）；②新增显式命令 `ehr-api --print-api-doc`（stdout 出机器可读 Markdown、stderr 出 `[证据]` 行，沿用 D1 惯例）；③生成 `docs/API.md`（21.7KB）含 7 节：概览/认证/状态码表/端点一览/**端点详解**（参数表+请求体+响应码+curl 示例）/数据模型（components.schemas 逐字段表）/未实装端点清单；④**stub 端点逐个显式标注「⚠️ stub（501）」**（D5：状态码不许粉饰）；⑤新增漂移门禁 `api-doc-check.sh`（8 门）。
+- ✅ **顺手修掉一个真漂移（本次最有价值的产出）**：`/api/v1/persons/{pid}/labs` **早已实装**（D-011 起的 `get_labs` handler，实测 HTTP **200**），但仍挂在 `CONTRACT` 表里被 OpenAPI 标成 `stub→501` ⇒ **任何从 OpenAPI 生成的文档都会说谎**（说它是 501，实际能用）。修法：`labs` 从 CONTRACT 移出、正式进 utoipa `paths(...)`；并加**反向保险** `tests/apidoc.rs::contract_entries_really_return_501`——**CONTRACT 表里的每一条都必须真返回 501**，否则门禁红。
+- ✅ **证据链（缺一即不算交付）**：
+  - ①**`api-doc-check.sh`（新增门禁）8 门 PASS / fails=0**：`--print-api-doc` exit=0、stdout 21711 bytes、stderr 有 `[证据]` 行、**stdout 无证据行污染**（行首锚定）→ 未知参数非零退出 → **`docs/API.md` 与生成物逐字一致（21711 bytes）** → **openapi 18 个 operation 全部出现在文档里（missing=0）** → **8 个 stub 端点逐个被标注**。
+  - ②**门禁真的会红（参数生效有证据）**：手工往 `docs/API.md` 追加一行 ⇒ A3 立刻 **FAIL + 打出 diff**；还原后 fails=0。**不是「传进去没反应」也不是「一次性开关」**。
+  - ③**`cargo test --all-targets` 全绿**：新增 `tests/apidoc.rs` **3 门**（CONTRACT 每条真返 501 / 文档覆盖每个 operation 且无幽灵端点 / stub 标注+401·403·503·鉴权头齐全）+ `apidoc` 单测 **1 门**；旧门禁 **35 门未破**（lib 12→13 / auth 7 / contract 1 / mcp 10 / rebuild 3 / sha_gate 1）⇒ **合计 38 门全绿**。
+  - ④**旧 e2e 门禁全绿未被破坏**：`ehtest.sh` fails=0、`mcp-e2e.sh` fails=0、`auth-e2e.sh` fails=0、`rebuild-e2e.sh` fails=0、`rebuild-lock-e2e.sh` fails=0、`skill-rest-check.sh` fails=0、`skill-contract-check.sh` fails=0、`web-e2e.sh`（起真服务复验）fails=0。
+  - ⑤**零新依赖**：`ehr-api/Cargo.lock` 未改动（文档渲染只用 serde_json/serde，仓库已有）。
+  - ⑥**dry-run 优先**：本轮全程 `--print-api-doc`（dry-run，**不建 vault、不起服务、不落任何状态**）先跑通，再起真服务复验 web-e2e。
+- 🔄 **下一步**：①**T5 Web 管理端正式化（选型先报方案再动手）**——这是目标验收①「docker-compose 一键起 + Web 管理端」的最后一块；②T3 未打勾（其实已交付，待与 T5 合并收口）；③公网暴露前：`EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；④ghcr 包可见性仍 private；⑤真·第三方 MCP 客户端互通仍未验；⑥`.dcm`/OCR worker 未做。
+- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（`ehr-api/web/index.html` 编译期内嵌，非正式前端，无构建链）；目标验收②的 **labs 已实装**，但 `medications`/`conditions`/`measurements`/三个 `entries`/`extraction`/`audit` 仍是 **stub→501**（8 个端点，文档已逐个标注）；`docs/API.md` 是**生成物**，改接口必须跑 `./api-doc-check.sh --write`，手改会被 A3 门禁打回；文档覆盖的是 **REST 面**，`/mcp` 的工具契约仍在 `skills/medme-ehr/references/tool-contracts.md`。
+
+### 历史状态（2026-10-22 · **T7 重建期写互斥已交付（D-024）· T6 全量重建已交付（D-023）**）
 
 - ✅ **T7 交付（销账 D-023 未销账项①「重建期间禁写」互斥）**：①新增 `ehr-api/src/rebuildlock.rs`——**跨进程锁文件** `{EHR_HOME}/.rebuild.lock`（`O_CREAT|O_EXCL` 原子创建，锁内写 `pid/ts/mode`），`RebuildLock` 为 RAII 守卫（drop 即释放文件）；②`--rebuild-index`（真重建）**持锁执行** ⇒ 重建期间运行中的服务对**业务路径一律 503**（`Retry-After: 5`，body 写明「rebuild in progress (pid=…, since=…)」），公开路径（healthz/openapi.json/首页）**放行**（不碰派生层，不该被误伤）；③**并发重建直接被拒**（第二个 `--rebuild-index` 非零退出 + 报 `already held`），不排队、不静默；④**陈旧锁自动回收**（锁内 pid 进程已不存在 ⇒ 视为崩溃残留，服务面不阻塞、下一重建回收）⇒ `kill -9` 不会把服务永久锁死；⑤锁文件**放 home 根而非 `vaults/` 下** ⇒ 重建不会删掉自己的锁（不自锁）。
 - ✅ **证据链（缺一即不算交付）**：
@@ -162,3 +176,4 @@
 - [ ] T5 Web 管理端：人员/时间线/上传/检索最小可用（技术栈选型时先报方案再动手）
 - [x] T6 派生索引全量重建（目标验收④）：显式 `--rebuild-index` 命令 + 重建门禁 —— **D-023：已交付（rebuild-e2e 22 门 / tests/rebuild 3 门 / 零新依赖）**
 - [x] T7 重建期写互斥（销账 D-023 未销账项①）：跨进程锁文件 + 服务面 503 拒写 + 并发重建被拒 + 陈旧锁回收 —— **D-024：已交付（rebuild-lock-e2e 15 门 PASS / fails=0；单测 2 门；Cargo.lock 零新依赖）**
+- [x] T8 人类可读接口文档（目标验收⑤）：`docs/API.md` 由运行时 OpenAPI 自动生成 + 漂移门禁 —— **D-025：已交付（api-doc-check.sh 8 门 PASS / fails=0；tests/apidoc 3 门；单测 1 门；顺手修掉 labs 端点「文档说 501、实际 200」的漂移）**

@@ -19,6 +19,7 @@ pub use persons::{Person, PersonNew, PersonStore};
 pub mod vaults;
 pub mod rebuild; // 目标验收④：派生索引全量重建（删 medme.db → 从事件日志回放），显式命令 + 逐人计数证据
 pub mod rebuildlock; // D-024：重建期互斥（锁文件+陈旧锁回收）——把「建议停服重建」从口头约定变成机制
+pub mod apidoc; // T8：docs/API.md 人类可读接口文档的生成器（从运行时 OpenAPI 渲染，漂移门禁 api-doc-check.sh）
 mod b64; // base64 解码（写侧工具传二进制原件用；零新依赖，模块内自带单测）
 pub mod mcp; // 阶段4：MCP server（零新依赖 JSON-RPC over POST /mcp，薄适配层复用 vaults）
 pub use vaults::UploadReply; // 供 utoipa path!宏体解析(同 PersonNew 惯例)
@@ -399,7 +400,7 @@ not_implemented!(stub_person_delete, "archive person(tombstone): pending registr
         (name = "records", description = "读侧：timeline/search/documents/labs…（未实现端点先挂契约，现返回501）"),
         (name = "entries", description = "写侧：append-only 条目与文档上传（未实现端点先挂契约，现返回501）")
     ),
-    paths(healthz, list_persons, create_person, get_timeline, get_search, upload_document, list_documents,
+    paths(healthz, list_persons, create_person, get_timeline, get_search, get_labs, upload_document, list_documents,
           get_document_detail, get_document_original),
     components(schemas(Person, PersonNew, vaults::TimelineItem, vaults::SearchItem, vaults::UploadReply,
                        vaults::DocumentListItem, vaults::DocumentDetail, vaults::TextLayerMeta, vaults::ExtractionPass,
@@ -408,8 +409,12 @@ not_implemented!(stub_person_delete, "archive person(tombstone): pending registr
 struct ApiDoc;
 
 /// 已注册但未实现的端点契约：(method, path, tag, summary) —— router() 必须逐条覆盖此表
-const CONTRACT: &[(&str, &str, &str, &str)] = &[
-    ("get", "/api/v1/persons/{pid}/labs", "records", "parser::aggregate().series(LabPoint 日精度+H/L flag+evidence)"),
+///
+/// ⚠️ **入表即宣称「未实装（501）」**。端点一旦实装（有自己的 handler + utoipa path），
+/// 必须**从本表移除**，否则 OpenAPI 会把它标成 stub→501，而实际返回 200 —— 文档与现实脱节，
+/// 正是本项目最贵的漏账形态（D5：状态码不许粉饰）。反向保险见 tests/contract.rs
+/// （逐条断言本表里的端点真返回 501）。
+pub const CONTRACT: &[(&str, &str, &str, &str)] = &[
     ("get", "/api/v1/persons/{pid}/medications", "records", "meds(MedSpan)聚合"),
     ("get", "/api/v1/persons/{pid}/conditions", "records", "conditions(AggregatedCondition 病程泳道)"),
     ("get", "/api/v1/persons/{pid}/measurements", "records", "SelfMeasurement/ProfileEvent 事件回放投影(type,from,to)"),

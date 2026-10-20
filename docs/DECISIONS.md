@@ -1,5 +1,25 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-025 2026-10-22 · **T8 人类可读接口文档交付：docs/API.md 由运行时 OpenAPI 自动生成 + 漂移门禁**（目标验收⑤销账）
+**为什么做**：目标验收标准⑤「docs/API.md 人类可读接口文档」此前**根本不存在**——docs/ 下只有 `API-DESIGN.md`（那是**设计稿**，写的是「应该有什么」，不是「现在有什么」）。这一条一直空着，但它是**读者与实现之间的唯一契约面**：SKILL.md 教 agent 调哪些接口、README 教人怎么接、运维靠它排查。若要补，**最省事的做法是手写一份 Markdown**——而手写接口文档与代码漂移，正是本项目反复付出学费的经典形态（D-016「页面看着正常但数据全空」；D-011「期望值算错看起来像产品 bug」）。**手写文档在第一次改路由时就失真，而读者不会知道它已过期**——这是 D5「以为有、其实没有」的低配版。
+**关键结构决策①：文档 = 渲染物，不是手写物**。唯一事实源是**运行时 OpenAPI**（`/openapi.json`，服务端每次现合成 ⇒ 与代码必然同步，D1 的同一逻辑）；`docs/API.md` 由 `ehr-api --print-api-doc` 渲染产出并入库，另配门禁 `api-doc-check.sh` 断言**仓库内那份与生成物逐字一致**。这样「文档过期」这件事从「靠人自觉」变成「CI/门禁直接报红」。
+**关键结构决策②：门禁断言「逐字一致」而不是「包含若干关键段」**。理由同 D-022 新坑①：**断言字段、不断言整行**的反面——这里必须断言整篇，因为文档的价值恰恰在于**没有漏项、没有多说**。只抽查几个端点 = 漏掉的端点照样能蒙混过关；而 A4 门禁另做**逐 operation 覆盖核对**（openapi 18 个 operation 逐个 grep 文档标题，missing=0），两件事互补。
+**关键结构决策③：生成器必须把「未实装」写进文档，而不是让文档看起来一切正常**。8 个 stub 端点在 OpenAPI 里就标着 `stub→501`，渲染时逐个转成「⚠️ stub（501）」并单列一节。理由同 D-024 的 503 决策与 D5：**宁可让读者看到刺眼的状态，也不给一个「看着能用其实不能」的契约**。手写文档最常见的失真就是这一类——写的人记得设计稿，不记得哪些还没写。
+**关键结构决策④：顺手修掉一个真漂移——`/persons/{pid}/labs` 实装多年却仍被 OpenAPI 说成 501**。本轮生成器一落地就暴露它：该端点 D-011 就有真 handler（实测 HTTP **200**），却仍留在 `CONTRACT`（=「未实装」表）里，被 utoipa 合成时覆盖成 `stub→501`。**任何从 OpenAPI 生成的文档都会跟着说谎**——这正是「自动生成」的价值：它把隐藏的漂移**逼到台面上**。修法：`labs` 移出 CONTRACT、正式进 utoipa `paths(...)`。**并加反向保险**：`tests/apidoc.rs::contract_entries_really_return_501` 逐条断言 CONTRACT 里的端点**真返回 501**——从此「端点已实装却没从表里移除」会直接让门禁红，而不是悄悄写进文档。
+**关键结构决策⑤：`--print-api-doc` 与 `--print-openapi` 同族：stdout 出机器数据、stderr 出 `[证据]` 行**。沿用 D1 惯例（ehtest A2/F1 首跑实锤过「[证据] 前缀毒死管道」），门禁 A1 专门断言「stderr 有证据行」且「**stdout 行首无证据行**」（用 `^\[证据\]` 行首锚定，因为文档正文里会出现「[证据] 行」字样——那是说明不是污染）。
+**证据链（缺一即不算交付）**：
+①**`api-doc-check.sh`（新增门禁）8 门 PASS / fails=0**：`--print-api-doc` exit=0、stdout 21711 bytes、stderr 有 `[证据]` 行、stdout 无污染 → 未知参数非零退出（D4-b）→ **`docs/API.md` 与生成物逐字一致（21711 bytes）** → **openapi 18 个 operation 全部出现在文档（missing=0）** → **8 个 stub 端点逐个被标注**。
+②**门禁真的会红（参数生效有证据）**：手工往 `docs/API.md` 追加一行 ⇒ A3 **立刻 FAIL 并打出 diff**；还原后 fails=0。**不是「传进去没反应」，也不是「一次性开关」**。
+③**`cargo test --all-targets` 全绿**：新增 `tests/apidoc.rs` **3 门**（CONTRACT 每条真返 501 / 文档覆盖每个 operation 且无幽灵端点 / stub 标注 + 401·403·503·鉴权头齐全）+ `apidoc` 单测 **1 门**；旧门禁 **35 门未破**（lib 12→13 / auth 7 / contract 1 / mcp 10 / rebuild 3 / sha_gate 1）⇒ **合计 38 门全绿**。
+④**旧 e2e 门禁全绿未被破坏**：`ehtest.sh` / `mcp-e2e.sh` / `auth-e2e.sh` / `rebuild-e2e.sh` / `rebuild-lock-e2e.sh` / `skill-rest-check.sh` / `skill-contract-check.sh` / `web-e2e.sh`（起真服务复验）**全 fails=0**。
+⑤**零新依赖**：`ehr-api/Cargo.lock` 未改动（渲染只用仓库已有的 serde_json/serde）。
+⑥**dry-run 优先**：全程 `--print-api-doc`（不建 vault、不起服务、不落状态）先跑通，再起真服务复验 web-e2e。
+**新坑三则（D4 同族）**：
+①**`json!` 宏里嵌套对象字面量容易括号错位**——测试 fixture 用 `json!({...})` 写 `"paths": { "/a": {"get": {...}} }` 时多打一个 `}`，编译报 `mismatched closing delimiter`，而**症状是「测试失败」不是「fixture 写错」**，容易误判为渲染器有 bug。修法：fixture 改用 `serde_json::from_str(r#"..."#)`，错位会立刻指到那一行。**与 D-023 新坑②（edit_file 改 Rust 静默截断）同族：改 Rust 用「整块替换 + 编译验证」，别靠肉眼。**
+②**HTTP 方法大小写敏感**：`Request::builder().method("get")` 得到 **405 Method Not Allowed** 而非命中路由 ⇒ 门禁报「端点返回 405 而非 501」，看着像路由没挂，实为测试写法错。修法：`.method(method.to_uppercase())`。
+③**中文文档不能按字节切片**：`&md[idx..idx+800]` 在多字节字符中间会 panic（`not a char boundary`）——门禁自己的实现崩了，却长得像业务 bug。修法：按字符取 `md[idx..].chars().take(800).collect()`。**红门先查门禁自身**（D-011 教训第三次应验）。
+**未销账/下一步**：①**T5 Web 管理端正式化**（选型先报方案再动手）——目标验收①「一键起 + Web 管理端」的最后一块；②T3 实际已交付但待办未打勾（与 T5 合并收口）；③文档只覆盖 **REST 面**，`/mcp` 工具契约仍在 `skills/medme-ehr/references/tool-contracts.md`；④`docs/API.md` 是**生成物**，改接口必须 `./api-doc-check.sh --write`，手改会被 A3 打回；⑤`medications`/`conditions`/`measurements`/三个 `entries`/`extraction`/`audit` 共 8 个端点仍是 stub→501（文档已逐个标注）；⑥`EHR_BIND_ADDR` 改 `0.0.0.0` 前必须先设 token；⑦ghcr 包可见性仍 private；⑧真·第三方 MCP 客户端互通仍未验；⑨`.dcm`/OCR worker 未做。
+
 ## D-024 2026-10-22 · **T7 重建期写互斥交付：跨进程锁文件 + 服务面 503 拒写 + 陈旧锁回收**（销账 D-023 未销账项①）
 **为什么做**：D-023 把「派生索引可全量重建」做成了真机制，但留了一句口头约定——「重建是离线动作，建议停服重建」。**口头约定不是机制**：服务不会因为有人正在跑 `--rebuild-index` 就自动让路，重建与并发写撞在一起时，会出现「重建把刚写进去的派生状态抹掉」或「半写状态被回放覆盖」。这是典型的「以为有保护、其实没有」漏账形态（D5）。本轮把它从建议变成机制。
 **关键结构决策①：互斥用「锁文件 + 原子创建」，不用 flock，也不用 SQLite 锁**。`OpenOptions::create_new(true)` 的 `O_CREAT|O_EXCL` 语义在 POSIX 上是原子的 ⇒ 天然跨进程互斥，**零新依赖**（不引 libc，`Cargo.lock` 未动）。拒绝 flock 的理由：libc 不是直接依赖，且 flock 在容器/挂载卷上的跨宿主语义要额外验证；拒绝 SQLite 锁的理由很硬：**重建要删的正是 SQLite 文件，锁不能住在被删的对象里**。

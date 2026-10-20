@@ -14,6 +14,7 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut addr_arg: Option<String> = None;
     let mut print_openapi = false;
+    let mut print_api_doc = false;
     let mut rebuild_pid: Option<String> = None;
     let mut rebuild_all_flag = false;
     let mut rebuild_dry = false;
@@ -22,6 +23,8 @@ async fn main() -> Result<()> {
             addr_arg = Some(v.to_string());
         } else if a == "--print-openapi" {
             print_openapi = true;
+        } else if a == "--print-api-doc" {
+            print_api_doc = true;
         } else if a == "--rebuild-index" {
             rebuild_all_flag = true;
         } else if a == "--rebuild-index=dry-run" {
@@ -31,7 +34,7 @@ async fn main() -> Result<()> {
             rebuild_pid = Some(v.to_string());
         } else {
             eprintln!(
-                "[ERROR] unknown argument: {a}\nusage: ehr-api [--addr=HOST:PORT] [--print-openapi] [--rebuild-index | --rebuild-index=dry-run | --rebuild-index=PID]\n(env EHR_HOME, EHR_ADDR, EHR_API_TOKENS, EHR_API_TOKEN, RUST_LOG)"
+                "[ERROR] unknown argument: {a}\nusage: ehr-api [--addr=HOST:PORT] [--print-openapi] [--print-api-doc] [--rebuild-index | --rebuild-index=dry-run | --rebuild-index=PID]\n(env EHR_HOME, EHR_ADDR, EHR_API_TOKENS, EHR_API_TOKEN, RUST_LOG)"
             );
             std::process::exit(2);
         }
@@ -41,12 +44,15 @@ async fn main() -> Result<()> {
     // dry-run 与 serve 都要求 EHR_HOME 已存在——只校验不创建(dry-run 不落任何状态；
     // serve 仅在其下建派生 vaults/ 子目录，registry/persons.jsonl 首写时才建)。
     // T4：鉴权表从 env 读（EHR_API_TOKENS / EHR_API_TOKEN）。格式错误 ⇒ 启动失败（D5：配置错误不静默退化）。
-    let (st, token_set) = ehr_api::prepare_home_and_state_auth(&home_in, !print_openapi)?;
+    let (st, token_set) =
+        ehr_api::prepare_home_and_state_auth(&home_in, !(print_openapi || print_api_doc))?;
     // D1：生效地址单点计算一次，[证据]行与实际 bind 用同一个值。
     let addr = addr_arg.or_else(|| std::env::var("EHR_ADDR").ok()).unwrap_or_else(|| "127.0.0.1:8443".into());
 
     let mode = if print_openapi {
         "dry-run(print-openapi)"
+    } else if print_api_doc {
+        "dry-run(print-api-doc)"
     } else if rebuild_all_flag || rebuild_pid.is_some() {
         "rebuild"
     } else {
@@ -73,6 +79,19 @@ async fn main() -> Result<()> {
         return serde_json::to_writer_pretty(std::io::stdout(), &ehr_api::openapi_json())
             .context("write openapi json")
             .map_err(anyhow::Error::from);
+    }
+
+    // T8：渲染人类可读接口文档（docs/API.md）。stdout 同样是机器数据，证据行走 stderr。
+    if print_api_doc {
+        let md = ehr_api::apidoc::render(&ehr_api::openapi_json());
+        print!("{md}");
+        eprintln!(
+            "[证据] ehr-api v{} | mode=dry-run(print-api-doc) | EHR_HOME={} | bytes={}",
+            env!("CARGO_PKG_VERSION"),
+            st.home.display(),
+            md.len()
+        );
+        return Ok(());
     }
 
     // rebuild 模式：离线动作（不需要 HTTP 服务），只操作 EHR_HOME 下的派生层。
