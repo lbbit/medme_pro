@@ -323,6 +323,86 @@ async fn mcp_new_read_tools_validate_filters_and_errors() {
     assert_eq!(notes["count"], 0, "kind filter must really filter: {notes}");
 }
 
+/// D-031：MCP 侧补齐审计工具 `get_audit`。
+///
+/// 判据（与 D-030 未销账②一致）：**必须复用同一 `audit_view()`**，不得另写一份判据；
+/// 硬证据不是「两边都有数据」，而是 **MCP 与 REST 的审计回执逐字相等**（count / entries / sha256）。
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_audit_matches_rest_audit_view() {
+    let app = fixture("d031");
+
+    // 建档 + 传一份原件（⇒ registry 侧有 create、vault 侧有导入）
+    let created = app.clone().oneshot(
+        Request::builder().method("POST").uri("/api/v1/persons")
+            .header("content-type","application/json")
+            .body(Body::from(json!({"name":"D031审计"}).to_string())).unwrap()
+    ).await.unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let person: Value = serde_json::from_slice(&axum::body::to_bytes(created.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let pid = person["id"].as_str().unwrap().to_string();
+
+    let sample = "姓名：审计甲\n检查项目：血常规\n白细胞计数 11.2 10^9/L 偏高\n";
+    let boundary = "X-BOUND";
+    let body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"血常规.txt\"\r\nContent-Type: text/plain\r\n\r\n{sample}\r\n--{boundary}--\r\n");
+    let up = app.clone().oneshot(
+        Request::builder().method("POST").uri(format!("/api/v1/persons/{pid}/documents"))
+            .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+            .body(Body::from(body)).unwrap()
+    ).await.unwrap();
+    assert_eq!(up.status(), StatusCode::OK);
+    let upv: Value = serde_json::from_slice(&axum::body::to_bytes(up.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let sha = upv["content_hash"].as_str().unwrap().to_string();
+
+    // REST 基准
+    let rest: Value = serde_json::from_slice(&axum::body::to_bytes(
+        app.clone().oneshot(Request::builder().uri("/api/v1/audit").body(Body::empty()).unwrap())
+            .await.unwrap().into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    // MCP 侧
+    let m = tool_data(&call_tool(&app, "get_audit", json!({})).await);
+
+    // 同源硬证据：MCP 与 REST 的回执**逐字相等**（同一个 audit_view()，不是两套判据）
+    assert_eq!(m, rest, "MCP audit must equal REST audit (same audit_view()): {m} vs {rest}");
+    assert!(rest["count"].as_u64().unwrap_or(0) >= 2,
+            "two truth layers must both be present (registry create + vault import): {rest}");
+
+    // 两层真相层都在
+    let sources: Vec<&str> = m["entries"].as_array().unwrap().iter()
+        .map(|e| e["source"].as_str().unwrap_or("")).collect();
+    assert!(sources.contains(&"registry"), "registry layer missing: {m}");
+    assert!(sources.contains(&"vault"), "vault layer missing: {m}");
+
+    // vault 侧的导入条目带内容哈希，且逐字等于上传原件的 sha256
+    let vault_entry = m["entries"].as_array().unwrap().iter()
+        .find(|e| e["source"] == "vault").expect("a vault entry");
+    assert_eq!(vault_entry["sha256"], sha, "vault import entry must carry the original's sha256");
+
+    // registry 侧**不臆造**内容哈希（键缺省，不是空串也不是编的）
+    let reg_entry = m["entries"].as_array().unwrap().iter()
+        .find(|e| e["source"] == "registry").expect("a registry entry");
+    assert!(reg_entry.get("sha256").is_none(), "registry events have no content hash: {reg_entry}");
+
+    // 参数真进判据：person 过滤 ⇒ 只剩该人
+    let by_person = tool_data(&call_tool(&app, "get_audit", json!({"person": pid})).await);
+    assert!(by_person["count"].as_u64().unwrap_or(0) > 0);
+    for e in by_person["entries"].as_array().unwrap() {
+        assert_eq!(e["person_id"], pid, "person filter must really filter: {by_person}");
+    }
+    // 未知人 ⇒ 0 条（**不是**错误码：审计是全局视图）
+    let unknown = tool_data(&call_tool(&app, "get_audit", json!({"person":"00000000-0000-0000-0000-000000000000"})).await);
+    assert_eq!(unknown["count"], 0, "unknown person must yield 0 entries, not an error: {unknown}");
+
+    // op 过滤真进判据：op=create 只剩 registry 侧 create
+    let by_op = tool_data(&call_tool(&app, "get_audit", json!({"op":"create"})).await);
+    assert!(by_op["count"].as_u64().unwrap_or(0) > 0);
+    for e in by_op["entries"].as_array().unwrap() {
+        assert_eq!(e["op"], "create", "op filter must really filter: {by_op}");
+    }
+    // 大小写不敏感（与 REST 同语义）
+    let upper = tool_data(&call_tool(&app, "get_audit", json!({"op":"CREATE"})).await);
+    assert_eq!(upper["count"], by_op["count"], "op filter must be case-insensitive: {upper}");
+}
+
 /// MCP 面不污染 REST 契约：paths 数不变（≥16），且未把 /mcp 塞进 OpenAPI。
 #[tokio::test(flavor = "multi_thread")]
 async fn mcp_route_does_not_disturb_rest_contract() {    let app = fixture("contract");
@@ -442,7 +522,7 @@ async fn mcp_write_tools_are_advertised() {
     for want in ["create_person", "upload_document"] {
         assert!(names.contains(&want), "{want} must be advertised, got {names:?}");
     }
-    assert_eq!(tools.len(), 11, "9 read + 2 write tools (D-029): {names:?}");
+    assert_eq!(tools.len(), 12, "10 read + 2 write tools (D-031 adds get_audit): {names:?}");
 }
 
 /// 测试侧 base64 编码器（生产侧只需解码；这里独立实现一遍，避免「用被测代码造输入」）。

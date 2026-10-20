@@ -31,9 +31,9 @@ jq_() { python3 -c "import json,sys;d=json.load(sys.stdin);$1"; }
 V=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | jq_ 'print(d["result"]["protocolVersion"])')
 gate "protocolVersion" "$V" "2025-06-18"
 
-# 2) tools/list = 11（9 读 + 2 写；D-029 补齐 meds/conditions/measurements 三个读侧工具）
+# 2) tools/list = 12（10 读 + 2 写；D-029 补 meds/conditions/measurements，D-031 补 get_audit）
 N=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | jq_ 'print(len(d["result"]["tools"]))')
-gate "tools_count" "$N" "11"
+gate "tools_count" "$N" "12"
 
 # 3) 建档 + 上传（REST 侧写入 ⇒ MCP 侧必须读到同一真相层）
 PID=$(curl -s -X POST "127.0.0.1:$PORT/api/v1/persons" -H 'content-type: application/json' \
@@ -82,6 +82,23 @@ gate "measurements.bad_kind=-32602" "$V" "-32602"
 # 未知人 ⇒ -32001
 V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":\"tools/call\",\"params\":{\"name\":\"get_conditions\",\"arguments\":{\"person_id\":\"nope\"}}}" | jq_ 'print(d["result"]["_code"])')
 gate "conditions.unknown_person=-32001" "$V" "-32001"
+
+# 4c) D-031：审计工具（与 REST 同一 `audit_view()`，不得另写一份判据）
+AV=$(rpc '{"jsonrpc":"2.0","id":27,"method":"tools/call","params":{"name":"get_audit","arguments":{}}}' | jq_ 'd=d["result"]["structuredContent"];src=sorted({e["source"] for e in d["entries"]});print(d["count"]>=2, src==["registry","vault"])' | tr ' ' '/')
+gate "audit.two_layers_present" "$AV" "True/True"
+# 同源硬证据：MCP 与 REST 的 count 逐字相等
+RC=$(curl -s "127.0.0.1:$PORT/api/v1/audit" | jq_ 'print(d["count"])')
+MC=$(rpc '{"jsonrpc":"2.0","id":28,"method":"tools/call","params":{"name":"get_audit","arguments":{}}}' | jq_ 'print(d["result"]["structuredContent"]["count"])')
+gate "audit.mcp_equals_rest_count" "$MC" "$RC"
+# person 过滤真进判据
+V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":29,\"method\":\"tools/call\",\"params\":{\"name\":\"get_audit\",\"arguments\":{\"person\":\"$PID\"}}}" | jq_ 'd=d["result"]["structuredContent"];print(d["count"]>0, all(e["person_id"]=="'$PID'" for e in d["entries"]))' | tr ' ' '/')
+gate "audit.person_filter" "$V" "True/True"
+# op 过滤真进判据（大小写不敏感）
+V=$(rpc '{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"get_audit","arguments":{"op":"CREATE"}}}' | jq_ 'd=d["result"]["structuredContent"];print(d["count"], all(e["op"]=="create" for e in d["entries"]))' | tr ' ' '/')
+gate "audit.op_filter_case_insensitive" "$V" "1/True"
+# 未知人 ⇒ 0 条（**不是**错误：审计是全局视图）
+V=$(rpc '{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"get_audit","arguments":{"person":"00000000-0000-0000-0000-000000000000"}}}' | jq_ 'print(d["result"]["structuredContent"]["count"])')
+gate "audit.unknown_person_zero" "$V" "0"
 
 # 5) 错误语义（agent 要能据此换人/改参，而不是重试）
 V=$(rpc '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"get_timeline","arguments":{"person_id":"nope"}}}' | jq_ 'd=d["result"];print(d["isError"],d["_code"])' | tr ' ' '/')

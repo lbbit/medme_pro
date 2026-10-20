@@ -64,16 +64,16 @@ if echo "$DETAIL" | grep -q '"extraction"'; then
   else echo "  FAIL extraction 缺 parseable"; fails=$((fails+1)); fi
 else echo "  PASS detail.extraction_optional_absent(可缺省,文档已载明)"; fi
 
-# 2) SKILL.md 里提到的 11 个工具名必须都在 tools/list 里公布（D-029：+medications/conditions/measurements）
+# 2) SKILL.md 里提到的 12 个工具名必须都在 tools/list 里公布（D-031：+get_audit）
 TOOLS=$(rpc '{"jsonrpc":"2.0","id":7,"method":"tools/list"}')
 miss=""
-for t in list_persons get_timeline search_records get_labs get_medications get_conditions get_measurements list_documents get_document_detail create_person upload_document; do
+for t in list_persons get_timeline search_records get_labs get_medications get_conditions get_measurements get_audit list_documents get_document_detail create_person upload_document; do
   case "$TOOLS" in *"\"$t\""*) ;; *) miss="$miss $t";; esac
   grep -q "$t" "$SKILL" || { echo "  FAIL SKILL.md 未提工具 $t"; fails=$((fails+1)); }
 done
-[ -z "$miss" ] && echo "  PASS tools_declared_in_skill = 11" || { echo "  FAIL tools/list 缺:$miss"; fails=$((fails+1)); }
+[ -z "$miss" ] && echo "  PASS tools_declared_in_skill = 12" || { echo "  FAIL tools/list 缺:$miss"; fails=$((fails+1)); }
 NTOOLS=$(echo "$TOOLS" | jq_ 'print(len(d["result"]["tools"]))')
-gate "tools_count" "$NTOOLS" "11"
+gate "tools_count" "$NTOOLS" "12"
 
 # 2b) 写侧：SKILL.md 承诺的写侧字段名必须出现在真实写侧响应中
 B64=$(printf '姓名：钱九\n检查项目：血常规\n白细胞计数 13.1 10^9/L 偏高\n' | base64 -w0)
@@ -100,6 +100,13 @@ check_fields "conditions.fields"  "person_id,documents_scanned,condition_count,c
 if echo "$NRESP" | grep -q '"onset"'; then echo "  PASS conditions.onset_has_value_if_present"
 else echo "  PASS conditions.onset_optional_absent(可缺省,文档已载明)"; fi
 check_fields "measurements.fields" "person_id,count,measurements,document_id,kind,taken_at,docref,payload_readable" "$NRESP"
+
+# 2d) D-031：审计工具的字段名必须逐个出现在真实 MCP 响应中
+ARESP=$(rpc '{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"get_audit","arguments":{}}}')
+check_fields "audit.fields" "persons_scanned,count,entries,source,op,ts,person_id" "$ARESP"
+# 未知人过滤 ⇒ 0 条（不是错误）：审计是全局视图
+V=$(rpc '{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"get_audit","arguments":{"person":"00000000-0000-0000-0000-000000000000"}}}' | jq_ 'print(d["result"]["structuredContent"]["count"])')
+gate "audit.unknown_person_zero" "$V" "0"
 
 # 3) SKILL.md 与 tool-contracts.md 里写的错误码必须真的对得上
 for code in -32602 -32601 -32001 -32002 -32003; do

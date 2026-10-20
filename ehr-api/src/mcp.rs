@@ -14,7 +14,7 @@
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::{auth::Scope, b64, entries, vaults, ApiError, AppState, PersonNew, StatusCode};
+use crate::{audit, auth::Scope, b64, entries, vaults, ApiError, AppState, PersonNew, StatusCode};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -84,7 +84,7 @@ pub fn handle_message_with_scope(
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "medme-ehr", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "多人电子健康档案工具集。读侧：person_id 为 UUID；先用 list_persons 拿人，再用 search_records / get_labs / get_medications / get_conditions / get_measurements / get_timeline 查档。写侧：create_person 建档、upload_document 传原件（二进制用 base64）。所有内容来自原件 CAS+事件日志，text/extraction 透传不猜。",
+            "instructions": "多人电子健康档案工具集。读侧：person_id 为 UUID；先用 list_persons 拿人，再用 search_records / get_labs / get_medications / get_conditions / get_measurements / get_timeline / get_audit 查档。写侧：create_person 建档、upload_document 传原件（二进制用 base64）。所有内容来自原件 CAS+事件日志，text/extraction 透传不猜。",
         })),
         "ping" => ok_obj(id.clone(), json!({})),
         "notifications/initialized" | "initialized" => ok_obj(id.clone(), json!({})),
@@ -227,6 +227,13 @@ fn call_tool(st: &Arc<AppState>, id: Value, name: &str, args: &Value) -> Value {
                 .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
             serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
         }
+        Prepared::Audit { ref q } => {
+            // ⚠️ 审计是**全局视图**：不按 person 判存在（问「某人有哪些审计条目」答「没有」是合法答案，
+            //    与 REST 面口径一致：未知人过滤 ⇒ 0 条，不是 404/500）。
+            let reply = audit::audit_view(&st.home, q)
+                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+            serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
         Prepared::Documents { ref pid } => {
             require_person(st, pid)?;
             let vault = vaults::open_person_vault(&st.home, pid)?;
@@ -301,6 +308,8 @@ enum Prepared {
     Conditions { pid: String },
     /// D-029：手动条目回放投影（与 REST 同源：同一 `measurements_projection`）
     Measurements { pid: String, q: entries::MeasurementsQuery },
+    /// D-031：审计视图（与 REST 同源：同一 `audit_view()`，不得另写一份判据）
+    Audit { q: audit::AuditQuery },
     Documents { pid: String },
     DocumentDetail { pid: String, sha: String },
     /// 写侧：建档（person registry append-only 真相层）
@@ -349,6 +358,18 @@ fn prepare(name: &str, args: &Value) -> Result<Prepared, ArgErr> {
             },
         },
         "list_documents" => Prepared::Documents { pid: str_arg(args, "person_id")?.to_string() },
+        // D-031：审计视图——**与 REST 同一 `audit_view()`**（同一个语义只允许一处实现，D2）。
+        // `person`/`op` 都是**可选**（缺省 = 全部人 / 全部动作）；空串按缺省处理。
+        "get_audit" => Prepared::Audit {
+            q: audit::AuditQuery {
+                person: match opt_str_arg(args, "person")? {
+                    Some(p) => Some(p),
+                    // 别名：与其它工具的 `person_id` 同名习惯一致（同一语义两个键名，不是两份判据）
+                    None => opt_str_arg(args, "person_id")?,
+                },
+                op: opt_str_arg(args, "op")?,
+            },
+        },
         "get_document_detail" => Prepared::DocumentDetail {
             pid: str_arg(args, "person_id")?.to_string(),
             sha: str_arg(args, "sha256")?.to_string(),
@@ -433,6 +454,14 @@ fn tool_schemas() -> Vec<Value> {
                 "from": { "type": "string", "description": "起始日期(含) YYYY-MM-DD" },
                 "to": { "type": "string", "description": "结束日期(含) YYYY-MM-DD" }
             }, "required": ["person_id"] }
+        }),
+        json!({
+            "name": "get_audit",
+            "description": "审计视图（发生过什么，不是现在是什么）。两层真相层：source=registry（人员主数据：建档/改档/归档，不折叠）+ source=vault（上游内核事件日志：导入/导出/分享/删除，复用上游判据）。可选 person/op 真过滤；未知人过滤得 0 条（不是错误）。",
+            "inputSchema": { "type": "object", "properties": {
+                "person": { "type": "string", "description": "只看某人（person_id）。缺省 = 全部人" },
+                "op": { "type": "string", "description": "只看某动作（大小写不敏感）：create|update|delete（registry 侧）或 导入|导出|分享|删除（vault 侧）" }
+            }, "required": [] }
         }),
         json!({
             "name": "list_documents",

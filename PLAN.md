@@ -34,7 +34,7 @@
 | 1 | POC：单人不带 UI 跑通内核导入→查询(library级+346单测全绿) | poc/src/import_demo.rs 9步验收全PASS(D-009) | ✅ GREEN(2026-10-19) |
 | 2 | person 层设计 + ehr-api 骨架（axum, OpenAPI）——**已完成** | /api/v1 MVP；curl版抽查对齐POC证据链(D-011:34门全绿)；读侧聚合面已毕业 labs(D-025)/medications(D-026)/conditions(D-027)；写侧手动条目已毕业 entries×3 + measurements(D-028)；审计视图已毕业 audit(D-030) | ✅ GREEN(2026-10-24) |
 | 3 | docker-compose（server+web）+ Web 管理端最小版 | 一键部署可用 | ✅ GREEN(2026-10-20，D-014/D-016) |
-| 4 | MCP server + QwenPaw SKILL | agent 可按人查档/写档 | 🔄 MCP **读侧 9 + 写侧 2 = 11 工具已交付**（D-017/D-019/**D-029**）；SKILL REST 面已扩到 **15 命令**（含 D-028 四个新命令），注册进 skill_pool 待验 |
+| 4 | MCP server + QwenPaw SKILL | agent 可按人查档/写档 | 🔄 MCP **读侧 10 + 写侧 2 = 12 工具已交付**（D-017/D-019/**D-029**/**D-031**）；SKILL REST 面已扩到 **16 命令**（含 D-028 四个新命令），注册进 skill_pool 待验 |
 | 5 | 认证与多客户端（token/token scope），手机客户端预留 | 安全基线 | 🔄 T4 静态 Bearer token 已交付（D-022）；多客户端/手机端待做 |
 
 ## 已知事实（已核实，来源 README/GitHub 页面 2026-10-19）
@@ -54,7 +54,19 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
-## 当前状态（2026-10-25 · **T13 审计端点已实装（D-030）· stub 端点 2→1**）
+## 当前状态（2026-10-26 · **T14 MCP 侧补齐审计工具 `get_audit`（D-031）· MCP 工具数 11→12**）
+
+- ✅ **T14 交付（MCP 侧补齐审计工具 `get_audit` · MCP 工具数 11→12 · 读侧 9→10）**：①**复用同一 `audit_view()`，不另写一份判据**（D-030 未销账②的原文要求）——MCP 工具**直接调用** REST handler 调的那个 `ehr_api::audit::audit_view()`，**零新判据、零新解析路径**；硬证据不是「两边都有数据」（那可以靠两套实现蒙混），而是 **MCP 返回的审计回执与 REST 返回的审计回执逐字相等**（`persons_scanned`/`count`/`entries[]` 全量相等）；②**审计是全局视图 ⇒ MCP 侧不做「人是否存在」的存在性检查**：问「某人有哪些审计条目」答「0 条」是合法答案（与 REST 同口径）⇒ **不返回 -32001**（否则同语义在两面分叉，agent 无法区分「查无此人」与「此人无记录」）；③**参数可选、别名只有一个**：`person`/`op` 都可选（缺省 = 全部人 / 全部动作），`person_id` 是 `person` 的**入参别名**（不是第二份判据）；④**口径分层在 MCP 面同样如实暴露**：`entries[].source` 区分 `registry`/`vault`；registry 侧无内容哈希 ⇒ `sha256` **键缺省**（不编）；vault 侧导入条目的 `sha256` **逐字等于**原件 sha256；上游 `audit_log()` 不展示手动条目的合成导入 ⇒ 笔记在 vault 侧**看不到行**（**不造事件补齐**）。
+- ✅ **证据链（缺一即不算交付）**：
+  - ①**`mcp-e2e.sh` 真进程 34 门 PASS / fails=0**：`tools_count` **11→12**（数字变化即客观证据）；**M1 两层真相层都在**（`sources == [registry, vault]`）；**M2 同源硬证据**（MCP `count` == REST `count` == **5**）；**M3 参数真进判据**（`person` 过滤 ⇒ 条目 `person_id` 全匹配；`op=CREATE`（大写）⇒ 1 条且全为 `create` ⇒ 大小写不敏感）；**M4 未知人 ⇒ 0 条**（不是错误码）。
+  - ②**`cargo test --all-targets` 全绿**：新增 `tests/mcp.rs::mcp_audit_matches_rest_audit_view` **1 门**（MCP 与 REST 回执**逐字相等** + 两层都在 + vault sha256 == 原件 sha256 + registry **无** sha256 键 + person/op 过滤真生效 + 未知人 0 条）+ 旧门禁未破 ⇒ 合计 **61 门全绿**（lib 18 / apidoc 3 / audit 3 / auth 7 / conds 4 / contract 1 / entries 6 / **mcp 13** / meds 2 / rebuild 3 / sha_gate 1）。
+  - ③**旧 e2e 门禁全绿未被破坏**：`ehtest.sh`(34) / `mcp-e2e.sh`(34) / `auth-e2e.sh` / `audit-e2e.sh` / `entries-e2e.sh` / `conds-e2e.sh` / `meds-e2e.sh` / `rebuild-e2e.sh` / `rebuild-lock-e2e.sh` / `skill-rest-check.sh` / `skill-contract-check.sh`（扩到 **12 工具 + 8 条新断言**）/ `api-doc-check.sh`(8) / `web-e2e.sh`（起真服务复验）**全 fails=0**。
+  - ④**零新依赖**：`ehr-api/Cargo.lock`/`Cargo.toml` **未改动**（依赖包数 **204** 不变，可验事实）。
+  - ⑤**dry-run 优先**：先跑库级 `cargo test --all-targets`（不起服务、不落状态）与 release 构建，再起真进程跑 mcp-e2e 与旧门禁复验。
+  - ⑥**参数/状态生效有证据**：`tools_count` **11→12**；MCP 审计 `count` **== REST `count` == 5**；`op=CREATE` ⇒ **1**；未知人 ⇒ **0**。
+  - ⑦**skill 层同步暴露**：`SKILL.md`（工具数 11→12 + REST↔MCP 对照表补 `audit` 行）+ `references/tool-contracts.md`（`get_audit` 契约行 + 「审计口径」小节）+ `skill-contract-check.sh` 扩到 12 工具 + 2 条新断言 ⇒ **agent 侧真的能调**。
+- 🔄 **下一步**：①**stub 端点只剩 1 个**：`PUT /documents/{sha}/extraction`（**新功能** ⇒ 需单独设计字段级 evidence 锚点）——但**建议下一个里程碑仍是 T5 Web 管理端正式化**（目标验收①最后一块，选型先报方案再动手）；②**MCP 工具数在门禁里硬编码三处**（D-031 新坑②）——应改为从 `tools/list` 动态取值；③「家庭自测趋势」专用视图仍未做；④公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑤ghcr 包可见性仍 private；⑥真·第三方 MCP 客户端互通仍未验；⑦`.dcm`/OCR worker 未做；⑧**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在。
+
 
 - ✅ **T13 交付（`GET /api/v1/audit` 从 stub→501 毕业为真实现 · stub 端点 2→1）**：①**口径分层、不假装只有一层**——本服务有**两层真相层**，审计要回答的是「**发生过什么**」而不是「现在是什么」：`source=registry`（person registry 的 append-only **原始事件**，create/update/delete，**不折叠**——折叠会把 update 历史抹平、把 delete 墓碑藏掉）+ `source=vault`（上游内核事件日志）；②**vault 侧复用上游判据，不另写一份**：直接调用上游 `Vault::audit_log()`（上游自己的投影：导入/导出/分享/删除；`DocumentAdded`/`OcrAdded`/`ExtractionAdded` 是内部派生写入，上游刻意跳过）⇒ **本层不另写「哪些事件算审计条目」的判据**（D2：一个语义只允许一处实现），硬证据不是「两边都有数据」而是 **vault 侧条目与上游 `audit_log()` 逐条相等**（动作名/时刻/内容哈希）；③**registry 侧不臆造内容哈希**（registry 事件没有内容哈希 ⇒ `sha256` 缺省，不编）；④**参数真进判据**：`?person=`/`?op=` 是真过滤（`op` 大小写不敏感；vault 侧用上游中文动作名 `导入`/`导出`/`分享`/`删除`，registry 侧用 `create`/`update`/`delete`——**两种命名并存是如实的**，不擅自归一上游口径）；⑤**一条诚实的边界写进文档**（不粉饰）：上游 `audit_log()` **不展示**手动条目的合成导入 ⇒ 「写了一条自测/笔记」在 `source=vault` 里**看不到行**，只能在该人的 timeline/documents 里看到——**不造一条「写入」事件来补齐**（那是编造）。
 - ✅ **证据链（缺一即不算交付）**：

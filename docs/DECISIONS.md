@@ -1,5 +1,24 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-031 2026-10-26 · **T14 MCP 侧补齐审计工具 `get_audit`（MCP 工具数 11→12）——复用同一 `audit_view()`，不另写一份判据**
+**为什么做**：D-030 未销账②点名的缺口是「MCP 侧还没有审计工具（REST 独有）」⇒ 只吃 MCP 的宿主**拿不到「发生过什么」**——它能查档案现在长什么样，却查不到谁动过、什么时候导入过。审计是「写入动作留痕」这一目标验收②的最后一环，缺了它，agent 侧仍有一块黑箱。本轮补齐，且**不新建任何判据**。
+**关键结构决策①：必须复用同一 `audit_view()`**（D-030 未销账②的原文要求：「若补 **须复用同一 `audit_view()`**，不得另写一份判据」）。MCP 工具 `get_audit` **直接调用** `ehr_api::audit::audit_view()`（REST handler 调的那个函数），**零新判据、零新解析路径**。硬证据不是「两边都有数据」（那可以靠两套实现蒙混），而是 **MCP 返回的审计回执与 REST 返回的审计回执逐字相等**（`persons_scanned`/`count`/`entries[]` 全量相等）——已由 `tests/mcp.rs::mcp_audit_matches_rest_audit_view` 钉死。
+**关键结构决策②：审计是**全局视图**，MCP 侧**不做「人是否存在」的存在性检查**。问「某人有哪些审计条目」答「0 条」是**合法答案**（与 REST 面口径一致：未知人过滤 ⇒ 0 条，不是 404/500）⇒ 故 MCP 侧**不返回 -32001**（否则同一个语义在两个面上分叉，agent 无法判断「查无此人」与「此人无记录」的区别）。
+**关键结构决策③：参数可选、别名只有一个**。`person`/`op` 都是**可选**（缺省 = 全部人 / 全部动作）；`person_id` 作为 `person` 的**别名**（与其它工具的 `person_id` 命名习惯一致）——「同一语义两个键名」不是两份判据，只是入参别名，判据仍在 `audit_view()` 一处。
+**关键结构决策④：口径分层在 MCP 面同样如实暴露**。返回的 `entries[]` 带 `source` 字段区分 `registry`/`vault` 真相层；registry 侧**没有**内容哈希 ⇒ `sha256` **键缺省**（不编）；vault 侧导入条目的 `sha256` **逐字等于**上传原件的 sha256。上游 `audit_log()` **不展示**手动条目的合成导入 ⇒ 「写了一条笔记」在 vault 侧**看不到行**——**不造事件补齐**（沿用 D-030 决策⑤的诚实边界）。
+**证据链（缺一即不算交付）**：
+①**`mcp-e2e.sh` 真进程 34 门 PASS / fails=0**：`tools_count` **11→12**（数字变化即客观证据）；**M1 两层真相层都在**（`sources == [registry, vault]`）；**M2 同源硬证据**（MCP `count` == REST `count` == **5**）；**M3 参数真进判据**（`?person` 过滤 ⇒ 全部条目 `person_id` 匹配；`op=CREATE`（大写）⇒ 1 条且全为 `create` ⇒ 大小写不敏感）；**M4 未知人 ⇒ 0 条**（不是错误码）；旧门禁（protocolVersion/9 个旧工具/写侧闭环/幂等/坏 base64/-32003/openapi paths=16）**全未破**。
+②**`cargo test --all-targets` 全绿**：新增 `tests/mcp.rs::mcp_audit_matches_rest_audit_view` **1 门**（MCP 回执与 REST 回执**逐字相等** + 两层真相层都在 + vault 条目 sha256 == 原件 sha256 + registry 条目**无** sha256 键 + person/op 过滤真生效 + 未知人 0 条）+ 旧门禁**未破** ⇒ 合计 **61 门全绿**（lib 18 / apidoc 3 / audit 3 / auth 7 / conds 4 / contract 1 / entries 6 / **mcp 13** / meds 2 / rebuild 3 / sha_gate 1）。
+③**旧 e2e 门禁全绿未被破坏**：`ehtest.sh`(34 门) / `mcp-e2e.sh`(34 门) / `auth-e2e.sh` / `audit-e2e.sh` / `entries-e2e.sh` / `conds-e2e.sh` / `meds-e2e.sh` / `rebuild-e2e.sh` / `rebuild-lock-e2e.sh` / `skill-rest-check.sh` / `skill-contract-check.sh`（扩到 **12 工具 + 8 条新断言**）/ `api-doc-check.sh`(8 门) / `web-e2e.sh`（起真服务复验，fails=0）**全 fails=0**。
+④**零新依赖**：`ehr-api/Cargo.lock` 与 `Cargo.toml` **未改动**（依赖包数 **204** 不变，可验事实）。
+⑤**dry-run 优先**：先跑库级 `cargo test --all-targets`（不起服务、不落状态）与 release 构建，再起真进程跑 mcp-e2e 与旧门禁复验。
+⑥**参数/状态生效有证据**：`tools_count` **11→12**；MCP 审计 `count` **== REST 审计 `count` == 5**；`op=CREATE` ⇒ **1**；`op=create` ⇒ **1**；未知人 ⇒ **0**（不是 404/500）。
+⑦**skill 层同步暴露**：`skills/medme-ehr/SKILL.md`（工具数 11→12 + REST↔MCP 对照表补 `audit` 行）+ `references/tool-contracts.md`（`get_audit` 契约行 + 「审计口径」小节：两层真相层/哈希缺省/未知人 0 条）+ `skill-contract-check.sh` 扩到 **12 工具 + 2 条新断言**（`audit.fields` 7 个字段名逐个出现 + 未知人 0 条）⇒ **agent 侧真的能调**。
+**新坑两则（D4 同族）**：
+①**门禁期望值写成「刚好 2 条审计」会被自己的数据打脸**：`mcp-e2e.sh` 的审计门首跑写死 `count=2` ⇒ 实测 **5** ⇒ 红。原因：审计计数**取决于造了多少数据**（建档 1 + 导入 3 + 写侧建档 1…），写死数字的判据**不是判据，是快照**。修法：改成**结构判据**（`count>=2` 且 `sources==[registry,vault]`）——**断言「两层都在」，不断言「恰好几条」**（与 D-009「判据形状」同族：门禁要钉住语义，不是钉住当前数据量）。
+②**MCP 工具数是**多处硬编码**的**：本轮 `mcp-e2e.sh` / `skill-contract-check.sh` / `tests/mcp.rs` 三处都写着「11」⇒ 加一个工具要**同时改三处**，漏一处就红（红得还算明显，但属于**同一事实三份实现**的漂移风险）。本轮三处已同步为 12；**未销账**：工具数应改为**从 tools/list 动态取**，本轮未做。
+**未销账/下一步**：①**stub 端点仍剩 1 个**：`PUT /documents/{sha}/extraction`——**新功能**（字段级 evidence 锚点该怎么表达？上游 `deid::verify` 要求每个字符串字段是**原文逐字子串**）⇒ 需单独设计；②**T5 Web 管理端正式化**（选型先报方案再动手）仍是目标验收①的最后一块；③「家庭自测趋势」专用视图仍未做；④`EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑤ghcr 包可见性仍 private；⑥真·第三方 MCP 客户端互通仍未验；⑦`.dcm`/OCR worker 未做；⑧**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在；⑨**MCP 工具数在门禁里硬编码三处**（本轮新坑②）——应改为动态取值；⑩MCP 侧仍**无 resources/prompts** 能力（仅 tools）。
+
 ## D-030 2026-10-25 · **T13 审计端点实装：`GET /api/v1/audit` 从 stub→501 毕业为真实现（stub 端点 2→1）**
 **为什么做**：D-028/D-029 收尾时都点名的最后一个 stub 端点之一是 `GET /audit`。它与前面几个「补读侧」的端点**不同类**——前面几个是「数据已经算好、只差一个端子」（labs/medications/conditions），而 audit 是**新语义**：「**发生过什么**」而不是「现在是什么」。目标验收②里「数据维护写入」若没有审计视图，等于写入动作**不留痕**⇒ 这一步是目标验收②自身的一个缺口，不只是清单消项。
 **关键结构决策①：口径分层，不假装只有一层**。本服务有**两层真相层**：①`source=registry`——person registry 的 append-only **原始事件**（create/update/delete），**不折叠**（折叠会把 update 历史抹平、把 delete 墓碑藏掉 ⇒ 审计就变成了「现在长什么样」的复读，正是 audit 要避免的）；②`source=vault`——上游内核事件日志。**回执里用 `source` 字段把两层显式区分**，不让消费方误以为这是一份单一、完备的流水。
