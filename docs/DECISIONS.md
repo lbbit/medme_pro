@@ -1,5 +1,19 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-018 2026-10-20 · SKILL/MCP 定位修正：**SKILL 即全部，MCP 降为可选**；skill 归档在仓库内、Copilot CLI 是测试 harness
+用户澄清:①skill 不注册 ~/.qwenpaw/skill_pool(不在本机 QwenPaw 用)；skill 归档于 medme_pro 仓库,
+随代码版本走。②测试途径=Copilot CLI(BYOK,复用 qwen3.8-27b-project 的 copilot-strata.sh 配方,
+1.0.95,`-p`+`--allow-all-tools` 即全自动;注意 classic PAT 会被拒启动,脚本内需清 GH_TOKEN)。
+③**期望仅 skill+服务即可用全功能**——采纳为设计原则:
+- MCP 不再是交付物,只留 OpenAPI 这单一接口事实源;skill=纯 markdown(curl 调 REST),任何
+  能执行 shell 的 agent(copilot/codex/QwenPaw/手机端)装上即用,零守护进程、零注册。
+- MCP 的真实优势(强 schema 工具发现/参数校验、不占 agent 上下文、跨会话工具市场)在本场景
+  收益小:API 面小(~16 paths)、OpenAPI.json 已机器可读、用户自用可控。若未来要接 Claude
+  Desktop 等"只吃 MCP"的宿主,再用 openapi→mcp 自动生成器(如 mcp-openapi 之类)包一层即可,
+  **不双维护**——service 是唯一实现,skill/mcp 是两种薄壳。
+此修正覆盖 API-DESIGN.md 中「MCP/SKILL 映射」节的"MCP server 交付"预期(PLAN T 序号不变,
+T3 改为"SKILL 接入",无 MCP 交付项)。
+
 ## D-019 2026-10-20 · **阶段4 第二步②：MCP 写侧工具落地（建档 / 传原件），工具数 6→8**
 **为什么做**：D-018 交付后 agent 只能读，写档必须绕 REST —— 这不是「AI agent 可按人查档/写档」的验收标准（PLAN 目标验收③）。
 **结构决策（与 D-017 同形，不变）**：写侧**不新开一条真相层**——`create_person` 直接调 `persons::PersonStore::create`（append-only JSONL），`upload_document` 直接调 `vaults::ingest_upload`（与 REST 上传**同一条 ingest 路径 + 同一把「每人写锁」**）。**MCP 与 REST 因此仍无分叉**：同一个 sha、同一条时间线、同一个 docref。
