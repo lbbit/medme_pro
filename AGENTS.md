@@ -18,6 +18,16 @@
   `git -C upstream-medme fetch --depth 1 origin main && git -C upstream-medme reset --hard FETCH_HEAD`
   （直连 GitHub 慢时用 remote=`https://ghfast.top/https://github.com/Chesterguan/medme.git`）。
   推送/PR 前需把本机公钥绑到 GitHub（见 D-006），fetch 不需要。
+
+## Git 托管（2026-10-20 起生效，D-015）
+
+- 本项目 origin = `git@github.com:lbbit/medme_pro.git`（**SSH 已验证可用**：`ssh -T git@github.com` → Hi lbbit!）。
+  分支 `main`（由 master 改名），已 `-u` 跟踪远端。**常规提交后直接 push，无需请示**（推送本项目自己的仓库不属于"对外发布"）。
+- GitHub API 操作用 `GH_TOKEN` 环境变量（已配置，勿打印其值）：查 release/workflow 状态用
+  `curl -sS -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/lbbit/medme_pro/...`。
+  本机无 `gh` CLI；网络坑时 API 走 7890 代理（`-x http://127.0.0.1:7890`）。
+- ⚠️ 与 2026-10-20 晨 D-037 事故的区别：那次是"仓库被清空/404 不明原因"；如今本仓库是**我们自己建的**
+  lbbit/medme_pro，若再遇远端 404/权限异常，先 `ssh -T` + `GH_TOKEN` 探测区分"密钥问题 vs 仓库问题"。
 - `server/` —— 我们的 EHR 后端（基于上游内核加 HTTP API 层）
 - `web/` —— Web 管理端
 - `docs/DECISIONS.md` —— 关键决策及理由（改设计必须先记在这里）

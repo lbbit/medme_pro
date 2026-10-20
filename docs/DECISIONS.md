@@ -1,5 +1,10 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-015 2026-10-20 · Git 托管落定：origin=git@github.com:lbbit/medme_pro.git(SSH)
+用户建库并绑好 SSH key(`ssh -T`→Hi lbbit!)。分支统一 `main`(master 改名),已 push `-u`。
+**日常 push 免请示**(自己项目,非公开发布行为);GitHub API 用 `$GH_TOKEN`(无 gh CLI,用 curl+Bearer)。
+此前的"推送需用户绑 key"(D-006 尾巴)就此销账。D-037 事故遗留的远端疑问与此库无关(那是别的仓库)。
+
 ## D-014 2026-10-20 · **阶段3 server 最小版 docker-compose 全链路 GREEN**（构建→起栈→e2e→down）
 证据链（四段全通，缺一即不算交付）：
 ①**构建**：`docker compose build ehr-api` exit=0，镜像 `deploy-ehr-api:latest`；构建内 dry-run 打出 `[证据] openapi_paths=16` + `[证据] Dockerfile build: ehr-api dry-run exit=0`（release 编译 1m11s，全部依赖来自宿主 vendor 离线，**构建期零外网**）。
