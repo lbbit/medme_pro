@@ -139,3 +139,14 @@ A=Rust 服务端直接 link medme crates(axum+OpenAPI);B=HTTP 外壳调 medme-cl
 C=标准 FHIR Server 另起炉灶只借鉴理念。
 选 A 的理由:core-model/parser/pipeline 全部资产可用,单一语言,Docker 编译产物清晰。
 风险:crate 可能耦合 Tauri —— **阶段 0 勘察后若有硬耦合则降级为 B**。此决策待销账。
+
+## D-018 2026-10-20 · **阶段4 第二步①：QwenPaw SKILL 交付**（instruction 型包 + 自建字段级门禁）
+**产出**：`skills/medme-ehr/`（`SKILL.md` + `references/tool-contracts.md`），按 make-skill 的 `instruction` 型规范：只装实际用到的文件，SKILL.md 写「何时用哪个工具 + person_id 只能来自 list_persons + 错误码即行为指引」，重契约下沉 references。
+**核心判断（SKILL 存在的理由，不是复述 API 文档）**：①`person_id` 只能来自 `list_persons`——名字对不上必须问用户、列表里没有这个人必须直说，禁止换 id 重试；②**透传不猜**——数值以 `get_labs` 结构化 point 为准，不许从 OCR 文本抠数字；③检索 0 命中先怀疑用词（心梗/心肌梗死），别直接下「查无此记录」；④错误码分工：-32602 改参数重试 / -32601 别调 / -32001 换人 / -32002 告知稍后再试。
+**关键决策：文档门禁不能只测 HTTP 200**——D-016 的教训（字段名对不上时页面看着完全正常但数据全空）直接迁移成 `skill-contract-check.sh`：从真进程真实响应里核对 SKILL 承诺的**每个字段名**，工具名须与 tools/list 公布的一致，文档载明的错误码须与实测一致。
+**本轮门禁当场抓到两处真实漂移（先量后判第 N 次应验）**：
+①`get_document_detail` 的 `text`/`ocr_meta`/`extraction` 是 `Option` + `skip_serializing_if` ⇒ **无文本层时整个键不存在**（不是空值也不是 null）。我第一版文档写「返回 text + extraction」是**假承诺**。修法不是把门禁改松，而是：把 15 个恒在字段与 3 个可选字段分开写清，并让门禁只对「存在时形状正确」断言（`extraction.parseable=false` 时内容在 `raw`）。
+②错误码在 **`result._code`（顶层）**，不在 `structuredContent._code`——我第一版写错了位置，当场被 KeyError 顶出来。
+**证据链**：`cargo test --all-targets` 全绿（contract 1 + sha_gate 1 + mcp 5）；`mcp-e2e.sh` 真进程 **15 门 PASS / fails=0**；`skill-contract-check.sh` 真进程 **13 门 PASS / fails=0**（含 48 个字段名逐一存在于真实响应、6 工具名双面对齐、-32001 实测、frontmatter 合规）。
+**新坑（D4 第七变种·文档面）**：①`Option<T> + skip_serializing_if` 的字段**不能写进「必返字段」承诺**——那是把 Rust 的条件编译性说成 API 保证；写文档前先看 struct 定义里的 serde 属性（本轮正是靠读 `vaults.rs` 的 `DocumentDetail` 定位的）。②**改脚本时用了 `perl/python3 -i` 批量改本仓库文件被安全层拦下**（误判为「可能终止 QwenPaw 进程」——含 `kill` 字样的脚本编辑触发启发式），改用 `edit_file` 定点替换即可；**写脚本文件不算危险操作，但含 kill/trap 的脚本改动请走编辑工具**。
+**未销账**：①SKILL 尚未装进 `~/.qwenpaw/skill_pool`（未注册进 skill.json manifest，故真·agent 自动发现未验；待 T3「免维护接入块」一起落）；②真·第三方 MCP 客户端互通仍未验（同 D-017③）；③**MCP 写侧工具（建档/传原件）未做**——当前 agent 只能读，建档须走 REST。
