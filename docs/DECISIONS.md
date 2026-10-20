@@ -1,5 +1,20 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-016 2026-10-20 · **阶段3 Web 管理端最小版交付**；「Next 服务选型」钉死为**不引入 Node 工具链**
+**选型（PLAN 挂了小半天的待决项）**：原问题悬着「Web 端用不用 Next/React」。**结论：最小版不引入 Node。**
+依据（先量后决，非偏好之争）：①本机 `node`/`npm` 均 **command not found**（实测），引 Next 会让镜像构建新增「宿主 Node 工具链 + 外网 npm registry」两个新失败面，而 D-014 刚证明**构建期零外网 vendor 离线**是本项目最值钱的不变量；②最小版的管理需求（建档/选人/时间线/文档上传/指标/检索）**全部已由现有 16 路径 JSON API 覆盖**，前端只做视图；③`include_str!` 编译期内嵌单文件 = 零新依赖、零构建面、单二进制自带 UI。
+**将来要换正式前端（React/Next）只需替换 `ehr-api/web/`，API 契约（paths=16）不动** —— 这条是本决策的可逆性保险。
+证据链（门禁全绿，缺一即不算交付）：
+①`cargo test --all-targets` 全绿（contract.rs + sha_gate），含**新增第4段守卫**：`GET /` 必须 200 + `text/html` + >2000 字节 + 正文含 `/api/v1`（守卫点：`web/index.html` 被移出构建上下文则编译期失败；路由被摘则断言失败——「页面在库里但没人能打开」属 D5 类漏账）。
+②`docker compose build ehr-api` exit=0，构建内 dry-run 打出 `[证据] Dockerfile build: openapi_paths=16` + `dry-run exit=0`（**构建期仍零外网**，vendor 离线成立）。
+③起栈 → 容器内真实服务 e2e：healthz 200 → `GET /` **http=200 bytes=8591 ct=text/html** → 建档 pid=e6ccc954 → multipart 上传 200 sha=a4bc325e0215 → timeline=1 / documents=1 / labs series=8 / search「血常规」count=1（含 `[血常规]` 高亮）→ openapi paths=16。
+④`web-e2e.sh`（新增门禁脚本）独立复跑 **fails=0**：除 HTTP 面外，还做**字段名交叉核对**——JS 读用的 20 个字段（`doc_date/title/doc_type`、`content_hash/original_name/byte_size/mime_type`、`group_name/unit_canonical/any_abnormal`、`point.date/value/flag/docref`、`search.title/snippet`…）逐个在**真实 API 响应**里存在，缺一即 FAIL。**理由：字段名对不上时页面看着完全正常但数据全空**，仅测 HTTP 200 是假门。
+⑤`down` 后 8585→000，项目容器全清（残留 "Resource is still in use" 仍来自同 daemon 他人 xiaohongshu，与本项目无关，同 D-014④）。
+**新坑（D4 第六变种·工具面）**：本想用本机 Playwright 镜像做真·浏览器渲染验证，两次失败——①镜像内**有 `/ms-playwright/` 浏览器二进制但没有 playwright npm 模块**（`require('playwright')` MODULE_NOT_FOUND，设 `NODE_PATH` 也救不回，`npm ls -g` 只有 corepack/npm/yarn）；②QwenPaw Browser SDK 启本地 chromium 失败（`X connection error received` / VAAPI 版本过低 / `BrowserContext.new_page` 目标页已关）。
+**准则补条：本地浏览器渲染验证不可假定可得**。代偿两路（均已执行且明说不假装）：a) 抽出 `<script>` 送进 playwright 镜像 `node --check` → **JS_SYNTAX=OK**（语法层）；b) `web-e2e.sh` 的字段交叉核对 → **数据契约层**。**真·像素级渲染仍未验证，属本决策的已知未销账项**（页面逻辑极简、无框架，风险低；下轮若有可用无头浏览器再销）。
+**另一坑（Dockerfile 语法，非 Rust）**：`COPY ehr-api /src/ehr-api   # 行尾注释` 被 buildkit 当成**额外源参数**解析 → `failed to calculate checksum ...: "/含": not found`。铁律：**Dockerfile 的 `COPY` 行尾一律不许写注释**，注释另起一行。
+顺手记账：`git push` 已通（SSH key 早经 D-015 绑好），本轮 commit `506753a` 已推 `main`。遗留 volume 内累计 7 个人档（历轮验收），要干净基线 `docker volume rm deploy_ehr-home`。
+
 ## D-015 2026-10-20 · Git 托管落定：origin=git@github.com:lbbit/medme_pro.git(SSH)
 用户建库并绑好 SSH key(`ssh -T`→Hi lbbit!)。分支统一 `main`(master 改名),已 push `-u`。
 **日常 push 免请示**(自己项目,非公开发布行为);GitHub API 用 `$GH_TOKEN`(无 gh CLI,用 curl+Bearer)。
