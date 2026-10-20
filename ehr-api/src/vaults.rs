@@ -462,33 +462,67 @@ pub struct LabsReply {
 }
 
 /// block_in_place 内同步调用。一人一箱语义下 vault 即档案全集，跨报告趋势在此自然成立(D-002)。
-pub fn labs_aggregate(vault: &Vault, person_id: &str) -> Result<LabsReply> {
-    use chrono::NaiveDate;
-    struct Row { sha: String, date: Option<NaiveDate>, text: String, json: Option<String> }
-    let mut rows: Vec<Row> = Vec::new();
+// ---- 聚合层的共用取样：把 vault 里「有文本层」的文档摊成 parser 可吃的 SourceDoc 序列 ----
+// D-011 起 labs 端点的实现；D-026 起 medications/conditions 复用同一条取样路径——
+// **一个语义只允许有一处实现**：两处各写一遍「哪些文档参与聚合」的判据，
+// 迟早会漂移成「labs 算了 X 件、medications 算了 Y 件」这种说不清的差异（D5）。
+// 判据沿用 labs 原样（此处不新造规则）：
+//   ① raw-only（无 OCR 文本层）不参与——没有文本可析；
+//   ② doc_type 传 None：aggregate 本身忽略此字段（仅医生摘要路由用），如实传；
+//   ③ extraction_json 透传：云抽取优先正则的上游原生路径（agent PUT extraction 后自动采用）。
+struct AggRow { sha: String, date: Option<chrono::NaiveDate>, text: String, json: Option<String>, doc_type: String }
+
+fn collect_agg_rows(vault: &Vault) -> Result<Vec<AggRow>> {
+    let mut rows: Vec<AggRow> = Vec::new();
     for tl in vault.timeline()? {
         if vault.ocr_page_numbers(tl.document_id)?.is_empty() {
             continue; // raw-only：无文本层不可解析(worker 补 OCR 后自动进入聚合)
         }
         let doc = match vault.document_by_id(tl.document_id)? { Some(d) => d, None => continue };
         let sf = match vault.source_file_by_id(doc.source_file_id)? { Some(s) => s, None => continue };
-        rows.push(Row {
+        rows.push(AggRow {
             sha: sf.content_hash.clone(),
             date: tl.doc_date.map(|d| d.date_naive()),
             text: vault.ocr_text(tl.document_id).map_err(|e| anyhow::anyhow!("ocr_text: {e}"))?,
             json: vault.extraction_json(tl.document_id).map_err(|e| anyhow::anyhow!("{e}"))?,
+            // ⚠️ doc_type 必须**如实传**（D-026）：传 None ⇒ 上游 aggregate 走「宽松」分支
+            // (wants_meds/wants_labs 对 None 放行)，于是**任何**文档都被当处方挖药、
+            // 化验单的行会被误读成药名/剂量（上游源码注释原文警告：extract_meds over lab
+            // reports 会把「肌酐 112 umol/L」读成 112U）。真相层里有 doc_type（parser::classify
+            // 定死），聚合层就该用它——否则 meds 端点会输出「证据回链到化验单的假用药」。
+            doc_type: tl.doc_type.as_str().to_string(),
         });
     }
-    let docs: Vec<parser::SourceDoc<'_>> = rows.iter().enumerate()
+    Ok(rows)
+}
+
+fn rows_to_source_docs(rows: &[AggRow]) -> Vec<parser::SourceDoc<'_>> {
+    rows.iter().enumerate()
         .map(|(i, r)| parser::SourceDoc {
             index: i,
             date: r.date,
             text: &r.text,
-            doc_type: None,      // aggregate 本身忽略此字段(仅医生摘要路由用,D4查证源码注释)，传 None=如实
-            title: None,         //     ——同上，不为「看起来完整」而喂多余数据(D7)
+            // 如实传(D-026)，但**"未分类"要还原成 None**：
+            //   上游 wants_labs/wants_meds 的语义是「None/unknown 保持宽松」
+            //   (源码注释原文：None/unknown stays permissive so callers that don't
+            //   classify still work)。classifier 判不出类型 ⇒ DocType::Unknown
+            //   ⇒ 传 Some("unknown") 会被上游判成「既非化验单也非处方」⇒ 该文档
+            //   两个面都读不出（实测：MCP 门禁 mcp_reads_same_truth_layer_as_rest
+            //   的血常规样本 classify=unknown ⇒ labs 变 0 条）。
+            //   传 None 才是「调用方没分类 ⇒ 宽松」的等价表达。
+            //   反之**已分类**的必须如实传：传 None 会让化验单被当处方挖药
+            //   (上游注释警告：extract_meds over lab reports 会把「肌酐 112 umol/L」读成 112U)。
+            doc_type: if r.doc_type == "unknown" { None } else { Some(r.doc_type.clone()) },
+            title: None,         // 不为「看起来完整」而喂多余数据(D7)
             extraction_json: r.json.as_deref(),
         })
-        .collect();
+        .collect()
+}
+
+/// block_in_place 内同步调用。一人一箱语义下 vault 即档案全集，跨报告趋势在此自然成立(D-002)。
+pub fn labs_aggregate(vault: &Vault, person_id: &str) -> Result<LabsReply> {
+    let rows = collect_agg_rows(vault)?;
+    let docs = rows_to_source_docs(&rows);
     let agg = parser::aggregate(&docs);
     let series: Vec<LabSeriesOut> = agg.labs.iter().map(|s| LabSeriesOut {
         analyte_key: s.analyte_key.clone(),
@@ -519,5 +553,109 @@ pub fn labs_aggregate(vault: &Vault, person_id: &str) -> Result<LabsReply> {
         series_count: series.len(),
         total_points,
         series,
+    })
+}
+
+// ---- 用药跨度（medications）：parser::aggregate() 的 meds 面（同一次聚合的第二块输出）----
+// D-026：把 `/persons/{pid}/medications` 从 stub→501 毕业为真实现。
+// 与 labs 同一次 aggregate 调用产出（同源，不另跑一遍解析）——同一次扫描、同一份判据。
+
+/// 一次用药提及（跨文档合并后仍逐条保留出处）。
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MedMentionOut {
+    /// 日精度日期；来源文档无日期时 None
+    pub date: Option<String>,
+    /// 原件里写的剂量字符串（如 "0.5g bid"）；只提了药名没写剂量时 None
+    pub dose: Option<String>,
+    /// 该次提及里的药名**原文写法**（不做归一）
+    pub raw_name: String,
+    /// 证据 docref = 该次提及出处原件的 sha256 → GET /documents/{sha} 可查全文并 rehash
+    pub docref: String,
+    /// "llm"（云抽取 JSON）或 "regex"（正文正则）——上游原生标注，透传不改写
+    pub origin: String,
+    /// true=云抽取且未在原文核对上（上游语义，透传）
+    pub unverified: bool,
+}
+
+/// 一个药品在全部提及上的跨度。
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MedSpanOut {
+    /// 词典归一后的药品键；未识别（按原文分组）时 None
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drug_key: Option<String>,
+    /// 归一后的规范名；未识别时为原文名
+    pub name: String,
+    /// 全部**原文写法**（去重排序）——归一会丢掉剂型（地塞米松注射液/片），故并列保留
+    pub raw_names: Vec<String>,
+    /// ATC 码（如可得）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atc: Option<String>,
+    /// 最近一次提及里的剂量（如 "0.5g bid"）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_dose: Option<String>,
+    /// 与 latest_dose 同一条提及里的**原文药名**（剂型/给药途径判定的唯一依据）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_raw_name: Option<String>,
+    /// 最早/最晚的带日期提及
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+    /// 上游恒为 "active"（不推断停药）——原样透传，**不擅自改写成"已停"**
+    pub status: String,
+    /// 提及该药的全部原件 docref（去重、升序）
+    pub docrefs: Vec<String>,
+    /// 任一来源是云抽取未核对的（上游语义）
+    pub unverified: bool,
+    /// 逐次提及（按日期升序，无日期的排最后）
+    pub mentions: Vec<MedMentionOut>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MedicationsReply {
+    pub person_id: String,
+    /// 参与聚合的文档数（仅 text 层齐备者）
+    pub documents_scanned: usize,
+    /// 药品跨度数
+    pub med_count: usize,
+    /// 逐次提及总数
+    pub mention_count: usize,
+    pub medications: Vec<MedSpanOut>,
+}
+
+/// 用药跨度聚合。同一批文档、同一次 parser::aggregate（与 labs 同源判据）。
+pub fn meds_aggregate(vault: &Vault, person_id: &str) -> Result<MedicationsReply> {
+    let rows = collect_agg_rows(vault)?;
+    let docs = rows_to_source_docs(&rows);
+    let agg = parser::aggregate(&docs);
+    let docref_of = |idx: usize| rows.get(idx).map(|r| r.sha.clone()).unwrap_or_default();
+    let medications: Vec<MedSpanOut> = agg.meds.iter().map(|m| MedSpanOut {
+        drug_key: m.drug_key.clone(),
+        name: m.name.clone(),
+        raw_names: m.raw_names.clone(),
+        atc: m.atc.clone(),
+        latest_dose: m.latest_dose.clone(),
+        latest_raw_name: m.latest_raw_name.clone(),
+        start: m.start.map(|d| d.format("%Y-%m-%d").to_string()),
+        end: m.end.map(|d| d.format("%Y-%m-%d").to_string()),
+        status: m.status.clone(),
+        docrefs: m.sources.iter().map(|i| docref_of(*i)).collect(),
+        unverified: m.unverified,
+        mentions: m.mentions.iter().map(|mm| MedMentionOut {
+            date: mm.date.map(|d| d.format("%Y-%m-%d").to_string()),
+            dose: mm.dose.clone(),
+            raw_name: mm.raw_name.clone(),
+            docref: docref_of(mm.source),
+            origin: mm.origin.clone(),
+            unverified: mm.unverified,
+        }).collect(),
+    }).collect();
+    let mention_count = medications.iter().map(|m| m.mentions.len()).sum();
+    Ok(MedicationsReply {
+        person_id: person_id.to_string(),
+        documents_scanned: rows.len(),
+        med_count: medications.len(),
+        mention_count,
+        medications,
     })
 }

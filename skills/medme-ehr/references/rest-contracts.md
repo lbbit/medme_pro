@@ -21,7 +21,8 @@ Base：`$EHR_API_BASE/api/v1`（默认 `http://127.0.0.1:8585/api/v1`）。
 | `GET /persons/{pid}/documents/{sha}` | 文档详情（OCR 文本层 + extraction） | `content_hash`/`original_name`/`mime_type`/`byte_size`/`imported_at`/`document_id`/`doc_type`/`doc_date`/`title`/`language`/`page_count`/`text_indexed`/`text_truncated_bytes`；可选键：`text`、`ocr_meta`、`extraction`(`parseable`/`json`/`raw`) |
 | `GET /persons/{pid}/documents/{sha}/original` | 原件字节流（CAS 寻址，服务端每次核 sha256） | 原始字节（非 JSON） |
 | `POST /persons/{pid}/documents` | 上传原件（multipart，字段名 `file`） | `content_hash`/`deduped`/`document_id`/`doc_type`/`text_indexed`/`stored_raw_only`/`messages[]` |
-| `GET /persons/{pid}/medications` `/conditions` `/measurements` | 尚未实装（契约内占位） | **501** |
+| `GET /persons/{pid}/medications` | 用药跨度（跨文档聚合；**只从处方类原件抽药**） | `person_id`/`documents_scanned`/`med_count`/`mention_count`/`medications[]`：`drug_key`/`name`/`raw_names`/`atc`/`latest_dose`/`latest_raw_name`/`start`/`end`/`status`(恒 `active`=不推断停药)/`docrefs[]`/`unverified`/`mentions[]`：`date`/`dose`/`raw_name`/`docref`/`origin`(`regex`/`llm`)/`unverified` |
+| `GET /persons/{pid}/conditions` `/measurements` | 尚未实装（契约内占位） | **501** |
 | `POST /persons/{pid}/entries/{self-measurement,note,profile-event}` | 尚未实装 | **501** |
 | `PUT /documents/{sha}/extraction` | 尚未实装 | **501** |
 | `GET /audit` | 尚未实装 | **501** |

@@ -23,6 +23,20 @@ export EHR_API_BASE="http://127.0.0.1:$PORT"
 echo "[证据] server up pid=$SRV base=$EHR_API_BASE"
 
 printf '姓名：钱八\n检查项目：血常规\n白细胞计数 12.3 10^9/L 偏高\n' > "$H/lab.txt"
+cat > "$H/rx.txt" <<'RXEOF'
+XX医院门诊处方笺 (prescription)
+
+姓名：钱八    性别：男    科室：心血管内科
+处方日期：2025-03-11    诊断：高血压 2 级
+
+Rp.
+1. 苯磺酸氨氯地平片 Amlodipine  5mg × 14 片
+   用法:口服,一次 1 片,一日 1 次
+2. 阿司匹林肠溶片 Aspirin  100mg × 30 片
+   用法:口服,一次 1 片,一日 1 次(餐后)
+
+医师：某某
+RXEOF
 
 # 0) helper 自带 --help 且不写死地址/token（零维护：全走 env）
 grep -q 'EHR_API_BASE' "$E" || { echo "  FAIL helper 未读 EHR_API_BASE"; fails=$((fails+1)); }
@@ -38,10 +52,11 @@ echo "  PASS person-create id=$PID"
 PERSONS=$("$E" persons)
 echo "$PERSONS" | grep -q '"id"' || { echo "  FAIL persons 无 id"; fails=$((fails+1)); }
 UP=$("$E" upload "$PID" "$H/lab.txt")
+UP_RX=$("$E" upload "$PID" "$H/rx.txt")
 SHA=$(echo "$UP" | python3 -c 'import json,sys;print(json.load(sys.stdin)["content_hash"])')
 [ -n "$SHA" ] || { echo "  FAIL upload 无 content_hash"; fails=$((fails+1)); }
 
-ALL="$PERSONS"$'\n'"$("$E" timeline "$PID")"$'\n'"$("$E" search "$PID" 白细胞)"$'\n'"$("$E" labs "$PID")"$'\n'"$("$E" documents "$PID")"$'\n'"$("$E" detail "$PID" "$SHA")"$'\n'"$UP"
+ALL="$PERSONS"$'\n'"$("$E" timeline "$PID")"$'\n'"$("$E" search "$PID" 白细胞)"$'\n'"$("$E" labs "$PID")"$'\n'"$("$E" medications "$PID")"$'\n'"$("$E" documents "$PID")"$'\n'"$("$E" detail "$PID" "$SHA")"$'\n'"$UP"
 check() { # check <label> <逗号分隔字段>
   local miss=""
   for f in ${2//,/ }; do case "$ALL" in *"\"$f\""*) ;; *) miss="$miss $f";; esac; done
@@ -54,19 +69,24 @@ check "labs.fields"      "person_id,documents_scanned,series_count,total_points,
 check "documents.fields" "person_id,count,content_hash,original_name,mime_type,byte_size,doc_type,text_indexed"
 check "detail.fields"    "content_hash,original_name,mime_type,byte_size,imported_at,document_id,doc_type,title,language,page_count,text_indexed,text_truncated_bytes"
 check "upload.fields"    "content_hash,deduped,document_id,doc_type,text_indexed,stored_raw_only,messages"
+check "medications.fields" "person_id,documents_scanned,med_count,mention_count,medications,drug_key,name,raw_names,atc,latest_dose,latest_raw_name,start,end,status,docrefs,unverified,mentions,date,dose,raw_name,docref,origin"
 
 # 2) SKILL.md / rest-contracts.md 里承诺的命令必须都被 helper 支持
-for c in health persons person-create timeline search labs documents detail original upload; do
+for c in health persons person-create timeline search labs medications documents detail original upload; do
   grep -q "ehr.sh $c" "$SKILL" || { echo "  FAIL SKILL.md 未提命令 $c"; fails=$((fails+1)); }
   "$E" --help | grep -qE "^  $c( |\$)" || { echo "  FAIL helper 不支持命令 $c"; fails=$((fails+1)); }
 done
-echo "  PASS 命令面 SKILL ↔ helper 对齐(10 个)"
+echo "  PASS 命令面 SKILL ↔ helper 对齐(11 个)"
 
 # 3) 关键不变量：数值只在 labs 里、证据带 docref、search 0 命中不报错
-gate "labs_has_docref" "$(echo "$ALL" | grep -c '"docref"')" "1"
+LABS_JSON=$("$E" labs "$PID")
+gate "labs_has_docref" "$(echo "$LABS_JSON" | grep -o '"docref"' | wc -l | tr -d ' ')" "$(echo "$LABS_JSON" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(sum(len(s["points"]) for s in d["series"]))')"
 gate "search_hit_count" "$("$E" search "$PID" 白细胞 | python3 -c 'import json,sys;print(json.load(sys.stdin)["count"])')" "1"
 gate "search_rare_word_zero" "$("$E" search "$PID" zzqqww | python3 -c 'import json,sys;print(json.load(sys.stdin)["count"])')" "0"
 gate "detail_text_present" "$(echo "$ALL" | grep -c '"text":')" "1"
+MEDS_JSON=$("$E" medications "$PID")
+gate "medications_has_docref" "$(echo "$MEDS_JSON" | grep -o '"docref"' | wc -l | tr -d ' ')" "$(echo "$MEDS_JSON" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(sum(len(m["mentions"]) for m in d["medications"]))')"
+gate "medications_status_active" "$("$E" medications "$PID" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(1 if d["med_count"]>0 and all(m["status"]=="active" for m in d["medications"]) else 0)')" "1"
 
 # 4) references 文件存在且被 SKILL 引用
 [ -f "$REFS" ] || { echo "  FAIL 缺 rest-contracts.md"; fails=$((fails+1)); }

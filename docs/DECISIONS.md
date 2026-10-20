@@ -1,5 +1,24 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-026 2026-10-23 · **T9 用药端点实装：`/persons/{pid}/medications` 从 stub→501 毕业为真实现（doc_type 类型分流 + 证据回链）**
+**为什么做**：D-025 把 8 个 stub 端点逐个在文档里标了「⚠️ stub（501）」，但**标出来不等于推进**。其中 `medications`（用药跨度）是读侧**最高价值**的一个缺口：目标验收②「REST API 覆盖指定人员的健康事件/报告/**指标**查询」之外，agent 面对「他在吃什么药、剂量多少」这类高频问题，目前只能去 `search` 撞运气。而它恰好是**上游 `parser::aggregate()` 已经算好的第二块输出**——`agg.meds` 与 `agg.labs` 出自**同一次扫描**，几乎零成本。此前它一直挂着 501。
+**关键结构决策①：`doc_type` 必须如实传给 `parser::aggregate()`，且「未分类」要还原成 `None`**。这是本轮**最硬的一条**，也是最容易做错的一条。原始 `labs_aggregate` 传 `doc_type: None`，注释写着「aggregate 本身忽略此字段」——**这话不准确**。上游 `wants_labs`/`wants_meds` 正是靠 `doc_type` 分流：`None`=**「调用方没分类 ⇒ 宽松放行」**，于是**任何文档都会被当处方挖药**，化验单的「肌酐 112 umol/L」会被读成「112U 肌酐」——上游源码注释明确警告过这个坑。修法分两半：①**已分类的必须如实传**（化验单 ⇒ 不进 meds 面）；②**判不出类型的（`DocType::Unknown`）要还原成 `None`**——因为上游语义是「None/unknown 保持宽松」，而传 `Some("unknown")` 会被判成「既非化验单也非处方」，**该文档两个面都读不出**（实测：血常规样本 classify=unknown ⇒ labs 变 0 条）。这两半方向相反，但都源于同一条上游语义。**判据已在源码里，不该由调用方另造一套。**
+**关键结构决策②：取样判据只允许有一处实现**。`labs` 与 `medications` 若各写一遍「哪些文档参与聚合」，迟早漂移成「labs 算了 X 件、medications 算了 Y 件」这种说不清的差异（D5）。修法：抽出 `collect_agg_rows()`（取样）+ `rows_to_source_docs()`（转 SourceDoc）两个共用函数，labs 与 meds **同源同判据同一次 aggregate**。`rows_to_source_docs` 是**纯函数**（切片进、切片出），故借用检查无冲突、零额外依赖。
+**关键结构决策③：证据回链必须逐条保留出处，且有第二道独立验证**。每条 mention 带 `docref`（= 出处原件 sha256）；门禁不止断言 docref 非空，而是**经 HTTP 取回原件原文，逐字核对药名与剂量确实出现在那份原文里**——因为「docref 指向了某份原件」与「药名真的从那份原件来」是两件事，前者可以靠一个错误的索引映射伪造。这是 labs 那条「只取自原件」红线在 meds 面的同形实现。
+**关键结构决策④：`status` 恒为 `active` 且原样透传，不擅自改写成「已停」**。上游不推断停药；我们没有比它更多的证据。**不推断 = 不粉饰**（D5 的对称面：D-024 宁可让 503 刺眼，也不假装可写）。
+**关键结构决策⑤：实装顺序 = 先实装、后入 CONTRACT**。`medications` 从 `CONTRACT` 表移出、正式进 utoipa `paths(...)`；并保留 D-025 的**反向保险**——`tests/apidoc.rs::contract_entries_really_return_501` 断言 CONTRACT 里每一条**真返回 501**，故「已实装却还留在表里」会直接让门禁红（meds-e2e M5 门专门断言 medications 不在 CONTRACT 表）。
+**证据链（缺一即不算交付）**：
+①**`meds-e2e.sh`（新增门禁）真进程 12 门 PASS / fails=0**：建档 + 上传化验单/处方两件 → `GET /medications` **200** → **M1 类型分流**（用药只来自处方；化验单 docref 不出现；药名/剂量/原文逐字）→ **M2 provenance verified mentions=3**（每条 mention 的药名/剂量都在**经 HTTP 取回的其原件原文**里逐字出现）→ **M3 labs 未退化**（同一份化验单仍读出指标点、docref 仍指向化验单）→ **M4 OpenAPI 里是真 operation + typed schema** → 未知人 **404** → **M5 medications 不在 CONTRACT 表**。
+②**`cargo test --all-targets` 全绿**：新增 `tests/meds.rs` **2 门**（库级聚合：documents_scanned=2 但 mention 只来自处方、docref ⊆ 上传集、药名/剂量在原文、status 恒 active；HTTP 级：端点 200 + docref 指向处方 + 不在 CONTRACT 表）+ 旧门禁**未破**（lib 12→13 / auth 7 / contract 1 / apidoc 3 / mcp 10 / rebuild 3 / sha_gate 1）⇒ 合计 **40 门全绿**。
+③**旧 e2e 门禁全绿未被破坏**：`ehtest.sh`（34 门）fails=0、`mcp-e2e.sh` fails=0、`auth-e2e.sh` fails=0、`rebuild-e2e.sh` fails=0、`rebuild-lock-e2e.sh` fails=0、`skill-rest-check.sh` fails=0、`skill-contract-check.sh` fails=0、`api-doc-check.sh` 8 门 fails=0、`web-e2e.sh`（起真服务复验）fails=0。
+④**零新依赖**：`ehr-api/Cargo.lock` 与 `Cargo.toml` **未改动**（`git diff --stat` 为空，可验事实）。
+⑤**dry-run 优先**：先跑 `cargo test --all-targets`（库级，不起服务、不落状态）与 `--print-api-doc`（干跑渲染），再起真进程跑 meds-e2e 与旧门禁复验。
+**新坑两则（D4 同族）**：
+①**「门禁红了」的真凶是**陈旧的 release 二进制**，不是代码坏了——`skill-rest-check.sh` 默认用 `~/medme-shared-target/release/ehr-api`（10月20 构建，早于 D-026），于是新端点返回 501/404，门禁报「缺字段 med_count」。**症状极具误导性**（看起来像「端点没实现」或「JSON 结构对不上」），实为**门禁跑的不是当前代码**。修法：`cargo build --release` 后重跑，fails=0。**教训：门禁红 ⇒ 先问「它跑的是哪份二进制」，再怀疑代码**（与 D-011「红门先查门禁自身」同族，但这次红的是**构建产物的新鲜度**而非门禁逻辑）。更根本的修法是让门禁默认用 `debug` 或显式打印二进制时间戳，本轮已用 release 重建对齐。
+②**脚本按「参数个数」猜用法会给出误导性报错**：`ehtest.sh`/`rebuild-e2e.sh`/`rebuild-lock-e2e.sh` 都要求**显式传二进制绝对路径**，不传时打印的 usage 混在输出里，一眼扫过去极易读成「门禁失败」；而 `web-e2e.sh` 则要求**先起真服务**（默认 :8585），不跑服务直接执行必 fails=3。**判据：门禁失败先看第一行是不是 usage 提示，再看是不是「服务没起」**，两者都不是才是真失败。
+**未销账/下一步**：①`medications` **MCP 侧尚无对应工具**（REST 独有，SKILL.md 已如实标注「暂无 MCP 工具，仅 REST」）——**这是刻意的不对称**（REST 是事实源，D-021），后续若补 MCP 工具须复用同一 `meds_aggregate`，不得另写一份判据；②`conditions`/`measurements`/三个 `entries`/`extraction`/`audit` 共 **7 个端点仍是 stub→501**（`api-doc-check.sh` A5 门已逐个标注）；③**T5 Web 管理端正式化**仍是目标验收①的最后一块（选型先报方案再动手）；④`EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑤ghcr 包可见性仍 private；⑥真·第三方 MCP 客户端互通仍未验；⑦`.dcm`/OCR worker 未做。
+
+
 ## D-025 2026-10-22 · **T8 人类可读接口文档交付：docs/API.md 由运行时 OpenAPI 自动生成 + 漂移门禁**（目标验收⑤销账）
 **为什么做**：目标验收标准⑤「docs/API.md 人类可读接口文档」此前**根本不存在**——docs/ 下只有 `API-DESIGN.md`（那是**设计稿**，写的是「应该有什么」，不是「现在有什么」）。这一条一直空着，但它是**读者与实现之间的唯一契约面**：SKILL.md 教 agent 调哪些接口、README 教人怎么接、运维靠它排查。若要补，**最省事的做法是手写一份 Markdown**——而手写接口文档与代码漂移，正是本项目反复付出学费的经典形态（D-016「页面看着正常但数据全空」；D-011「期望值算错看起来像产品 bug」）。**手写文档在第一次改路由时就失真，而读者不会知道它已过期**——这是 D5「以为有、其实没有」的低配版。
 **关键结构决策①：文档 = 渲染物，不是手写物**。唯一事实源是**运行时 OpenAPI**（`/openapi.json`，服务端每次现合成 ⇒ 与代码必然同步，D1 的同一逻辑）；`docs/API.md` 由 `ehr-api --print-api-doc` 渲染产出并入库，另配门禁 `api-doc-check.sh` 断言**仓库内那份与生成物逐字一致**。这样「文档过期」这件事从「靠人自觉」变成「CI/门禁直接报红」。

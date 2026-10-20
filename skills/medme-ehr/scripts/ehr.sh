@@ -25,6 +25,7 @@ usage() {
   timeline PID                某人健康事件时间线
   search PID Q [--limit N]    某人档案全文检索（命中片段带 [高亮]）
   labs PID                    某人检验指标趋势（含 H/L 标记与 docref 证据）
+  medications PID             某人用药跨度（药名/剂量/ATC + 逐次提及 docref 证据）
   documents PID               某人文档列表
   detail PID SHA              文档详情（含 OCR 文本层 / extraction）
   original PID SHA            下载原件字节（CAS 按 hash 寻址，每次核 sha256）
@@ -97,6 +98,9 @@ case "$CMD" in
   labs)
     PID="${1:-}"; [ -n "$PID" ] || die "labs 需要 person_id"
     _c "$BASE/persons/$PID/labs" | _pp ;;
+  medications)
+    PID="${1:-}"; [ -n "$PID" ] || die "medications 需要 person_id"
+    _c "$BASE/persons/$PID/medications" | _pp ;;
   documents)
     PID="${1:-}"; [ -n "$PID" ] || die "documents 需要 person_id"
     _c "$BASE/persons/$PID/documents" | _pp ;;

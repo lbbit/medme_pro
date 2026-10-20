@@ -59,7 +59,7 @@
 | `POST` | `/api/v1/persons/{pid}/entries/self-measurement` | {type,value,unit,taken_at} → SelfMeasurement import（stub→501） | ⚠️ stub（501） |
 | `GET` | `/api/v1/persons/{pid}/labs` | 指标趋势——一人一箱下 vault 全集即档案；证据回链 point.docref(CAS sha)可溯原件。见 vaults::labs_aggregate。 | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/measurements` | SelfMeasurement/ProfileEvent 事件回放投影(type,from,to)（stub→501） | ⚠️ stub（501） |
-| `GET` | `/api/v1/persons/{pid}/medications` | meds(MedSpan)聚合（stub→501） | ⚠️ stub（501） |
+| `GET` | `/api/v1/persons/{pid}/medications` | 用药跨度——与 labs 同一批文档、同一次 parser::aggregate 的另一块输出（D-026）。 证据回链 mention.docref（CAS sha）可一路溯源到原件字节；剂量/日期**原样透传不改写**（D2）。 | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/search` | FTS5+jieba 全文检索(中文分词 POC步骤06实证)。q 必填；limit 缺省20、钳 [1,100]。 | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/timeline` | 健康事件时间线 —— Vault::timeline 直出；按 doc_date DESC、无日期件排在最后(内核 ORDER BY 语义)。 | ✅ 已实装 |
 
@@ -447,17 +447,21 @@ curl -X GET \
 
 ### `GET /api/v1/persons/{pid}/medications`
 
-meds(MedSpan)聚合（stub→501）
-
-> ⚠️ **本端点当前返回 501（尚未实装）**——下方是已固定的契约形状，实现后语义不再变。
+用药跨度——与 labs 同一批文档、同一次 parser::aggregate 的另一块输出（D-026）。 证据回链 mention.docref（CAS sha）可一路溯源到原件字节；剂量/日期**原样透传不改写**（D2）。
 
 - 鉴权：需要 Bearer token
+
+**参数**
+
+| 名 | 位置 | 必填 | 说明 |
+|---|---|---|---|
+| `pid` | path | 是 | person uuid |
 **响应**
 
 | 码 | 说明 |
 |---|---|
-| `200` | planned |
-| `501` | not implemented yet (stage-2 in progress) |
+| `200` | aggregated medication spans (with per-mention evidence docrefs) |
+| `404` | person not found |
 
 
 **示例**
@@ -611,6 +615,48 @@ curl -X GET \
 | `series_count` | integer | 是 |  |
 | `total_points` | integer | 是 |  |
 
+### `MedMentionOut`
+
+一次用药提及（跨文档合并后仍逐条保留出处）。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `date` | object | 否 | 日精度日期；来源文档无日期时 None |
+| `docref` | string | 是 | 证据 docref = 该次提及出处原件的 sha256 → GET /documents/{sha} 可查全文并 rehash |
+| `dose` | object | 否 | 原件里写的剂量字符串（如 "0.5g bid"）；只提了药名没写剂量时 None |
+| `origin` | string | 是 | "llm"（云抽取 JSON）或 "regex"（正文正则）——上游原生标注，透传不改写 |
+| `raw_name` | string | 是 | 该次提及里的药名**原文写法**（不做归一） |
+| `unverified` | boolean | 是 | true=云抽取且未在原文核对上（上游语义，透传） |
+
+### `MedSpanOut`
+
+一个药品在全部提及上的跨度。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `atc` | object | 否 | ATC 码（如可得） |
+| `docrefs` | array<string> | 是 | 提及该药的全部原件 docref（去重、升序） |
+| `drug_key` | object | 否 | 词典归一后的药品键；未识别（按原文分组）时 None |
+| `end` | object | 否 |  |
+| `latest_dose` | object | 否 | 最近一次提及里的剂量（如 "0.5g bid"） |
+| `latest_raw_name` | object | 否 | 与 latest_dose 同一条提及里的**原文药名**（剂型/给药途径判定的唯一依据） |
+| `mentions` | array<MedMentionOut> | 是 | 逐次提及（按日期升序，无日期的排最后） |
+| `name` | string | 是 | 归一后的规范名；未识别时为原文名 |
+| `raw_names` | array<string> | 是 | 全部**原文写法**（去重排序）——归一会丢掉剂型（地塞米松注射液/片），故并列保留 |
+| `start` | object | 否 | 最早/最晚的带日期提及 |
+| `status` | string | 是 | 上游恒为 "active"（不推断停药）——原样透传，**不擅自改写成"已停"** |
+| `unverified` | boolean | 是 | 任一来源是云抽取未核对的（上游语义） |
+
+### `MedicationsReply`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `documents_scanned` | integer | 是 | 参与聚合的文档数（仅 text 层齐备者） |
+| `med_count` | integer | 是 | 药品跨度数 |
+| `medications` | array<MedSpanOut> | 是 |  |
+| `mention_count` | integer | 是 | 逐次提及总数 |
+| `person_id` | string | 是 |  |
+
 ### `Person`
 
 对外人员视图（折叠后的当前态）。id=UUIDv4 字符串形式（schema 保持纯 string，不依赖可选 feature —— D1）
@@ -686,6 +732,5 @@ curl -X GET \
 | `POST` | `/api/v1/persons/{pid}/entries/profile-event` | ProfileEvent(parser::profile_event payload)（stub→501） |
 | `POST` | `/api/v1/persons/{pid}/entries/self-measurement` | {type,value,unit,taken_at} → SelfMeasurement import（stub→501） |
 | `GET` | `/api/v1/persons/{pid}/measurements` | SelfMeasurement/ProfileEvent 事件回放投影(type,from,to)（stub→501） |
-| `GET` | `/api/v1/persons/{pid}/medications` | meds(MedSpan)聚合（stub→501） |
 
 > 端点形状**已固定**（路由已挂、已进 OpenAPI），实现后语义不变；调用它们现在只会得到 501。

@@ -193,6 +193,25 @@ async fn get_labs(
     })
 }
 
+// ---------- handler（读侧·聚合域: medications = parser::aggregate() 的 meds 面，D-026 stub 毕业）----------
+/// 用药跨度——与 labs 同一批文档、同一次 parser::aggregate 的另一块输出（D-026）。
+/// 证据回链 mention.docref（CAS sha）可一路溯源到原件字节；剂量/日期**原样透传不改写**（D2）。
+#[utoipa::path(get, path = "/api/v1/persons/{pid}/medications", tag = "records", params(("pid" = String, Path, description = "person uuid")),
+    responses((status = 200, description = "aggregated medication spans (with per-mention evidence docrefs)", body = vaults::MedicationsReply),
+               (status = 404, description = "person not found")))]
+async fn get_medications(
+    State(st): State<Arc<AppState>>,
+    AxPath(pid): AxPath<String>,
+) -> Result<Json<vaults::MedicationsReply>, ApiError> {
+    tokio::task::block_in_place(|| {
+        require_person(&st, &pid)?; // 同 timeline/search/labs：rusqlite/Vault 非 Send，整段住 block_in_place
+        let vault = vaults::open_person_vault(&st.home, &pid).map_err(ApiError::from)?;
+        let reply = vaults::meds_aggregate(&vault, &pid)
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        Ok(Json(reply))
+    })
+}
+
 // ---------- handler（写侧首端点：multipart 上传 = POC import 路径的 HTTP 版）----------
 /// MVP 直传同步入库(锁=每人串行占位)；OCR/DICOM worker 化后置。见 vaults::ingest_upload。
 #[utoipa::path(post, path = "/api/v1/persons/{pid}/documents", tag = "entries",
@@ -372,7 +391,6 @@ macro_rules! not_implemented {
         }
     };
 }
-not_implemented!(stub_medications, "medications: pending");
 not_implemented!(stub_conditions, "conditions: pending");
 not_implemented!(stub_measurements, "measurements: pending");
 not_implemented!(stub_self_measurement, "self-measurement entry: pending");
@@ -400,11 +418,12 @@ not_implemented!(stub_person_delete, "archive person(tombstone): pending registr
         (name = "records", description = "读侧：timeline/search/documents/labs…（未实现端点先挂契约，现返回501）"),
         (name = "entries", description = "写侧：append-only 条目与文档上传（未实现端点先挂契约，现返回501）")
     ),
-    paths(healthz, list_persons, create_person, get_timeline, get_search, get_labs, upload_document, list_documents,
+    paths(healthz, list_persons, create_person, get_timeline, get_search, get_labs, get_medications, upload_document, list_documents,
           get_document_detail, get_document_original),
     components(schemas(Person, PersonNew, vaults::TimelineItem, vaults::SearchItem, vaults::UploadReply,
                        vaults::DocumentListItem, vaults::DocumentDetail, vaults::TextLayerMeta, vaults::ExtractionPass,
-                       vaults::LabPointOut, vaults::LabSeriesOut, vaults::LabsReply))
+                       vaults::LabPointOut, vaults::LabSeriesOut, vaults::LabsReply,
+                       vaults::MedMentionOut, vaults::MedSpanOut, vaults::MedicationsReply))
 )]
 struct ApiDoc;
 
@@ -415,7 +434,6 @@ struct ApiDoc;
 /// 正是本项目最贵的漏账形态（D5：状态码不许粉饰）。反向保险见 tests/contract.rs
 /// （逐条断言本表里的端点真返回 501）。
 pub const CONTRACT: &[(&str, &str, &str, &str)] = &[
-    ("get", "/api/v1/persons/{pid}/medications", "records", "meds(MedSpan)聚合"),
     ("get", "/api/v1/persons/{pid}/conditions", "records", "conditions(AggregatedCondition 病程泳道)"),
     ("get", "/api/v1/persons/{pid}/measurements", "records", "SelfMeasurement/ProfileEvent 事件回放投影(type,from,to)"),
     ("post", "/api/v1/persons/{pid}/entries/self-measurement", "entries", "{type,value,unit,taken_at} → SelfMeasurement import"),
@@ -651,7 +669,7 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/persons/{pid}/documents/{sha}", get(get_document_detail))
         .route("/persons/{pid}/documents/{sha}/original", get(get_document_original))
         .route("/persons/{pid}/labs", get(get_labs)) // D-011 实装毕业(此前 stub→501；期间一个旧二进制+孤儿进程伪装成501教训见D-011)
-        .route("/persons/{pid}/medications", get(stub_medications))
+        .route("/persons/{pid}/medications", get(get_medications)) // D-026 实装毕业(此前 stub→501；入 CONTRACT 表前先实装，文档不粉饰状态码)
         .route("/persons/{pid}/conditions", get(stub_conditions))
         .route("/persons/{pid}/measurements", get(stub_measurements))
         .route("/persons/{pid}/entries/self-measurement", post(stub_self_measurement))

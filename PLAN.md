@@ -32,7 +32,7 @@
 |---|------|------|------|
 | 0 | 上游勘察 | 《upstream-study.md》：core-model API 面、单人假设深度、services/api 现状、可否独立编译成库 | ✅ 完成(2026-10-19) |
 | 1 | POC：单人不带 UI 跑通内核导入→查询(library级+346单测全绿) | poc/src/import_demo.rs 9步验收全PASS(D-009) | ✅ GREEN(2026-10-19) |
-| 2 | person 层设计 + ehr-api 骨架（axum, OpenAPI）——**已完成** | /api/v1 MVP；curl版抽查对齐POC证据链(D-011:34门全绿) | ✅ GREEN(2026-10-20) |
+| 2 | person 层设计 + ehr-api 骨架（axum, OpenAPI）——**已完成** | /api/v1 MVP；curl版抽查对齐POC证据链(D-011:34门全绿)；读侧聚合面已毕业 labs(D-025)/medications(D-026) | ✅ GREEN(2026-10-23) |
 | 3 | docker-compose（server+web）+ Web 管理端最小版 | 一键部署可用 | ✅ GREEN(2026-10-20，D-014/D-016) |
 | 4 | MCP server + QwenPaw SKILL | agent 可按人查档/写档 | 🔄 MCP 读侧 6 + **写侧 2 已交付**（D-017/D-019）；SKILL 已写（D-018），注册进 skill_pool 待验 |
 | 5 | 认证与多客户端（token/token scope），手机客户端预留 | 安全基线 | 🔄 T4 静态 Bearer token 已交付（D-022）；多客户端/手机端待做 |
@@ -54,19 +54,18 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
-## 当前状态（2026-10-22 · **T8 人类可读接口文档已交付（D-025）· 目标验收⑤销账**）
+## 当前状态（2026-10-23 · **T9 用药端点已实装（D-026）· stub 端点 8→7**）
 
-- ✅ **T8 交付（目标验收⑤「docs/API.md 人类可读接口文档」销账）**：①新增 `ehr-api/src/apidoc.rs`——**从运行时 OpenAPI 渲染 Markdown**（唯一事实源 = 服务端现合成的 `/openapi.json`，不是手抄）；②新增显式命令 `ehr-api --print-api-doc`（stdout 出机器可读 Markdown、stderr 出 `[证据]` 行，沿用 D1 惯例）；③生成 `docs/API.md`（21.7KB）含 7 节：概览/认证/状态码表/端点一览/**端点详解**（参数表+请求体+响应码+curl 示例）/数据模型（components.schemas 逐字段表）/未实装端点清单；④**stub 端点逐个显式标注「⚠️ stub（501）」**（D5：状态码不许粉饰）；⑤新增漂移门禁 `api-doc-check.sh`（8 门）。
-- ✅ **顺手修掉一个真漂移（本次最有价值的产出）**：`/api/v1/persons/{pid}/labs` **早已实装**（D-011 起的 `get_labs` handler，实测 HTTP **200**），但仍挂在 `CONTRACT` 表里被 OpenAPI 标成 `stub→501` ⇒ **任何从 OpenAPI 生成的文档都会说谎**（说它是 501，实际能用）。修法：`labs` 从 CONTRACT 移出、正式进 utoipa `paths(...)`；并加**反向保险** `tests/apidoc.rs::contract_entries_really_return_501`——**CONTRACT 表里的每一条都必须真返回 501**，否则门禁红。
+- ✅ **T9 交付（`/persons/{pid}/medications` 从 stub→501 毕业为真实现）**：①`vaults.rs` 抽出**共用取样路径** `collect_agg_rows()` + `rows_to_source_docs()` ⇒ `labs` 与 `medications` **同源同判据、同一次 `parser::aggregate()`**（一个语义只允许一处实现）；②**`doc_type` 如实传给 `aggregate`**（D-026 决策①，最硬的一条）：已分类的必须如实传（否则化验单被当处方挖药，「肌酐 112 umol/L」读成 112U 药），**判不出类型的（unknown）要还原成 `None`**（上游语义「None=宽松放行」，传 `Some("unknown")` 会让该文档**两个面都读不出**——实测 labs 变 0 条）；③每条 mention 带 `docref`（=出处原件 sha256）、药名/剂量**原样透传不改写**、`status` 恒 `active` **不擅自改写成「已停」**；④`medications` 从 `CONTRACT` 表移出、正式进 utoipa `paths(...)` ⇒ OpenAPI/文档不再宣称 501（反向保险 `contract_entries_really_return_501` 保留）。
 - ✅ **证据链（缺一即不算交付）**：
-  - ①**`api-doc-check.sh`（新增门禁）8 门 PASS / fails=0**：`--print-api-doc` exit=0、stdout 21711 bytes、stderr 有 `[证据]` 行、**stdout 无证据行污染**（行首锚定）→ 未知参数非零退出 → **`docs/API.md` 与生成物逐字一致（21711 bytes）** → **openapi 18 个 operation 全部出现在文档里（missing=0）** → **8 个 stub 端点逐个被标注**。
-  - ②**门禁真的会红（参数生效有证据）**：手工往 `docs/API.md` 追加一行 ⇒ A3 立刻 **FAIL + 打出 diff**；还原后 fails=0。**不是「传进去没反应」也不是「一次性开关」**。
-  - ③**`cargo test --all-targets` 全绿**：新增 `tests/apidoc.rs` **3 门**（CONTRACT 每条真返 501 / 文档覆盖每个 operation 且无幽灵端点 / stub 标注+401·403·503·鉴权头齐全）+ `apidoc` 单测 **1 门**；旧门禁 **35 门未破**（lib 12→13 / auth 7 / contract 1 / mcp 10 / rebuild 3 / sha_gate 1）⇒ **合计 38 门全绿**。
-  - ④**旧 e2e 门禁全绿未被破坏**：`ehtest.sh` fails=0、`mcp-e2e.sh` fails=0、`auth-e2e.sh` fails=0、`rebuild-e2e.sh` fails=0、`rebuild-lock-e2e.sh` fails=0、`skill-rest-check.sh` fails=0、`skill-contract-check.sh` fails=0、`web-e2e.sh`（起真服务复验）fails=0。
-  - ⑤**零新依赖**：`ehr-api/Cargo.lock` 未改动（文档渲染只用 serde_json/serde，仓库已有）。
-  - ⑥**dry-run 优先**：本轮全程 `--print-api-doc`（dry-run，**不建 vault、不起服务、不落任何状态**）先跑通，再起真服务复验 web-e2e。
-- 🔄 **下一步**：①**T5 Web 管理端正式化（选型先报方案再动手）**——这是目标验收①「docker-compose 一键起 + Web 管理端」的最后一块；②T3 未打勾（其实已交付，待与 T5 合并收口）；③公网暴露前：`EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；④ghcr 包可见性仍 private；⑤真·第三方 MCP 客户端互通仍未验；⑥`.dcm`/OCR worker 未做。
-- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（`ehr-api/web/index.html` 编译期内嵌，非正式前端，无构建链）；目标验收②的 **labs 已实装**，但 `medications`/`conditions`/`measurements`/三个 `entries`/`extraction`/`audit` 仍是 **stub→501**（8 个端点，文档已逐个标注）；`docs/API.md` 是**生成物**，改接口必须跑 `./api-doc-check.sh --write`，手改会被 A3 门禁打回；文档覆盖的是 **REST 面**，`/mcp` 的工具契约仍在 `skills/medme-ehr/references/tool-contracts.md`。
+  - ①**`meds-e2e.sh`（新增门禁）真进程 12 门 PASS / fails=0**：`/medications` → **200**；**M1 类型分流**（用药只来自处方，化验单 docref 不出现）；**M2 provenance verified mentions=3**（每条 mention 的药名/剂量都在**经 HTTP 取回的其原件原文**里逐字出现——「docref 指向某原件」与「药名真从那份原件来」是两件事）；**M3 labs 未退化**（同一化验单仍读出指标点、docref 仍指向化验单）；**M4 OpenAPI 里是真 operation + typed schema**；未知人 **404**；**M5 不在 CONTRACT 表**。
+  - ②**`cargo test --all-targets` 全绿**：新增 `tests/meds.rs` **2 门**（库级聚合 + HTTP 级端点/证据回链/CONTRACT 断言）+ 旧门禁**未破** ⇒ 合计 **40 门全绿**。
+  - ③**旧 e2e 门禁全绿未被破坏**：`ehtest.sh`(34 门) / `mcp-e2e.sh` / `auth-e2e.sh` / `rebuild-e2e.sh` / `rebuild-lock-e2e.sh` / `skill-rest-check.sh` / `skill-contract-check.sh` / `api-doc-check.sh`(8 门) / `web-e2e.sh`（起真服务复验）**全 fails=0**。
+  - ④**零新依赖**：`ehr-api/Cargo.lock` 与 `Cargo.toml` **未改动**（`git diff --stat` 为空，可验事实）。
+  - ⑤**dry-run 优先**：先跑库级 `cargo test` 与 `--print-api-doc` 干跑渲染，再起真进程跑 meds-e2e 与旧门禁复验。
+  - ⑥**新坑（已修）**：`skill-rest-check.sh` 首跑 fails=3 的真凶是**陈旧 release 二进制**（10月20构建，早于 D-026）——不是代码坏。`cargo build --release` 后 fails=0。**教训：门禁红 ⇒ 先问「它跑的是哪份二进制」，再怀疑代码**（D-011「红门先查门禁自身」的新变种：红的是**构建产物新鲜度**）。另：`ehtest.sh`/`rebuild-*.sh` 需显式传二进制绝对路径、`web-e2e.sh` 需先起真服务，二者的 usage 提示极易被误读成「门禁失败」。
+- 🔄 **下一步**：①**stub 端点继续毕业**（剩 **7 个**：`conditions`/`measurements`/三个 `entries`/`extraction`/`audit`）——`conditions` 与 `medications` 同出 `parser::aggregate` 的 `agg.conditions` 面，成本最低，是下一个自然的小步；②**T5 Web 管理端正式化（选型先报方案再动手）**——目标验收①的最后一块；③T3 待办未打勾（其实已交付，待与 T5 合并收口）；④公网暴露前：`EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑤ghcr 包可见性仍 private；⑥真·第三方 MCP 客户端互通仍未验；⑦`.dcm`/OCR worker 未做。
+- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（`ehr-api/web/index.html` 编译期内嵌，非正式前端，无构建链）；目标验收②中 `medications` **已实装**（D-026），但 `conditions`/`measurements`/三个 `entries`/`extraction`/`audit` 共 **7 个端点仍是 stub→501**（文档已逐个标注）；`medications` **MCP 侧暂无对应工具**（REST 独有，SKILL.md 已如实标注）；`docs/API.md` 是**生成物**，改接口必须跑 `./api-doc-check.sh --write`，手改会被 A3 门禁打回；文档覆盖的是 **REST 面**，`/mcp` 的工具契约仍在 `skills/medme-ehr/references/tool-contracts.md`。
 
 ### 历史状态（2026-10-22 · **T7 重建期写互斥已交付（D-024）· T6 全量重建已交付（D-023）**）
 

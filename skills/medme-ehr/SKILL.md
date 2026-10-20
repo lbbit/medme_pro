@@ -29,6 +29,7 @@ metadata:
 | 「什么时候做过什么检查」 | `ehr.sh timeline PID` | 文档级，`doc_date` 倒序，无日期件排最后 |
 | 「报告里提到 X 吗」 | `ehr.sh search PID "白细胞"` | 中文全文检索，命中片段带 `[高亮]` |
 | 「白细胞这段时间怎么变的」 | `ehr.sh labs PID` | 跨文档趋势；每点带 H/L 标记与 `docref` 证据 |
+| 「他在吃什么药 / 剂量多少」 | `ehr.sh medications PID` | 用药跨度；`latest_dose` 为最近剂量，逐次 `mentions[].docref` 可溯原件 |
 | 「他上传了哪些原件」 | `ehr.sh documents PID` | `content_hash` = 原件 sha256 = `docref` |
 | 「把这份报告原文给我看」 | `ehr.sh detail PID SHA` | 含 OCR 文本层 / extraction |
 | 「下载原件」 | `ehr.sh original PID SHA` | CAS 按 hash 寻址，服务端每次核 sha256 |
@@ -42,6 +43,7 @@ metadata:
 - **「总结某人所有异常」**：`labs` 看 `flag`，再对异常项用 `search` 找原文佐证，报告里带 `docref`。
 - **「最近一次体检说了什么」**：`timeline` 取第一条 → `detail` 读全文。
 - **「跟去年比变化」**：用 `labs` 同 `unit_canonical` 的 series 逐点对比，别自己拿两份 text 做差值。
+- **「这个药是哪儿开的」**：`medications` 拿 `mentions[].docref` → `detail PID SHA` 读原件全文 → 必要时 `original` 下字节核对。
 - **「先建档再存化验单」**：`person-create` 拿 id → `upload` → `search` 回查确认写进去了。
 
 ## 硬规矩（来自服务端证据链，别绕过）
@@ -75,6 +77,7 @@ REST 命令 ↔ MCP 工具一一对应（同一真相层，任选其一）：
 | `timeline PID` | `get_timeline` | 读 |
 | `search PID Q` | `search_records` | 读 |
 | `labs PID` | `get_labs` | 读 |
+| `medications PID` | *（暂无 MCP 工具，仅 REST）* | 读 |
 | `documents PID` | `list_documents` | 读 |
 | `detail PID SHA` | `get_document_detail` | 读 |
 | `person-create NAME` | `create_person` | 写 |
