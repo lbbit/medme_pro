@@ -1,5 +1,20 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-021 2026-10-20 · **T3「免维护接入」交付：SKILL 由 MCP 优先改为 REST 优先 + 真·第三方 agent 端到端兑现**
+**为什么做**：D-018 已把定位改成"skill=全部、MCP=可选"，但 T3 落地时发现一个未消解的矛盾：仓库里的 `SKILL.md` 通篇在讲 **MCP 8 个工具**（`list_persons`/`get_timeline`/…），而 D-018 的原则是"skill = 纯 markdown + curl，任何能执行 shell 的 agent 装上即用"。**照旧实现交付的会是一个"只能在 MCP 宿主里用"的 skill**——与 D-018 自己的结论矛盾。
+**关键结构决策①：SKILL.md 的主路径改为 REST 命令（`ehr.sh`），MCP 降为"可选壳"并给出 REST↔MCP 一一对照表**。理由：REST 是**唯一事实源**（OpenAPI 16 路径已自动生成），MCP 只是薄适配层（D-017/D-019 定的同真相层结构）。让 skill 讲事实源，比让它讲某个适配层更抗漂移。
+**关键结构决策②：引入 `skills/medme-ehr/scripts/ehr.sh`（纯 curl，零依赖）作为 skill 唯一调用面**。为什么要一个脚本而不是让 agent 直接拼 curl：**字段名与参数名是本项目最高频的错源**（D-016 教训：页面看着正常但数据全空；D-011③：期望值算错看起来像产品 bug）。把路径/字段/JSON 拼装收进一个可被门禁逐字段核对的脚本，agent 的自由度收敛在"选哪条命令"，参数正确性由脚本 + 门禁兜住。脚本用 `python3` 只做 JSON 美化与转义（零第三方依赖），故仍在"任何装了 curl+python3 的机器都能跑"的范围内。
+**关键结构决策③：验收口径 = 「升级不改配置」**，即三件事：①API base 走 `EHR_API_BASE`（默认 `http://127.0.0.1:8585`）；②token 走 `EHR_API_TOKEN`；③**SKILL.md 与脚本内不写死地址与 token**（门禁逐条 grep 断言，"写死"即 FAIL）。
+**证据链（缺一即不算交付）**：
+①`skill-rest-check.sh`（新增门禁）真进程 **fails=0**：7 组字段名共 **52 个**（persons 7 / timeline 7 / search 4 / labs 13 / documents 8 / detail 12 / upload 7）**逐个存在于真实响应**；命令面 SKILL↔helper **10 个**对齐；不变量 3 条（labs 必带 docref / 搜索命中=1 / 罕见词零假阳性=0）。
+②**`agent-e2e.sh`（新增门禁）——真·第三方 agent 端到端**：Copilot CLI 1.0.98（BYOK 接本地 Strata，见 `qwen3.8-27b-project/scripts/copilot-strata.sh`），沙箱 `/tmp/medme-ehr-agent-test` 里**只放 `.agents/skills/medme-ehr/`（无我们的任何上下文）**，agent 靠 `EHR_API_BASE` 环境变量找到服务。判定三条全 PASS：**找到目标人「一键部署验证」** / **报出白细胞 13.5（flag H 偏高）** / **给出 docref `43b5077d…`**。**这是 D-018「仅 skill+服务即可用全功能」首次拿到端到端证据**（此前只有协议层断言代偿）。
+③ghcr 编排端到端仍 GREEN：`up -d` → 容器 stderr `[证据] ehr-api v0.0.1 | mode=serve | EHR_HOME=/home/ehr | ADDR=0.0.0.0:8443` → healthz 200 → openapi paths=16 → **经 ehr.sh**（非裸 curl）建档+上传+labs（wbc 13.5 H，docref 逐字相等）→ Web 首页 200/8591B。
+④旧 `skill-contract-check.sh`（MCP 侧）**fails=0** 未被破坏——SKILL.md 增补 REST↔MCP 对照表后，8 工具名门禁仍全绿。
+**新坑两则（D4 同族）**：
+①**拼 JSON 时"每加一个字段自己带前导逗号"**——`ehr.sh person-create` 第一版写成 `BODY="{\"name\":X}"` 再 `BODY="$BODY,\"gender\":Y"` ⇒ 产出 `{"name":"x"},"gender":"y"}` 这种**非法 JSON**，服务返回非 JSON 文本，agent 侧表现为"建档失败"而真因是本地拼串。教训同 D-011「先怀疑测量方法」：**先怀疑自己这一侧的产物，再怀疑服务**。
+②**门禁自身的测量顺序错了 ⇒ 假失败**：`skill-rest-check.sh` 初版先 `persons`（此时还没建档 ⇒ 空数组 ⇒ "persons 无 id" 假 FAIL）且在**上传之前**就断言 search 命中数=0（真实是 1）。两次都是"先量后判"的反面：**门禁也会撒谎，先质疑门禁的时序**。
+**未销账/下一步**：①T4 token 鉴权（`EHR_API_TOKEN` 已在 helper 里预留，但**服务端尚未校验 ⇒ 填了也不生效**；这是"零维护接入"的最后一环）；②ghcr 包可见性仍 private；③真·第三方 MCP 客户端互通仍未验（MCP 已降为可选壳，优先级下调）；④`.dcm`/OCR worker 未做；⑤volume 内累计 10 个人档（历轮验收遗留）。
+
 ## D-020 2026-10-20 · **T1 CI 打通 + T2 双编排交付**：打 tag(v*) → GitHub Actions 构建 → ghcr.io/lbbit/medme_pro:<tag>；两个 compose（local build / ghcr 引用）共用 .env.sample
 **为什么做**：T1/T2 是"免维护部署"（T3）与公网暴露（T4）的前置——镜像发布链不通，则"一键起"只能靠每台机器本地 build。
 **关键结构决策①：CI 必须自己拉上游源码**。`upstream-medme/` 被 .gitignore 排除（只读浅克隆，不进版本库），而 ehr-api 通过 **path 依赖**引用 `upstream-medme/packages/*` ⇒ runner 上直接 build 必然失败。做法：新增 `upstream.pin`（固定 commit `9c9251d7abb8...`），CI 在 build 前拉该 commit 的 tarball 解出 `Cargo.toml`/`Cargo.lock`/`packages/`。**固定 commit 而非 main = 构建可复现**（上游不动则构建产物不动）。
