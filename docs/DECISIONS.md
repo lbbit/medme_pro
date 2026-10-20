@@ -1,5 +1,20 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-017 2026-10-20 · **阶段4 第一步：MCP server 落地（零新依赖 JSON-RPC over POST /mcp）**，6 个读侧工具 + 15 门契约/e2e 全绿
+**选型**：不引 rmcp / mcp-sdk，**手写 JSON-RPC 2.0 over HTTP**（Streamable HTTP 无 session 模式）。理由与 D-016 同形——本项目最值钱的不变量是「构建期零外网 + 依赖面最小」；MCP 用到的协议面只有 `initialize` / `tools/list` / `tools/call` / `ping`，小到可以自己钉死并被测试锁死。**可逆性保险**：将来换官方 SDK，只需保持本文件的 6 个工具契约与 `tests/mcp.rs` 的断言不变（测试全部走 JSON 层，不依赖内部实现）。
+**结构决策**：MCP 是**薄适配层**，直接复用 `ehr_api::vaults` 领域函数，与 REST handlers **同一份真相层**——不存在「MCP 里能查、REST 里查不到」的分叉。参数校验（`prepare()`）与执行（`block_in_place` 临界区）**分开**，非法参数在任何 IO（不开文件）之前被拒。
+**工具集（6 个，全是已实装域的读侧；写侧待阶段4 第二步）**：`list_persons` / `get_timeline` / `search_records` / `get_labs` / `list_documents` / `get_document_detail`。返回值一律 `content[0].text` + `structuredContent` **双份同源**（人读面 vs agent 机读面不得分叉，由测试断言两者相等）。
+**错误码语义（agent 要能据此改行为，而不是重试）**：缺参/空串/坏 limit ⇒ `-32602`；未知工具名 ⇒ `-32601`；未知方法 ⇒ `-32601`；**查无此人 ⇒ `-32001`（单独成码，与 404 领域语义对齐）**；内部 ⇒ `-32002`。工具级失败用 `isError:true` + `_code` 承载（非规范字段，仅为 e2e 可断言）。
+**证据链（缺一即不算交付）**：
+①`cargo test --all-targets` 全绿：**contract.rs 1 + sha_gate 1 + 新增 mcp.rs 5**。mcp.rs 五门分别锁：initialize/tools-list 形状且**公布的名字逐个能被 tools/call 认领（防「挂名不实现」）**；参数校验先于 IO；未知人 =-32001；**真数据链路**（REST 建档+上传 → MCP 读到同一 sha/同一中文文本/同一 labs series）；`/mcp` 不污染 REST 契约（openapi paths 仍 16，且 `paths["/mcp"]` 必须不存在）。
+②`mcp-e2e.sh`（新增门禁脚本）真进程复跑 **15 门全 PASS，fails=0**：protocolVersion=2025-06-18、tools=6、timeline=1、search「白细胞」count=1 且 snippet 含 `[白细胞]` 高亮、罕见词 zzqqww count=0、labs series 非空、**documents.sha 与 REST 上传返回值逐字相等**、detail.text 含「白细胞计数」、四类错误码全对、openapi_paths=16。
+③**构建期零外网未被破坏**：本轮 `src/mcp.rs` 只用已 vendored 的 axum/serde_json，**Cargo.toml 依赖零新增**（这是选型手写协议而非 SDK 的直接收益，也是可验证的）。
+**新坑三则（D4 同族）**：
+①**路由挂载位置错**：`.route("/mcp")` 一开始挂在 `nest("/api/v1", api)` **内部** ⇒ 实际路径 `/api/v1/mcp`，测试打 `/mcp` 全部 404。**教训：往 `router()` 挂顶层路由时先看清它落在 nest 内还是 nest 外**；且顶层 `Router` 无 state 参数，挂带 `State` 的 handler 必须显式 `.with_state(st.clone())`（且内层 `with_state(st)` 那次得先 clone，否则 E0382 move 借用冲突）。
+②**`block_in_place` 的测试前提**：`#[tokio::test]` 默认是 current_thread runtime，调用即 panic `can call blocking only when running on the multi-threaded runtime` ⇒ MCP 测试必须 `flavor = "multi_thread"`。**这是测试面与生产面 runtime 不一致那类缝**——REST 侧 handler 同样用它，之前没暴露是因为契约测试只打 501 stub 不进临界区。
+③**探针自己错了两回（D-011「先怀疑测量方法」第四次应验）**：①断言把 `"p"` 当非法参数，实际它是合法非空 id → 正确返回 -32001 而非 -32602；②五个测试共用同一个 `/tmp/...-<pid>` 目录，cargo test 并行下互删 → `No such file or directory`。**铁律补条：并行测试的 fixture 目录必须带测试名 tag 隔离；定断言前先想清楚「这个输入到底算不算非法」**。
+**未销账/下一步**：①QwenPaw SKILL（阶段4 第二步）——工具契约已就绪，SKILL 只需写「何时用哪个工具 + person_id 怎么来」；②写侧 MCP 工具（建档/传原件）待做；③真·第三方 MCP 客户端互通未验证（无 MCP client 可用，与 D-016 的浏览器渲染同属「本地工具不可假定可得」类，已用协议层断言 + 双面一致性代偿）。
+
 ## D-016 2026-10-20 · **阶段3 Web 管理端最小版交付**；「Next 服务选型」钉死为**不引入 Node 工具链**
 **选型（PLAN 挂了小半天的待决项）**：原问题悬着「Web 端用不用 Next/React」。**结论：最小版不引入 Node。**
 依据（先量后决，非偏好之争）：①本机 `node`/`npm` 均 **command not found**（实测），引 Next 会让镜像构建新增「宿主 Node 工具链 + 外网 npm registry」两个新失败面，而 D-014 刚证明**构建期零外网 vendor 离线**是本项目最值钱的不变量；②最小版的管理需求（建档/选人/时间线/文档上传/指标/检索）**全部已由现有 16 路径 JSON API 覆盖**，前端只做视图；③`include_str!` 编译期内嵌单文件 = 零新依赖、零构建面、单二进制自带 UI。

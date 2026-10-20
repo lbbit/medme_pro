@@ -16,6 +16,7 @@ use utoipa::OpenApi;
 mod persons;
 pub use persons::{Person, PersonNew, PersonStore};
 pub mod vaults;
+pub mod mcp; // 阶段4：MCP server（零新依赖 JSON-RPC over POST /mcp，薄适配层复用 vaults）
 pub use vaults::UploadReply; // 供 utoipa path!宏体解析(同 PersonNew 惯例)
 use axum::extract::{Path as AxPath, Query};
 
@@ -458,6 +459,14 @@ async fn openapi_route() -> Json<Value> {
     Json(openapi_json())
 }
 
+/// POST /mcp —— MCP(Streamable HTTP, 无 session) 入口。刻意 **不进 /openapi.json**：
+/// 它不是 REST 契约面而是 JSON-RPC 协议面；工具契约由 tools/list 自身公布 + tests/mcp.rs 守卫。
+async fn mcp_endpoint(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+    // JSON 解析失败由 axum 的 Json 拒绝器回 400（非 JSON-RPC 形状）——协议层与 REST 层边界诚实：
+    // 客户端发错 content-type/体时，2025-06-18 允许 HTTP 层先行拒绝。
+    Ok(Json(mcp::handle_http(&st, &body)))
+}
+
 pub fn router(st: Arc<AppState>) -> Router {
     let api = Router::new()
         .route("/healthz", get(healthz))
@@ -478,13 +487,18 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/persons/{pid}/entries/profile-event", post(stub_profile_event))
         .route("/documents/{sha}/extraction", put(stub_extraction))
         .route("/audit", get(stub_audit))
-        .with_state(st);
+        .with_state(st.clone());
 
     Router::new()
         .nest("/api/v1", api)
         .route("/openapi.json", get(openapi_route)) // 服务端每次现合成，与代码内 CONTRACT 常量必然同步（D1）
         .route("/", get(web_index)) // Web 管理端最小版：同源零依赖，避免跨域反代；刷新任意路由均回首页(D-016)
-}
+        // ⚠️ /mcp 必须挂在 nest("/api/v1") 之外：它是 MCP 协议面（客户端按规范打 /mcp），
+        //   塞进 REST 命名空间会让 clients 走 /api/v1/mcp 找不到——本轮 404 实证。
+        .route("/mcp", post(mcp_endpoint))
+        // 顶层 Router 无 state 参数 ⇒ 挂 /mcp 时须显式 with_state（内层 api 已消费 st，这里 clone 一个 Arc）
+        .with_state(st.clone())
+    }
 
 /// serve/dry-run 共用的 home 校验：canonicalize、要求已存在、建 vaults/ 派生目录。
 pub fn prepare_home_and_state(home_in: &std::path::Path, mkdir_vaults: bool) -> Result<Arc<AppState>> {
