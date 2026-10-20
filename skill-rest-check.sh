@@ -72,11 +72,28 @@ check "upload.fields"    "content_hash,deduped,document_id,doc_type,text_indexed
 check "medications.fields" "person_id,documents_scanned,med_count,mention_count,medications,drug_key,name,raw_names,atc,latest_dose,latest_raw_name,start,end,status,docrefs,unverified,mentions,date,dose,raw_name,docref,origin"
 
 # 2) SKILL.md / rest-contracts.md 里承诺的命令必须都被 helper 支持
-for c in health persons person-create timeline search labs medications documents detail original upload; do
+for c in health persons person-create timeline search labs medications documents detail original upload measurements self-measure note profile-event; do
   grep -q "ehr.sh $c" "$SKILL" || { echo "  FAIL SKILL.md 未提命令 $c"; fails=$((fails+1)); }
   "$E" --help | grep -qE "^  $c( |\$)" || { echo "  FAIL helper 不支持命令 $c"; fails=$((fails+1)); }
 done
-echo "  PASS 命令面 SKILL ↔ helper 对齐(11 个)"
+echo "  PASS 命令面 SKILL ↔ helper 对齐(15 个)"
+
+# 2b) 写侧手动条目（D-028）：helper 三个写命令必须真写进去，读回 measurements
+SM=$("$E" self-measure "$PID" --value bp_systolic=128 --value bp_diastolic=82 --unit mmHg --taken-at 2026-10-20T08:30:00+08:00)
+gate "self_measure_created" "$(echo "$SM" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["doc_type"])')" "self_measurement"
+gate "self_measure_not_deduped" "$(echo "$SM" | python3 -c 'import json,sys;print(json.load(sys.stdin)["deduped"])')" "False"
+NT=$("$E" note "$PID" "门禁笔记原文")
+gate "note_created" "$(echo "$NT" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["doc_type"])')" "note"
+PE=$("$E" profile-event "$PID" --kind flare --package sle --at 2026-10-19 --payload '{"note":"关节痛"}')
+gate "profile_event_created" "$(echo "$PE" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["doc_type"])')" "profile_event"
+MS=$("$E" measurements "$PID")
+gate "measurements_count" "$(echo "$MS" | python3 -c 'import json,sys;print(json.load(sys.stdin)["count"])')" "3"
+gate "measurements_note_text_roundtrip" "$(echo "$MS" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(sum(1 for m in d["measurements"] if m.get("text")=="门禁笔记原文"))')" "1"
+gate "measurements_has_ref_source" "$(echo "$MS" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(sum(1 for m in d["measurements"] for v in m.get("values",[]) if v.get("ref_source")))')" "2"
+gate "measurements_kind_filter" "$("$E" measurements "$PID" --kind note | python3 -c 'import json,sys;print(json.load(sys.stdin)["count"])')" "1"
+gate "measurements_bad_kind_400" "$(curl -s -o /dev/null -w '%{http_code}' -G "http://127.0.0.1:$PORT/api/v1/persons/$PID/measurements" --data-urlencode "kind=nonsense")" "400"
+gate "measurements_bad_date_400" "$(curl -s -o /dev/null -w '%{http_code}' -G "http://127.0.0.1:$PORT/api/v1/persons/$PID/measurements" --data-urlencode "from=not-a-date")" "400"
+gate "self_measure_implausible_400" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/api/v1/persons/$PID/entries/self-measurement" -H 'content-type: application/json' -d '{"values":[{"analyte_key":"bp_systolic","value":138388,"unit":"mmHg"}]}')" "400"
 
 # 3) 关键不变量：数值只在 labs 里、证据带 docref、search 0 命中不报错
 LABS_JSON=$("$E" labs "$PID")

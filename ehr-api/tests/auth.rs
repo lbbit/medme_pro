@@ -5,12 +5,24 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
+/// 每个 fixture 用**独立**的临时目录。
+///
+/// ⚠️ 这里原先只用 `scope_spec` 派生目录名 ⇒ **两个用了同一 spec 的测试共享同一个
+/// registry 目录** ⇒ cargo test 并行跑时两个 `PersonStore::append` 同时往同一个
+/// `persons.jsonl` 追加 ⇒ 行交错 ⇒ 下一次 `list()` 反序列化失败 ⇒ 随机 500。
+///   症状：同一个测试文件**时绿时红**（实测 8 跑 3 红），看着像「随机抖动」，
+///   实为**真 bug（共享目录竞争）** —— 与 D-027 暂存目录互删同族：**先怀疑共享资源，别当抖动**。
+/// 修法：加一个进程内单调计数器 ⇒ 每次调用一个**独占**目录。
 fn fixture(scope_spec: &str) -> axum::Router {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!(
-        "ehr-api-auth-test-{}-{}",
+        "ehr-api-auth-test-{}-{}-{}",
         std::process::id(),
+        n,
         scope_spec.replace([':', ',', '='], "_")
     ));
+    let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(tmp.join("vaults")).unwrap();
     let set = ehr_api::auth::TokenSet::parse(scope_spec).expect("token spec parses");
     let st = ehr_api::AppState::from_home_with_auth(&tmp, set);
@@ -147,6 +159,7 @@ async fn mcp_tool_scope_is_enforced_per_tool() {
 async fn open_mode_allows_everything_but_no_token_table() {
     // 未配置 token ⇒ open 模式（向后兼容；启动 [证据] 行会显式标 auth=open）
     let tmp = std::env::temp_dir().join(format!("ehr-api-auth-open-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(tmp.join("vaults")).unwrap();
     let app = ehr_api::router(ehr_api::AppState::from_home(&tmp));
     assert_eq!(get(&app, "/api/v1/persons", None).await, StatusCode::OK);

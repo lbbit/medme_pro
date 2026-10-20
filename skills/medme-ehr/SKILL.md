@@ -9,7 +9,7 @@ metadata:
 
 # medme-ehr 档案工具集（REST 优先 · MCP 可选）
 
-服务端是 `ehr-api` 的 REST API（OpenAPI 自动生成，16 路径，base = `$EHR_API_BASE/api/v1`）。
+服务端是 `ehr-api` 的 REST API（OpenAPI 自动生成，16 路径 / 18 operation，base = `$EHR_API_BASE/api/v1`）。
 **本 skill 只需一个能执行 shell 的 agent**（Copilot CLI / codex / QwenPaw / 手机端脚本），零注册、零守护进程。
 
 ## 前置：先定人，再查档
@@ -31,6 +31,10 @@ metadata:
 | 「白细胞这段时间怎么变的」 | `ehr.sh labs PID` | 跨文档趋势；每点带 H/L 标记与 `docref` 证据 |
 | 「他在吃什么药 / 剂量多少」 | `ehr.sh medications PID` | 用药跨度；`latest_dose` 为最近剂量，逐次 `mentions[].docref` 可溯原件 |
 | 「他上传了哪些原件」 | `ehr.sh documents PID` | `content_hash` = 原件 sha256 = `docref` |
+| 「他自己在家量了血压/血糖？」 | `ehr.sh measurements PID [--kind self_measurement]` | 家庭自测值；**与医院指标永不同组**（`labs` 里 `self_measured=true` 一眼可辨）；区间带 `ref_source` 出处 |
+| 「记一条今天头晕」 | `ehr.sh note PID "今天有点头晕"` | 纯文本笔记，原样落库；写后 `measurements --kind note` 可回读 |
+| 「记一次病程发作」 | `ehr.sh profile-event PID --kind flare --package sle --at 2026-10-22` | `--at` 是**事件发生那天**（不是记录那天）；`--payload` 可带 JSON |
+| 「把这次自测血压存进去」 | `ehr.sh self-measure PID --value bp_systolic=128 --value bp_diastolic=82 --unit mmHg` | 血压给两个 `--value`；生理学不可能的值 ⇒ 服务端 400 |
 | 「把这份报告原文给我看」 | `ehr.sh detail PID SHA` | 含 OCR 文本层 / extraction |
 | 「下载原件」 | `ehr.sh original PID SHA` | CAS 按 hash 寻址，服务端每次核 sha256 |
 | 「给某人建个档」 | `ehr.sh person-create "张三" --gender male --birthday 1990-01-02` | 返回 `id`；建档前先 `persons` 核对同名者 |

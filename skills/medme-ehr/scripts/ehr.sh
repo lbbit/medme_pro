@@ -27,6 +27,13 @@ usage() {
   labs PID                    某人检验指标趋势（含 H/L 标记与 docref 证据）
   medications PID             某人用药跨度（药名/剂量/ATC + 逐次提及 docref 证据）
   documents PID               某人文档列表
+  measurements PID [--kind K] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+                            某人手动条目投影（自测值/笔记/动作事件）
+  self-measure PID --value KEY=VALUE [--value KEY=VALUE] [--unit U] [--taken-at RFC3339]
+                            写入一条自测记录（血压给两个 --value）
+  note PID TEXT                写入一条纯文本笔记
+  profile-event PID --kind K --package P --at YYYY-MM-DD [--payload JSON]
+                            写入一条病程动作日志
   detail PID SHA              文档详情（含 OCR 文本层 / extraction）
   original PID SHA            下载原件字节（CAS 按 hash 寻址，每次核 sha256）
   upload PID FILE             上传原件（multipart，仅 .txt/.pdf）
@@ -101,6 +108,73 @@ case "$CMD" in
   medications)
     PID="${1:-}"; [ -n "$PID" ] || die "medications 需要 person_id"
     _c "$BASE/persons/$PID/medications" | _pp ;;
+  measurements)
+    PID="${1:-}"; [ -n "$PID" ] || die "measurements 需要 person_id"
+    shift || true
+    Q=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --kind) Q+=(--data-urlencode "kind=$2"); shift 2;;
+        --from) Q+=(--data-urlencode "from=$2"); shift 2;;
+        --to)   Q+=(--data-urlencode "to=$2");   shift 2;;
+        *) die "未知参数 $1";;
+      esac
+    done
+    _c -G "$BASE/persons/$PID/measurements" ${Q[@]+"${Q[@]}"} | _pp ;;
+  self-measure)
+    PID="${1:-}"; [ -n "$PID" ] || die "self-measure 需要 person_id"
+    shift || true
+    # 收集 KEY=VALUE 对（--value 可多次），单位用 --unit 统一给（可省略 ⇒ 服务端必填，
+    # 这里不替用户猜单位：宁少不臆造）。
+    PAIRS=(); UNIT=""; TAKEN=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --value)
+          KV="${2:-}"; [ -n "$KV" ] || die "--value 需要 KEY=VALUE"
+          case "$KV" in *=*) ;; *) die "--value 形状应为 KEY=VALUE";; esac
+          PAIRS+=("$KV"); shift 2;;
+        --unit) UNIT="${2:-}"; shift 2;;
+        --taken-at) TAKEN="${2:-}"; shift 2;;
+        *) die "未知参数 $1";;
+      esac
+    done
+    [ ${#PAIRS[@]} -gt 0 ] || die "self-measure 至少要一个 --value KEY=VALUE"
+    [ -n "$UNIT" ] || die "self-measure 需要 --unit（不替用户猜单位）"
+    BODY=$(python3 -c '
+import json,sys
+pairs=sys.argv[1].split("\t")
+unit=sys.argv[2]; taken=sys.argv[3]
+vals=[]
+for kv in pairs:
+    if not kv.strip(): continue
+    k,v=kv.split("=",1)
+    vals.append({"analyte_key":k,"value":float(v),"unit":unit})
+b={"values":vals}
+if taken: b["taken_at"]=taken
+print(json.dumps(b,ensure_ascii=False))
+' "$(printf '%s\t' "${PAIRS[@]}")" "$UNIT" "$TAKEN")
+    _c -X POST "$BASE/persons/$PID/entries/self-measurement" -H 'content-type: application/json' -d "$BODY" | _pp ;;
+  note)
+    PID="${1:-}"; TEXT="${2:-}"
+    [ -n "$PID" ] && [ -n "$TEXT" ] || die "note 需要 person_id 与正文"
+    BODY="{\"text\":$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$TEXT")}"
+    _c -X POST "$BASE/persons/$PID/entries/note" -H 'content-type: application/json' -d "$BODY" | _pp ;;
+  profile-event)
+    PID="${1:-}"; [ -n "$PID" ] || die "profile-event 需要 person_id"
+    shift || true
+    KIND=""; PKG=""; AT=""; PAYLOAD='{}'
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --kind) KIND="${2:-}"; shift 2;;
+        --package) PKG="${2:-}"; shift 2;;
+        --at) AT="${2:-}"; shift 2;;
+        --payload) PAYLOAD="${2:-}"; shift 2;;
+        *) die "未知参数 $1";;
+      esac
+    done
+    [ -n "$KIND" ] && [ -n "$PKG" ] && [ -n "$AT" ] || die "profile-event 需要 --kind/--package/--at"
+    BODY=$(python3 -c 'import json,sys;print(json.dumps({"kind":sys.argv[1],"package":sys.argv[2],"at":sys.argv[3],"payload":json.loads(sys.argv[4])},ensure_ascii=False))' "$KIND" "$PKG" "$AT" "$PAYLOAD")
+    _c -X POST "$BASE/persons/$PID/entries/profile-event" -H 'content-type: application/json' -d "$BODY" | _pp ;;
   documents)
     PID="${1:-}"; [ -n "$PID" ] || die "documents 需要 person_id"
     _c "$BASE/persons/$PID/documents" | _pp ;;

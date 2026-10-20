@@ -54,11 +54,11 @@
 | `POST` | `/api/v1/persons/{pid}/documents` | MVP 直传同步入库(锁=每人串行占位)；OCR/DICOM worker 化后置。见 vaults::ingest_upload。 | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/documents/{sha}` | GET /persons/{pid}/documents/{sha} —— document + OCR文本层 + extraction JSON(API-DESIGN)。 | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/documents/{sha}/original` | GET .../documents/{sha}/original —— CAS read_object **每次核 sha256**(内核内建防投毒)后流字节。 dedup/raw-only 件都能取到（CAS 按 hash 寻址，不经索引）——这是「原件永不丢」的兑现端点。 | ✅ 已实装 |
-| `POST` | `/api/v1/persons/{pid}/entries/note` | Note 条目（stub→501） | ⚠️ stub（501） |
-| `POST` | `/api/v1/persons/{pid}/entries/profile-event` | ProfileEvent(parser::profile_event payload)（stub→501） | ⚠️ stub（501） |
-| `POST` | `/api/v1/persons/{pid}/entries/self-measurement` | {type,value,unit,taken_at} → SelfMeasurement import（stub→501） | ⚠️ stub（501） |
+| `POST` | `/api/v1/persons/{pid}/entries/note` | 写一条纯文本笔记。原文即内容（不解析、不关联用药/诊断）。 | ✅ 已实装 |
+| `POST` | `/api/v1/persons/{pid}/entries/profile-event` | 写一条病程动作日志（如「开启病程档案」「停药」）。`at` 是**事件发生的那天** （YYYY-MM-DD，用户说的那天），`payload` 必须是 JSON 对象。 | ✅ 已实装 |
+| `POST` | `/api/v1/persons/{pid}/entries/self-measurement` | 写一条自测记录（结构化、append-only）。血压是**两个值共享一条记录**。 生理学不可能的值（138388 mmHg / 收缩压≤舒张压）⇒ 400 并给出原因。 | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/labs` | 指标趋势——一人一箱下 vault 全集即档案；证据回链 point.docref(CAS sha)可溯原件。见 vaults::labs_aggregate。 | ✅ 已实装 |
-| `GET` | `/api/v1/persons/{pid}/measurements` | SelfMeasurement/ProfileEvent 事件回放投影(type,from,to)（stub→501） | ⚠️ stub（501） |
+| `GET` | `/api/v1/persons/{pid}/measurements` | 自测值/笔记/动作日志的**回放投影**（写侧见同批实装的三个 POST 端点）。 载荷用上游 `parse_*_payload` 逐字读回；家庭参考区间用上游 `home_ref_range` （**查不到出处就不给区间**）；`kind`/`from`/`to` 真过滤（非法日期 400 带原因）。 | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/medications` | 用药跨度——与 labs 同一批文档、同一次 parser::aggregate 的另一块输出（D-026）。 证据回链 mention.docref（CAS sha）可一路溯源到原件字节；剂量/日期**原样透传不改写**（D2）。 | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/search` | FTS5+jieba 全文检索(中文分词 POC步骤06实证)。q 必填；limit 缺省20、钳 [1,100]。 | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/timeline` | 健康事件时间线 —— Vault::timeline 直出；按 doc_date DESC、无日期件排在最后(内核 ORDER BY 语义)。 | ✅ 已实装 |
@@ -332,17 +332,29 @@ curl -X GET \
 
 ### `POST /api/v1/persons/{pid}/entries/note`
 
-Note 条目（stub→501）
-
-> ⚠️ **本端点当前返回 501（尚未实装）**——下方是已固定的契约形状，实现后语义不再变。
+写一条纯文本笔记。原文即内容（不解析、不关联用药/诊断）。
 
 - 鉴权：需要 Bearer token
+
+**参数**
+
+| 名 | 位置 | 必填 | 说明 |
+|---|---|---|---|
+| `pid` | path | 是 | person uuid |
+
+**请求体**（content-type: application/json）
+
+```json
+NoteIn
+```
+
 **响应**
 
 | 码 | 说明 |
 |---|---|
-| `200` | planned |
-| `501` | not implemented yet (stage-2 in progress) |
+| `201` | note recorded |
+| `400` | empty text / bad taken_at |
+| `404` | person not found |
 
 
 **示例**
@@ -350,22 +362,36 @@ Note 条目（stub→501）
 ```bash
 curl -X POST \
   -H 'Authorization: Bearer $EHR_API_TOKEN' \
-  'http://127.0.0.1:8443/api/v1/persons/<person_id>/entries/note'
+  'http://127.0.0.1:8443/api/v1/persons/<person_id>/entries/note' \
+  -H 'content-type: application/json' \
+  -d '<JSON body>'
 ```
 
 ### `POST /api/v1/persons/{pid}/entries/profile-event`
 
-ProfileEvent(parser::profile_event payload)（stub→501）
-
-> ⚠️ **本端点当前返回 501（尚未实装）**——下方是已固定的契约形状，实现后语义不再变。
+写一条病程动作日志（如「开启病程档案」「停药」）。`at` 是**事件发生的那天** （YYYY-MM-DD，用户说的那天），`payload` 必须是 JSON 对象。
 
 - 鉴权：需要 Bearer token
+
+**参数**
+
+| 名 | 位置 | 必填 | 说明 |
+|---|---|---|---|
+| `pid` | path | 是 | person uuid |
+
+**请求体**（content-type: application/json）
+
+```json
+ProfileEventIn
+```
+
 **响应**
 
 | 码 | 说明 |
 |---|---|
-| `200` | planned |
-| `501` | not implemented yet (stage-2 in progress) |
+| `201` | profile event recorded |
+| `400` | bad at / payload not an object |
+| `404` | person not found |
 
 
 **示例**
@@ -373,22 +399,36 @@ ProfileEvent(parser::profile_event payload)（stub→501）
 ```bash
 curl -X POST \
   -H 'Authorization: Bearer $EHR_API_TOKEN' \
-  'http://127.0.0.1:8443/api/v1/persons/<person_id>/entries/profile-event'
+  'http://127.0.0.1:8443/api/v1/persons/<person_id>/entries/profile-event' \
+  -H 'content-type: application/json' \
+  -d '<JSON body>'
 ```
 
 ### `POST /api/v1/persons/{pid}/entries/self-measurement`
 
-{type,value,unit,taken_at} → SelfMeasurement import（stub→501）
-
-> ⚠️ **本端点当前返回 501（尚未实装）**——下方是已固定的契约形状，实现后语义不再变。
+写一条自测记录（结构化、append-only）。血压是**两个值共享一条记录**。 生理学不可能的值（138388 mmHg / 收缩压≤舒张压）⇒ 400 并给出原因。
 
 - 鉴权：需要 Bearer token
+
+**参数**
+
+| 名 | 位置 | 必填 | 说明 |
+|---|---|---|---|
+| `pid` | path | 是 | person uuid |
+
+**请求体**（content-type: application/json）
+
+```json
+SelfMeasurementIn
+```
+
 **响应**
 
 | 码 | 说明 |
 |---|---|
-| `200` | planned |
-| `501` | not implemented yet (stage-2 in progress) |
+| `201` | self-measurement recorded |
+| `400` | empty values / implausible value / bad taken_at |
+| `404` | person not found |
 
 
 **示例**
@@ -396,7 +436,9 @@ curl -X POST \
 ```bash
 curl -X POST \
   -H 'Authorization: Bearer $EHR_API_TOKEN' \
-  'http://127.0.0.1:8443/api/v1/persons/<person_id>/entries/self-measurement'
+  'http://127.0.0.1:8443/api/v1/persons/<person_id>/entries/self-measurement' \
+  -H 'content-type: application/json' \
+  -d '<JSON body>'
 ```
 
 ### `GET /api/v1/persons/{pid}/labs`
@@ -428,17 +470,25 @@ curl -X GET \
 
 ### `GET /api/v1/persons/{pid}/measurements`
 
-SelfMeasurement/ProfileEvent 事件回放投影(type,from,to)（stub→501）
-
-> ⚠️ **本端点当前返回 501（尚未实装）**——下方是已固定的契约形状，实现后语义不再变。
+自测值/笔记/动作日志的**回放投影**（写侧见同批实装的三个 POST 端点）。 载荷用上游 `parse_*_payload` 逐字读回；家庭参考区间用上游 `home_ref_range` （**查不到出处就不给区间**）；`kind`/`from`/`to` 真过滤（非法日期 400 带原因）。
 
 - 鉴权：需要 Bearer token
+
+**参数**
+
+| 名 | 位置 | 必填 | 说明 |
+|---|---|---|---|
+| `pid` | path | 是 | person uuid |
+| `kind` | query | 否 | 只看某一类：self_measurement|note|profile_event |
+| `from` | query | 否 | 起始日期(含) YYYY-MM-DD |
+| `to` | query | 否 | 结束日期(含) YYYY-MM-DD |
 **响应**
 
 | 码 | 说明 |
 |---|---|
-| `200` | planned |
-| `501` | not implemented yet (stage-2 in progress) |
+| `200` | replayed manual entries (self-measurement / note / profile-event) |
+| `400` | bad kind / bad date / from>to |
+| `404` | person not found |
 
 
 **示例**
@@ -446,7 +496,7 @@ SelfMeasurement/ProfileEvent 事件回放投影(type,from,to)（stub→501）
 ```bash
 curl -X GET \
   -H 'Authorization: Bearer $EHR_API_TOKEN' \
-  'http://127.0.0.1:8443/api/v1/persons/<person_id>/measurements'
+  'http://127.0.0.1:8443/api/v1/persons/<person_id>/measurements?kind=<kind>&from=<from>&to=<to>'
 ```
 
 ### `GET /api/v1/persons/{pid}/medications`
@@ -593,6 +643,19 @@ curl -X GET \
 | `text_indexed` | boolean | 是 |  |
 | `title` | object | 否 |  |
 
+### `EntryReply`
+
+写侧统一回执（三类条目同形，便于 agent 一套代码处理）。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `content_hash` | string | 是 | 该条目的合成文本在 CAS 里的 sha256 —— **可回链到原件字节** （`GET /persons/{pid}/documents/{sha}/original`），与上传件同一套寻址。 |
+| `deduped` | boolean | 是 | true = 内容与既有条目逐字相同（CAS 去重）⇒ **没有新增记录**。 正常路径恒 false（正文带毫秒记录时间）；true 时必须让调用方知道「没写进去」。 |
+| `doc_type` | string | 是 | doc_type（`self_measurement`/`note`/`profile_event`）。 |
+| `document_id` | integer(int64) | 是 | 新建（或复用）的 document id。 |
+| `taken_at` | string | 是 | 事件/记录时刻（RFC3339 UTC）。 |
+| `title` | object | 否 | 标题（时间线展示用）。 |
+
 ### `ExtractionPass`
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -626,6 +689,7 @@ curl -X GET \
 | `ref_high_canonical` | object | 否 |  |
 | `ref_low` | object | 否 | 参考区间(与点同单位;无法保证则成对 None——不给错单位的一对数) |
 | `ref_low_canonical` | object | 否 |  |
+| `self_measured` | boolean | 是 | true=这条序列来自**手动录入的自测值**（家庭测量），false=来自医院报告。 ⚠️ 上游用 `GroupKey::SelfMeasured` 把两者**结构上分开**（家庭自测血压与 门诊血压参考区间不同，永不画成一条线）——但**不告诉消费方**的话， 消费方会把家庭值当医院值解读（参考区间就是错的）。故此处如实透传上游 的 `self_measured` 标志（D-028：不说=粉饰）。 |
 | `unit_canonical` | object | 否 |  |
 | `values_converted` | boolean | 是 | true=序列混过不同印刷单位已统一换算(纸上找不到这个数字,渲染必须言明) |
 
@@ -638,6 +702,59 @@ curl -X GET \
 | `series` | array<LabSeriesOut> | 是 |  |
 | `series_count` | integer | 是 |  |
 | `total_points` | integer | 是 |  |
+
+### `MeasurementOut`
+
+一条手动记录（自测值 或 动作事件）。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `docref` | string | 是 | 证据 docref = 合成文本的 sha256（可走 `documents/{sha}/original` 取回字节） |
+| `document_id` | integer(int64) | 是 |  |
+| `event_at` | object | 否 | 事件发生日期（`YYYY-MM-DD`，**用户说的那天**，不是记录那天） |
+| `event_kind` | object | 否 | 动作事件字段（`profile_event` 才有）：kind / 病种 / **事件发生的那天** / 载荷 |
+| `event_package` | object | 否 |  |
+| `event_payload` | any | 否 |  |
+| `kind` | string | 是 | 记录类型（`self_measurement`/`note`/`profile_event`） |
+| `payload_readable` | boolean | 是 | true = 结构化载荷**读不出来**（哨兵缺失/JSON 坏了/版本不符）。 此时 `values` 为空、原文仍在 `text` 里 —— **如实标注，不半猜**。 |
+| `taken_at` | string | 是 | 记录时刻（RFC3339 UTC）——文档日期 |
+| `text` | object | 否 | 笔记正文（`note` 才有；原样透传，**不解析**它是什么） |
+| `title` | object | 否 | 标题（时间线展示用） |
+| `values` | array<MeasurementValueOut> | 否 | 自测值（`self_measurement` 才有；一条记录可含多个值——血压是两个值） |
+
+### `MeasurementValueOut`
+
+一条自测值（从合成载荷逐字读回）。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `analyte_key` | string | 是 | 规范分析物键（如 `bp_systolic`） |
+| `flag` | object | 否 | 相对家庭区间的标志（H/L/N）。**无区间时恒为 None**（不猜「正常」）。 |
+| `ref_high` | object | 否 |  |
+| `ref_low` | object | 否 | 家庭参考区间（上游 `home_ref_range`：**查不到出处就不给区间**，绝不臆造阈值） |
+| `ref_source` | object | 否 | 区间出处（上游写明的来源文本；随区间一起给，不单独出现） |
+| `unit` | string | 是 | 单位（**原样**，写入方恒发规范单位，本层不换算） |
+| `value` | number(double) | 是 |  |
+
+### `MeasurementsQuery`
+
+measurements 投影的查询参数。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `from` | object | 否 | 起始日期（含），`YYYY-MM-DD`。缺省 = 不限。 |
+| `kind` | object | 否 | 只看某一类（`self_measurement`/`note`/`profile_event`）。缺省 = 全看。 |
+| `to` | object | 否 | 结束日期（含），`YYYY-MM-DD`。缺省 = 不限。 |
+
+### `MeasurementsReply`
+
+measurements 投影的整个回执。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `count` | integer | 是 | 投影到的记录数 |
+| `measurements` | array<MeasurementOut> | 是 |  |
+| `person_id` | string | 是 |  |
 
 ### `MedMentionOut`
 
@@ -681,6 +798,15 @@ curl -X GET \
 | `mention_count` | integer | 是 | 逐次提及总数 |
 | `person_id` | string | 是 |  |
 
+### `NoteIn`
+
+纯文本笔记请求体。原文即内容（上游 `add_note`）。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `taken_at` | object | 否 | 记录时刻（RFC3339）。缺省 = 写入时刻。 |
+| `text` | string | 是 |  |
+
 ### `Person`
 
 对外人员视图（折叠后的当前态）。id=UUIDv4 字符串形式（schema 保持纯 string，不依赖可选 feature —— D1）
@@ -706,6 +832,17 @@ curl -X GET \
 | `id_note` | object | 否 |  |
 | `name` | string | 是 |  |
 
+### `ProfileEventIn`
+
+病程动作日志请求体（上游 `parser::ProfileEvent`）。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `at` | string | 是 | 事件发生日期 `YYYY-MM-DD`（**用户说的那天**，不是记录那天）——形状不对会悄悄排错， 故在这道边界上就挡住（上游同款校验）。 |
+| `kind` | string | 是 | 动作种类（如 `enable`/`disable`/`confirm_dx`/`flare`…）。**原样透传**， 不认得的 kind 照样落库（上游：将来能读它 ⇒ 「永远可重算」的前提）。 |
+| `package` | string | 是 | 病种包 id（如 `sle`）。 |
+| `payload` | object | 否 | 载荷 JSON **对象**（规则只按键取值；`null`/数组/裸数字对任何规则都只是噪音）。 |
+
 ### `SearchItem`
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -713,6 +850,26 @@ curl -X GET \
 | `document_id` | integer(int64) | 是 |  |
 | `snippet` | string | 是 | FTS5 snippet：[高亮]标记为内核原生产出(jieba预分词+unicode61 中文路径 POC步骤06实证) |
 | `title` | object | 否 |  |
+
+### `SelfMeasuredValueIn`
+
+一个自测值（上游 `parser::SelfMeasuredValue` 的 HTTP 形态）。
+`analyte_key` 是**规范键**（如 `bp_systolic`），不是显示名；`unit` 原样落库。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `analyte_key` | string | 是 | 规范分析物键（如 `bp_systolic`/`bp_diastolic`/`heart_rate`/`body_weight`/ `body_temperature`/`glucose`）。未知键不报错（上游刻意不做白名单）， 但也不出参考区间/异常标志（上游 `home_ref_range` 的 `_ => None` 分支）。 |
+| `unit` | string | 是 |  |
+| `value` | number(double) | 是 |  |
+
+### `SelfMeasurementIn`
+
+自测记录请求体。血压是**两个值共享一条记录**（上游 §5.3：一次测量是最小编辑单元）。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `taken_at` | object | 否 | 测量时刻（RFC3339）。缺省 = 写入时刻。 |
+| `values` | array<SelfMeasuredValueIn> | 是 | 至少一个值；血压请同时给收缩压与舒张压。 |
 
 ### `TextLayerMeta`
 
@@ -751,9 +908,5 @@ curl -X GET \
 |---|---|---|
 | `GET` | `/api/v1/audit` | 审计视图(person/op 过滤，内容哈希留痕)（stub→501） |
 | `PUT` | `/api/v1/documents/{sha}/extraction` | AI agent 结构化发现(引用不替代，字段级 evidence 锚点)（stub→501） |
-| `POST` | `/api/v1/persons/{pid}/entries/note` | Note 条目（stub→501） |
-| `POST` | `/api/v1/persons/{pid}/entries/profile-event` | ProfileEvent(parser::profile_event payload)（stub→501） |
-| `POST` | `/api/v1/persons/{pid}/entries/self-measurement` | {type,value,unit,taken_at} → SelfMeasurement import（stub→501） |
-| `GET` | `/api/v1/persons/{pid}/measurements` | SelfMeasurement/ProfileEvent 事件回放投影(type,from,to)（stub→501） |
 
 > 端点形状**已固定**（路由已挂、已进 OpenAPI），实现后语义不变；调用它们现在只会得到 501。

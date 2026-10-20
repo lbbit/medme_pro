@@ -461,6 +461,12 @@ pub struct LabSeriesOut {
     /// true=序列混过不同印刷单位已统一换算(纸上找不到这个数字,渲染必须言明)
     pub values_converted: bool,
     pub any_abnormal: bool,
+    /// true=这条序列来自**手动录入的自测值**（家庭测量），false=来自医院报告。
+    /// ⚠️ 上游用 `GroupKey::SelfMeasured` 把两者**结构上分开**（家庭自测血压与
+    /// 门诊血压参考区间不同，永不画成一条线）——但**不告诉消费方**的话，
+    /// 消费方会把家庭值当医院值解读（参考区间就是错的）。故此处如实透传上游
+    /// 的 `self_measured` 标志（D-028：不说=粉饰）。
+    pub self_measured: bool,
     pub points: Vec<LabPointOut>,
 }
 
@@ -548,6 +554,7 @@ pub fn labs_aggregate(vault: &Vault, person_id: &str) -> Result<LabsReply> {
         ref_high_canonical: s.ref_high_canonical,
         values_converted: s.values_converted,
         any_abnormal: s.any_abnormal,
+        self_measured: s.self_measured,
         points: s.points.iter().map(|p| LabPointOut {
             date: p.date.map(|d| d.format("%Y-%m-%d").to_string()),
             value: p.value,

@@ -32,9 +32,9 @@
 |---|------|------|------|
 | 0 | 上游勘察 | 《upstream-study.md》：core-model API 面、单人假设深度、services/api 现状、可否独立编译成库 | ✅ 完成(2026-10-19) |
 | 1 | POC：单人不带 UI 跑通内核导入→查询(library级+346单测全绿) | poc/src/import_demo.rs 9步验收全PASS(D-009) | ✅ GREEN(2026-10-19) |
-| 2 | person 层设计 + ehr-api 骨架（axum, OpenAPI）——**已完成** | /api/v1 MVP；curl版抽查对齐POC证据链(D-011:34门全绿)；读侧聚合面已毕业 labs(D-025)/medications(D-026) | ✅ GREEN(2026-10-23) |
+| 2 | person 层设计 + ehr-api 骨架（axum, OpenAPI）——**已完成** | /api/v1 MVP；curl版抽查对齐POC证据链(D-011:34门全绿)；读侧聚合面已毕业 labs(D-025)/medications(D-026)/conditions(D-027)；写侧手动条目已毕业 entries×3 + measurements(D-028) | ✅ GREEN(2026-10-24) |
 | 3 | docker-compose（server+web）+ Web 管理端最小版 | 一键部署可用 | ✅ GREEN(2026-10-20，D-014/D-016) |
-| 4 | MCP server + QwenPaw SKILL | agent 可按人查档/写档 | 🔄 MCP 读侧 6 + **写侧 2 已交付**（D-017/D-019）；SKILL 已写（D-018），注册进 skill_pool 待验 |
+| 4 | MCP server + QwenPaw SKILL | agent 可按人查档/写档 | 🔄 MCP 读侧 6 + **写侧 2 已交付**（D-017/D-019）；SKILL REST 面已扩到 **15 命令**（含 D-028 四个新命令），注册进 skill_pool 待验 |
 | 5 | 认证与多客户端（token/token scope），手机客户端预留 | 安全基线 | 🔄 T4 静态 Bearer token 已交付（D-022）；多客户端/手机端待做 |
 
 ## 已知事实（已核实，来源 README/GitHub 页面 2026-10-19）
@@ -54,7 +54,22 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
-## 当前状态（2026-10-23 · **T10 病程泳道端点已实装（D-027）· stub 端点 7→6**）
+## 当前状态（2026-10-24 · **T11 写侧手动条目 + 读侧 measurements 投影已实装（D-028）· stub 端点 6→2**）
+
+- ✅ **T11 交付（`/persons/{pid}/measurements` + 三个 `POST /persons/{pid}/entries/*` 从 stub→501 毕业为真实现）**：①**写侧三类手动条目**（`self-measurement`/`note`/`profile-event`）**同走一条写入路径**（`add_synthetic_document`：合成文本当文件 → `vault.import` → `add_document` → `add_ocr`）——抄上游 mobile 端同一手法，**不写三份**；②**CAS 按内容去重会静默吞写** ⇒ 三类条目正文一律带**毫秒级记录时间行** ⇒ 每次写入字节必不同（回执 `deduped` 如实标注，不假装写成功）；③**数值只做「生理学可能性」兜底**（复用上游 `parser::validate_self_measured_values`：138388 mmHg / 收缩压≤舒张压 ⇒ **400 带原因**），**不换算单位、不做 analyte 白名单、查不到出处就不给区间**（`flag` 恒缺省，不猜「正常」）；④读侧 `measurements` 逐字用上游 `parse_*_payload` 读回，**读不出来就标 `payload_readable=false`**（原文仍在 `text` 里，半猜比不猜坏）；⑤**家庭自测值与医院指标结构上分开**（上游 `GroupKey::SelfMeasured`）**且必须说出去** ⇒ `LabSeriesOut` 如实透传 `self_measured` 标志（上游不告诉消费方，不告诉 ⇒ 消费方会把家庭值当医院值解读）；⑥`kind`/`from`/`to` **真过滤**（非法 kind/日期/`from>to` ⇒ 400）；⑦四个端点从 `CONTRACT` 表移出、正式进 utoipa `paths(...)`。
+- ✅ **顺手修掉一个真并发 bug**：`tests/auth.rs` 的 `fixture()` 原先**只用 `scope_spec` 派生目录名** ⇒ 同一 spec 的两个测试**共享同一个 registry 目录** ⇒ cargo test 并行时同时追加 `persons.jsonl` ⇒ 行交错 ⇒ 随机 500（实测 8 跑 3 红，像「抖动」，实为**真 bug**）⇒ 目录名加**进程内单调计数器**，每次调用独占（D-027 暂存目录互删的镜像）。
+- ✅ **证据链（缺一即不算交付）**：
+  - ①**`entries-e2e.sh`（新增门禁）真进程 PASS / fails=0**：三类写入全 201；**M1 写入真落地 + 相同内容未被吞写**；`GET /measurements` **200**、载荷**逐字读回**（区间带 `ref_source`、事件日透传、笔记原文原样）；**M2 provenance verified measurements=4**（每条 docref 都能经 HTTP 取回原件字节并含上游载荷哨兵）；**M3 数值不被粉饰**（不可能值 ⇒ 400 带原因；未知 analyte ⇒ 201 且无区间无标志）；**M4 过滤器真过滤**（`kind=note` 只回 2 条；非法 kind/日期 ⇒ 400）；**M5 OpenAPI 里是真 operation + typed schema**；**M6 不回归**（labs/medications/conditions 仍正常，自测值只进自测序列且标 `self_measured=true`）；未知人 **404**；**M8 四端点不在 CONTRACT 表**。
+  - ②**`cargo test --all-targets` 全绿**：新增 `tests/entries.rs` **6 门** + 旧门禁未破 ⇒ 合计 **55 门全绿**。
+  - ③**旧 e2e 门禁全绿未被破坏**：`ehtest.sh`(34 门) / `mcp-e2e.sh` / `auth-e2e.sh` / `rebuild-e2e.sh` / `rebuild-lock-e2e.sh` / `skill-rest-check.sh`（扩到 **15 命令 + 10 条新断言**） / `skill-contract-check.sh` / `api-doc-check.sh`(8 门) / `web-e2e.sh`（起真服务复验，fails=0）**全 fails=0**。
+  - ④**零新依赖**：`ehr-api/Cargo.lock` 与 `Cargo.toml` **未改动**（依赖包数 **204** 不变，可验事实）。
+  - ⑤**dry-run 优先**：先跑库级 `cargo test --all-targets` 与 `--print-openapi` 干跑渲染（**paths=16 / operations=18**），再起真进程跑 entries-e2e 与旧门禁复验。
+  - ⑥**参数/状态生效有证据**：`api-doc-check.sh` **fails=0**（文档 **33194 bytes** 与生成物逐字一致）；门禁 A5 的 stub 计数由 **6 降到 2**（数字变化即客观证据）；`?kind=nonsense` ⇒ **400**、`?from=not-a-date` ⇒ **400**、`values=[138388 mmHg]` ⇒ **400**（参数真进到判据里）。
+  - ⑦**skill 层同步暴露**：新增 `ehr.sh measurements/self-measure/note/profile-event` 四个命令 + SKILL.md 命令表 + `references/rest-contracts.md` 契约行（含新字段与不变量「家庭自测值 ≠ 医院指标」）⇒ **agent 侧真的能调**（`skill-rest-check.sh` 逐条断言）。
+- 🔄 **下一步**：①**stub 端点只剩 2 个**：`PUT /documents/{sha}/extraction`、`GET /audit`——都是**新功能**（非「补读侧」）⇒ 需单独设计，**建议下一个里程碑是 T5 Web 管理端正式化（选型先报方案再动手）**——目标验收①最后一块；②`medications`/`conditions`/`measurements` **MCP 侧暂无对应工具**（REST 独有，SKILL.md 已如实标注）——后续若补**须复用同一聚合/投影函数**；③**还没有「家庭自测趋势」专用视图**（agent 需自己按 `self_measured` 过滤）；④T3 待办未打勾（其实已交付，待与 T5 合并收口）；⑤公网暴露前：`EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑥ghcr 包可见性仍 private；⑦真·第三方 MCP 客户端互通仍未验；⑧`.dcm`/OCR worker 未做。
+- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（`ehr-api/web/index.html` 编译期内嵌，无构建链）；目标验收②的 6 个 stub 端点已实装 4 个，**剩 `extraction`/`audit` 两个**（文档已逐个标注）；`medications`/`conditions`/`measurements` **MCP 侧暂无对应工具**；`docs/API.md` 是**生成物**，改接口必须跑 `./api-doc-check.sh --write`，手改会被 A3 门禁打回；文档覆盖的是 **REST 面**，`/mcp` 的工具契约仍在 `skills/medme-ehr/references/tool-contracts.md`；**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在（D-027 未销账⑧）；**shell 拼 JSON 的空数组坑**（`printf '%s	' "${PAIRS[@]}"` 空数组 ⇒ python 侧 unpack 崩）已修但值得记住。
+
+### 历史状态（2026-10-23 · **T10 病程泳道端点已实装（D-027）· stub 端点 7→6**）
 
 - ✅ **T10 交付（`/persons/{pid}/conditions` 从 stub→501 毕业为真实现）**：①`vaults.rs` 新增 `conditions_aggregate()`——与 `labs`/`medications` **同一次 `parser::aggregate()`** 的第三块输出，**同源同判据**（复用 D-026 抽出的 `collect_agg_rows()` + `rows_to_source_docs()`，**不另写一份取样逻辑**）；②**判据分工如实透传上游语义**（D-027 决策②）：上游 conditions 面**没有** doc_type 白名单，只跳过「手动录入类」文档 ⇒ 本层**不加私造白名单**；③**不推断 = 不粉饰**：`raw_text` 原样透传（上游无术语归一字典）、ICD 码**仅当原件印了才有**、`onset` 缺失即 `None`；④每条诊断带 `docrefs`（**跨文档合并后保留全部出处**）⇒ 可一路溯源到原件字节（D2）；⑤`conditions` 从 `CONTRACT` 表移出、正式进 utoipa `paths(...)` ⇒ OpenAPI/文档不再宣称 501（反向保险 `contract_entries_really_return_501` 保留，conds-e2e M5 门专门断言）。
 - ✅ **顺手修掉一个真并发 bug（D-027 决策⑥）**：暂存目录名此前**只按内容哈希**命名 ⇒ **同内容**原件**并发**摄取共用目录 ⇒ 一方 `remove_dir_all` 删掉另一方暂存文件 ⇒ 对方解析失败 ⇒ 该文档**静默落成 raw-only**（无文本层）⇒ 在 labs/medications/conditions/search 四个面**全部隐形**，而上传接口照样回 200（典型的「以为有、其实没有」D5）。**症状像业务抖动**（实测 conds 门禁 5 跑 3 红）。修法 = 目录名加 **进程 id + 单调计数器**（`AtomicU64`）⇒ 每次调用独占，**零新依赖**；已用单测 `staging_dir_is_unique_per_call` 钉死不变量。

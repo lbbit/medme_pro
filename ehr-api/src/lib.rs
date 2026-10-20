@@ -20,6 +20,7 @@ pub mod vaults;
 pub mod rebuild; // 目标验收④：派生索引全量重建（删 medme.db → 从事件日志回放），显式命令 + 逐人计数证据
 pub mod rebuildlock; // D-024：重建期互斥（锁文件+陈旧锁回收）——把「建议停服重建」从口头约定变成机制
 pub mod apidoc; // T8：docs/API.md 人类可读接口文档的生成器（从运行时 OpenAPI 渲染，漂移门禁 api-doc-check.sh）
+pub mod entries; // D-028：写侧手动条目（self-measurement / note / profile-event）——与上游同一条「合成文本当文件过一遍 import」路径
 mod b64; // base64 解码（写侧工具传二进制原件用；零新依赖，模块内自带单测）
 pub mod mcp; // 阶段4：MCP server（零新依赖 JSON-RPC over POST /mcp，薄适配层复用 vaults）
 pub use vaults::UploadReply; // 供 utoipa path!宏体解析(同 PersonNew 惯例)
@@ -403,6 +404,121 @@ fn content_disposition(name: &str) -> String {
     format!("attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{enc}")
 }
 
+// ---------- handler（读侧·measurements 投影：D-028，写侧三类手动条目的回放）----------
+/// 自测值/笔记/动作日志的**回放投影**（写侧见同批实装的三个 POST 端点）。
+/// 载荷用上游 `parse_*_payload` 逐字读回；家庭参考区间用上游 `home_ref_range`
+/// （**查不到出处就不给区间**）；`kind`/`from`/`to` 真过滤（非法日期 400 带原因）。
+#[utoipa::path(get, path = "/api/v1/persons/{pid}/measurements", tag = "records",
+    params(("pid" = String, Path, description = "person uuid"),
+           ("kind" = Option<String>, Query, description = "只看某一类：self_measurement|note|profile_event"),
+           ("from" = Option<String>, Query, description = "起始日期(含) YYYY-MM-DD"),
+           ("to" = Option<String>, Query, description = "结束日期(含) YYYY-MM-DD")),
+    responses((status = 200, description = "replayed manual entries (self-measurement / note / profile-event)", body = entries::MeasurementsReply),
+               (status = 400, description = "bad kind / bad date / from>to"),
+               (status = 404, description = "person not found")))]
+async fn get_measurements(
+    State(st): State<Arc<AppState>>,
+    AxPath(pid): AxPath<String>,
+    Query(qp): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<entries::MeasurementsReply>, ApiError> {
+    let q = entries::MeasurementsQuery {
+        kind: qp.get("kind").cloned(),
+        from: qp.get("from").cloned(),
+        to: qp.get("to").cloned(),
+    };
+    tokio::task::block_in_place(|| {
+        require_person(&st, &pid)?;
+        let vault = vaults::open_person_vault(&st.home, &pid).map_err(ApiError::from)?;
+        let reply = entries::measurements_projection(&vault, &pid, &q)
+            .map_err(entry_err_to_api)?;
+        Ok(Json(reply))
+    })
+}
+
+// ---------- handlers（写侧·手动条目：self-measurement / note / profile-event，D-028）----------
+// 三类「没有原件的记录」在 core-model 里**没有新事件变体**：一律走「合成文本当文件
+// 过一遍 Vault::import」的手法（上游 apps/mobile_flutter 的 add_synthetic_document）。
+// 本层照抄**同一条**写入路径与**同一批**上游判据（parser::render_*_text /
+// validate_self_measured_values），不另造格式 ⇒ 写入方与读取方是同一对代码。
+// 判据分工见 src/entries.rs 顶部注释（D5：不推断 = 不粉饰）。
+
+/// 写一条自测记录（结构化、append-only）。血压是**两个值共享一条记录**。
+/// 生理学不可能的值（138388 mmHg / 收缩压≤舒张压）⇒ 400 并给出原因。
+#[utoipa::path(post, path = "/api/v1/persons/{pid}/entries/self-measurement", tag = "entries",
+    params(("pid" = String, Path, description = "person uuid")),
+    request_body = entries::SelfMeasurementIn,
+    responses((status = 201, description = "self-measurement recorded", body = entries::EntryReply),
+               (status = 400, description = "empty values / implausible value / bad taken_at"),
+               (status = 404, description = "person not found")))]
+async fn post_self_measurement(
+    State(st): State<Arc<AppState>>,
+    AxPath(pid): AxPath<String>,
+    Json(req): Json<entries::SelfMeasurementIn>,
+) -> Result<(StatusCode, Json<entries::EntryReply>), ApiError> {
+    tokio::task::block_in_place(|| {
+        require_person(&st, &pid)?;
+        let _serial = vaults::LockToken::acquire(&pid); // 写侧：与上传同一把「每人串行」锁
+        let vault = vaults::open_person_vault(&st.home, &pid).map_err(ApiError::from)?;
+        let reply = entries::add_self_measurement(&vault, &req).map_err(entry_err_to_api)?;
+        tracing::info!(person = %pid, doc = reply.document_id, sha = %reply.content_hash, "self-measurement recorded");
+        Ok((StatusCode::CREATED, Json(reply)))
+    })
+}
+
+/// 写一条纯文本笔记。原文即内容（不解析、不关联用药/诊断）。
+#[utoipa::path(post, path = "/api/v1/persons/{pid}/entries/note", tag = "entries",
+    params(("pid" = String, Path, description = "person uuid")),
+    request_body = entries::NoteIn,
+    responses((status = 201, description = "note recorded", body = entries::EntryReply),
+               (status = 400, description = "empty text / bad taken_at"),
+               (status = 404, description = "person not found")))]
+async fn post_note(
+    State(st): State<Arc<AppState>>,
+    AxPath(pid): AxPath<String>,
+    Json(req): Json<entries::NoteIn>,
+) -> Result<(StatusCode, Json<entries::EntryReply>), ApiError> {
+    tokio::task::block_in_place(|| {
+        require_person(&st, &pid)?;
+        let _serial = vaults::LockToken::acquire(&pid);
+        let vault = vaults::open_person_vault(&st.home, &pid).map_err(ApiError::from)?;
+        let reply = entries::add_note(&vault, &req).map_err(entry_err_to_api)?;
+        tracing::info!(person = %pid, doc = reply.document_id, sha = %reply.content_hash, "note recorded");
+        Ok((StatusCode::CREATED, Json(reply)))
+    })
+}
+
+/// 写一条病程动作日志（如「开启病程档案」「停药」）。`at` 是**事件发生的那天**
+/// （YYYY-MM-DD，用户说的那天），`payload` 必须是 JSON 对象。
+#[utoipa::path(post, path = "/api/v1/persons/{pid}/entries/profile-event", tag = "entries",
+    params(("pid" = String, Path, description = "person uuid")),
+    request_body = entries::ProfileEventIn,
+    responses((status = 201, description = "profile event recorded", body = entries::EntryReply),
+               (status = 400, description = "bad at / payload not an object"),
+               (status = 404, description = "person not found")))]
+async fn post_profile_event(
+    State(st): State<Arc<AppState>>,
+    AxPath(pid): AxPath<String>,
+    Json(req): Json<entries::ProfileEventIn>,
+) -> Result<(StatusCode, Json<entries::EntryReply>), ApiError> {
+    tokio::task::block_in_place(|| {
+        require_person(&st, &pid)?;
+        let _serial = vaults::LockToken::acquire(&pid);
+        let vault = vaults::open_person_vault(&st.home, &pid).map_err(ApiError::from)?;
+        let reply = entries::add_profile_event(&vault, &req).map_err(entry_err_to_api)?;
+        tracing::info!(person = %pid, doc = reply.document_id, sha = %reply.content_hash, kind = %req.kind, "profile event recorded");
+        Ok((StatusCode::CREATED, Json(reply)))
+    })
+}
+
+/// 写侧错误 → HTTP 码：**400 带原因**（参数不合法，agent 知道怎么改），
+/// **500**（内部故障）。不把 400 混报成 500（D-022 的 401/403 分家同款纪律）。
+fn entry_err_to_api(e: entries::EntryError) -> ApiError {
+    match e {
+        entries::EntryError::BadRequest(m) => ApiError(StatusCode::BAD_REQUEST, m),
+        entries::EntryError::Internal(e) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}
+
 // ---------- stubs（契约先行，随阶段替换实现）----------
 macro_rules! not_implemented {
     ($name:ident, $msg:expr) => {
@@ -411,10 +527,6 @@ macro_rules! not_implemented {
         }
     };
 }
-not_implemented!(stub_measurements, "measurements: pending");
-not_implemented!(stub_self_measurement, "self-measurement entry: pending");
-not_implemented!(stub_note, "note entry: pending");
-not_implemented!(stub_profile_event, "profile-event entry: pending");
 not_implemented!(stub_extraction, "extraction write: pending agent flow");
 not_implemented!(stub_audit, "audit view: pending");
 // 人员域三 stub：路由即契约(tests MOUNTED 表守卫)。刻意不进 CONTRACT/openapi——{pid} 模板与已文档化的
@@ -438,12 +550,17 @@ not_implemented!(stub_person_delete, "archive person(tombstone): pending registr
         (name = "entries", description = "写侧：append-only 条目与文档上传（未实现端点先挂契约，现返回501）")
     ),
     paths(healthz, list_persons, create_person, get_timeline, get_search, get_labs, get_medications, get_conditions, upload_document, list_documents,
-          get_document_detail, get_document_original),
+          get_document_detail, get_document_original,
+          get_measurements, post_self_measurement, post_note, post_profile_event),
     components(schemas(Person, PersonNew, vaults::TimelineItem, vaults::SearchItem, vaults::UploadReply,
                        vaults::DocumentListItem, vaults::DocumentDetail, vaults::TextLayerMeta, vaults::ExtractionPass,
                        vaults::LabPointOut, vaults::LabSeriesOut, vaults::LabsReply,
                        vaults::MedMentionOut, vaults::MedSpanOut, vaults::MedicationsReply,
-                       vaults::ConditionOut, vaults::ConditionsReply))
+                       vaults::ConditionOut, vaults::ConditionsReply,
+                       entries::SelfMeasuredValueIn, entries::SelfMeasurementIn,
+                       entries::NoteIn, entries::ProfileEventIn, entries::EntryReply,
+                       entries::MeasurementsQuery, entries::MeasurementsReply,
+                       entries::MeasurementOut, entries::MeasurementValueOut))
 )]
 struct ApiDoc;
 
@@ -454,10 +571,6 @@ struct ApiDoc;
 /// 正是本项目最贵的漏账形态（D5：状态码不许粉饰）。反向保险见 tests/contract.rs
 /// （逐条断言本表里的端点真返回 501）。
 pub const CONTRACT: &[(&str, &str, &str, &str)] = &[
-    ("get", "/api/v1/persons/{pid}/measurements", "records", "SelfMeasurement/ProfileEvent 事件回放投影(type,from,to)"),
-    ("post", "/api/v1/persons/{pid}/entries/self-measurement", "entries", "{type,value,unit,taken_at} → SelfMeasurement import"),
-    ("post", "/api/v1/persons/{pid}/entries/note", "entries", "Note 条目"),
-    ("post", "/api/v1/persons/{pid}/entries/profile-event", "entries", "ProfileEvent(parser::profile_event payload)"),
     ("put", "/api/v1/documents/{sha}/extraction", "entries", "AI agent 结构化发现(引用不替代，字段级 evidence 锚点)"),
     ("get", "/api/v1/audit", "system", "审计视图(person/op 过滤，内容哈希留痕)"),
 ];
@@ -690,10 +803,10 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/persons/{pid}/labs", get(get_labs)) // D-011 实装毕业(此前 stub→501；期间一个旧二进制+孤儿进程伪装成501教训见D-011)
         .route("/persons/{pid}/medications", get(get_medications)) // D-026 实装毕业(此前 stub→501；入 CONTRACT 表前先实装，文档不粉饰状态码)
         .route("/persons/{pid}/conditions", get(get_conditions)) // D-027 实装毕业(此前 stub→501；与 labs/medications 同一次 aggregate)
-        .route("/persons/{pid}/measurements", get(stub_measurements))
-        .route("/persons/{pid}/entries/self-measurement", post(stub_self_measurement))
-        .route("/persons/{pid}/entries/note", post(stub_note))
-        .route("/persons/{pid}/entries/profile-event", post(stub_profile_event))
+        .route("/persons/{pid}/measurements", get(get_measurements)) // D-028 实装毕业(此前 stub→501；写侧已就位)
+        .route("/persons/{pid}/entries/self-measurement", post(post_self_measurement)) // D-028 实装毕业(此前 stub→501)
+        .route("/persons/{pid}/entries/note", post(post_note)) // D-028 实装毕业(此前 stub→501)
+        .route("/persons/{pid}/entries/profile-event", post(post_profile_event)) // D-028 实装毕业(此前 stub→501)
         .route("/documents/{sha}/extraction", put(stub_extraction))
         .route("/audit", get(stub_audit))
         .with_state(st.clone());
