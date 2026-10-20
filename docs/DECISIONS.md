@@ -1,5 +1,26 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-014 2026-10-20 · **阶段3 server 最小版 docker-compose 全链路 GREEN**（构建→起栈→e2e→down）
+证据链（四段全通，缺一即不算交付）：
+①**构建**：`docker compose build ehr-api` exit=0，镜像 `deploy-ehr-api:latest`；构建内 dry-run 打出 `[证据] openapi_paths=16` + `[证据] Dockerfile build: ehr-api dry-run exit=0`（release 编译 1m11s，全部依赖来自宿主 vendor 离线，**构建期零外网**）。
+②**起栈**：`up -d` exit=0；boot 容器 Exited(0)（volume 内 mkdir+chown 10001:10001，见 D-01x E6/P2），ehr-api 容器 Up，`127.0.0.1:8585->8443`。
+③**e2e（容器内真实服务，非裸机）**：healthz 200 `{"home":"/home/ehr","status":"ok"}`（home 指容器 volume 路径 D1 回执）→ POST /persons 201 得 UUID=c62118ec → multipart 上传样本 HTTP=200 → timeline 返回真解析日期+中文标题 `2023-05-01_出院记录_脑梗死.txt`(count=1) → /openapi.json **paths=16**。注意 volume 内已有前轮会话遗留的 3 个人档（容器验收·张三/容器冒烟·张三/容器验收·李四），即**重启后真相层持久**（append-only JSONL 跨 run 存活）。
+④**收尾**：`down` 后 8585 HTTP=000、项目容器全部清除（残留 "Resource is still in use" 提示来自同 daemon 上他人 xiaohongshu 容器，不影响）。
+**本轮唯一代码改动 = Dockerfile 一行工具依赖**：构建段 dry-run 原用 `python3 -c` 解析 openapi，而 `rust:1-slim-bookworm` **无 python3** → exit 127 + Broken pipe（Broken pipe 只是下游缺失的次生现象，真因是解释器不存在——**先读 exit 码再读报错**）。改为纯 POSIX shell：`N=$(...|grep -cE '^    "/api/v1/[^"]*": \{')` + `[ "$N" -ge 16 ]` 硬门。改动前先在裸机 target/release 上 dry-run 同一表达式取值 **16**（D4：参数生效要有证据，先量后改）。
+**新坑（D4 第五变种·哨兵侧）**：done 哨兵判定写成 `tail -1 log == "exit=0"`，但脚本末尾追加了两行（证据行在 exit 行之前/之后不一致）→ 构建明明成功，watcher 判为失败空转。**准则补条：哨兵脚本内自记 exit 码到独立文件（如 `exit=0` 写 .rc），watcher 只比 .rc，不解析 log 尾部文本**。
+并行纪律实证（D-01x P8 生效）：进场时发现 1351435 已有并行会话在跑 build，**未重复发起**，改为监控 + 修因（其失败原因正是上面的 python3）→ 省掉一整轮冷编译。
+
+## D-013 2026-10-20 · **cron 静默事故(D-012 真因)**：任务文本改了、`silent` 标志没改
+用户两轮追问"没收到消息"后排查:11 轮 cron 全部触发、其中≥4轮写出完整汇报文本,但创建时的
+`--silent` 一直在 dispatch 层拦截投放,文本层"每轮必报"形同虚设。**教训(机制化)**:改通知契约
+必须**同时回读 dispatch 层字段**(silent/mode/target),不能只看任务文本;`cron update --no-silent`
+已生效(silent=False 回读确认)。**"没收到消息"≠"没干活"**:夜间阶段2读写侧多轮交付与一场外部
+清空事故的只读哨兵响应都在 cron 会话记录里完整留痕。
+
+## D-012 2026-10-20 · cron 汇报契约修订：每轮必短报，里程碑才详报
+背景:阶段2整段在夜间完成却全程静默(用户7h未收到任何消息,被动发现)。根因=旧任务文本"仅里程碑才汇报"+silent,且「什么算里程碑」交由轮内自由裁量→必然漏报。
+修订:**每轮触发结束必发3-6行短报**(做了什么+证据数字+下一步,无论进展/停滞/受阻);阶段级完成或需方向确认才展开。已用 `cron update` 改写任务文本并 get 复验入参生效(D4:改了就回读验证)。教训模式与 D-008 同源:**给"要不要打扰用户"留裁量权=一定漏报,机制化成"必报但限长"**。
+
 ## D-011 2026-10-20(下午) · **阶段2后半收口:documents三件套/timeline/search/labs四域实装获e2e全绿(fails=0)**；G3真凶=L相位缺env非溯源红线(D4『先怀疑测量方法』第三次应验)
 背景:上轮(~03:xx,ehtest.sh扩至Phase G/H后)run-labs.log止于fails=2(G3,H2)。本轮复查证据链:
 ①H2缺口已在代码侧补上(lib.rs components(schemas(...LabPointOut,LabSeriesOut,LabsReply))+重建二进制--print-openapi现场回显3个schema齐全、paths=16)——但当时会话超时未复跑,D5补账。

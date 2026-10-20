@@ -1,0 +1,39 @@
+# medme-ehr · Stage-3 docker-compose（server 最小版，Web 后补）
+#
+# ⚠️ D4「参数传进去≠生效」：compose up -d --build 后必看容器 stderr 的 [证据] 行
+#   （形如 `[证据] ehr-api v0.0.1 | mode=serve | EHR_HOME=/data/ehr-home | ADDR=0.0.0.0:8443`），
+#   它与实际 bind 同源(D1)。dry-run 自检: `docker compose run --rm --no-deps ehr-api --print-openapi >/dev/null`。
+services:
+  # init-container(E6)：named volume 首次挂载会把镜像目录内容+属主(chown)复制过去 →
+  # serve 阶段 prepare_home_and_state 对非 root 只校验不创建会失败(P2)。这里在 *volume* 内
+  # mkdir+chown(不做落盘写)，顺带成为 /healthz 探针就绪门。见 DECISIONS P2/D-01x。
+  boot:
+    image: busybox
+    command: ["sh", "-c", "mkdir -p /home/ehr && chown -R 10001:10001 /home/ehr && ls -ld /home/ehr"]
+    volumes:
+      - ehr-home:/home/ehr
+
+  ehr-api:
+    build:
+      context: ..                                   # 仓库根（含 ehr-api + upstream-medme/packages/*）
+      dockerfile: deploy/Dockerfile
+      args:                                         # D1：镜像源 URL 唯一定义处，Dockerfile 只做拼装模板
+        CARGO_SPARSE_URL: https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/
+        CARGO_STATIC_ROOT: https://mirrors.tuna.tsinghua.edu.cn/crates.io/static
+        APT_MIRROR: https://mirrors.tuna.tsinghua.edu.cn/debian
+      cache_from:
+        - rust:1-slim-bookworm                      # 基础层复用本地已 pull 的官方标签(daocloud mirror)
+    init: true                                      # PID1 收割 + SIGTERM→ctrl-c(优雅停机,D-01x P4配套)
+    restart: unless-stopped                         # host bind mount → serve fail-fast；重启策略安全(D-01x P3)
+    depends_on:
+      boot: { condition: service_completed_successfully }
+    ports:
+      - "127.0.0.1:8585:8443"                       # 本机已有服务占默认 8443；暂绑 loopback（阶段5认证后再暴露）
+    environment:
+      EHR_HOME: /home/ehr                           # uid=appuser(非 root),由 boot 预建属主 —— 见上 E6/P2
+      RUST_LOG: info
+    volumes:
+      - ehr-home:/home/ehr                          # D-01x P3：host bind 会遮蔽镜像骨架，故用 named volume(+boot chown)
+
+volumes:
+  ehr-home:
