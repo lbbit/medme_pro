@@ -17,6 +17,7 @@ pub mod auth; // T4：静态 Bearer token 鉴权（env 注入，ro/rw 分权，�
 mod persons;
 pub use persons::{Person, PersonNew, PersonStore};
 pub mod vaults;
+pub mod rebuild; // 目标验收④：派生索引全量重建（删 medme.db → 从事件日志回放），显式命令 + 逐人计数证据
 mod b64; // base64 解码（写侧工具传二进制原件用；零新依赖，模块内自带单测）
 pub mod mcp; // 阶段4：MCP server（零新依赖 JSON-RPC over POST /mcp，薄适配层复用 vaults）
 pub use vaults::UploadReply; // 供 utoipa path!宏体解析(同 PersonNew 惯例)

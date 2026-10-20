@@ -1,5 +1,21 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-023 2026-10-22 · **T6 派生索引全量重建交付：显式 `--rebuild-index` 命令 + 真进程门禁（目标验收④销账）**
+**为什么做**：目标验收标准④「原件(CAS)+事件日志是唯一真相；派生索引可全量重建（**有重建脚本证明**）」此前只有 **POC 阶段对单箱**的证明（`poc/src/import_demo.rs` 步骤08/09），**服务面（ehr-api 多箱 + HTTP 读侧）零证明**。POC 证明的是「一个人一个目录能重建」，不是「跑起来的服务能重建」——这正是本项目一贯的「证明面 ≠ 交付面」形态。
+**关键结构决策①：重建做成**显式命令**，不做成「启动时自动重建」**。理由：自动重建会把「缓存坏了 / 真相层读不出来」**静默吃掉**——重建成功时一切正常，用户永远不会知道曾经坏过；只有当真相层本身不可读时才报错，而那恰恰是最该报错的时刻。显式命令 = 显式动作 + 显式报告（`[证据] mode=rebuild`）+ 显式计数对照。**运维面永远优先于「看起来很自愈」**。
+**关键结构决策②：重建 = 删派生层 + 从事件日志回放，走内核已有的 `open_with_device_id_resilient`**。**不自己写回放逻辑**——内核 resilient open 的「首次 open 失败 ⇒ 删 db(+wal/shm) ⇒ 重开并全量重放」是 POC 步骤09 实证过的路径；我们复用它 ⇒ 重建语义与「缓存损坏自愈」语义**天然同源**，不会出现「手动重建与自愈结果不同」的双真相面。
+**关键结构决策③：重建报告必须带**计数**，且计数可与重建前逐字比对**。只报「done」是自说自话；报「timeline_entries=N / lab_points=M / search_probe_hits=K」才可被门禁断言，也才可能发现「重建后少了一条」这类真丢数据。四项计数分别对应：时间线条数、labs 序列/点数、**FTS 探针命中**（最后一项专门防「表建出来了但索引没热」——只查表不查索引，等于没重建）。
+**关键结构决策④：真相层零改动**是硬约束，重建只允许删除 `{home}/vaults/{pid}/medme.db{,-wal,-shm}`；`log/`、`objects/`（CAS 原件）**只读**。门禁 R4 用「目录仍在 + CAS 对象 sha256 可算」双证。
+**证据链（缺一即不算交付）**：
+①**`rebuild-e2e.sh`（新增门禁）真进程 22 门 PASS / fails=0**：干跑（`--rebuild-index=dry-run`）列出每箱的派生文件清单与 `truth_present`，且 **R1d 实测 medme.db 仍在**（干跑不删）→ 真重建 exit=0、报告 `derived_db_removed=true`/`rebuilt_from_log=true` → **重建前后 timeline 条数逐字相等（2 vs 2）**、FTS 中文探针命中 2 → 真相层 `log/`+`objects/` 仍在 → 重建后再起服务，**HTTP 读侧 timeline/labs/search 三项计数与重建前逐字相等（R6b）** → 脏参数 `--rebuild-index=nonsense` 非零退出。
+②**`cargo test --all-targets` 全绿**：新增 `tests/rebuild.rs` 3 门（未知 person_id 报错**且不留空箱**；空 home 计划为空非报错；二次重建计数与首次逐字相等）+ 旧门禁 30 门未破。
+③**旧 e2e 门禁全绿**：`ehtest.sh` 34 / `mcp-e2e.sh` / `auth-e2e.sh` / `skill-rest-check.sh` / `skill-contract-check.sh` / `web-e2e.sh` 全 fails=0。
+④**零新依赖**：`ehr-api/Cargo.lock` 未改动。
+**新坑两则（D4 同族）**：
+①**门禁 R5 首跑 FAIL ⇒ 揭出真 bug：「参数写错」被当成「参数生效」**。`--rebuild-index=nonsense-arg` 期望被拒，但实现里 `rebuild_person` 对不存在的 pid **顺手 `create_dir_all` 出一个空箱**并返回「成功」（exit=0）。这比「参数没生效」更坏：**参数错了却"生效"了**，凭空多出一个空人档目录。修法：重建前**先判目录存在**，不存在即 `bail!("no such vault for person_id=…")`（并加单测锁死「不得建空箱」）。教训升格：**凡「按标识定位资源」的动作，必须区分「资源不存在」与「资源为空」**——后者往往是前者的伪装。
+②**编辑工具按行改多行 Rust 片段会静默截断文件**（本轮 `edit_file` 改 `main.rs` 的 mode 三元表达式时，把 `eprintln!` 的参数列表截掉一半，文件仍能编译过一半才报 E0782）。**改 Rust 用整文件重写或 python 精确替换并 assert 命中数**——`edit_file` 的"替换成功"不等于"结构正确"。**这也是 D4「先量期望值」在编辑面的一次应验**：改完先 `cargo build`，别靠肉眼。
+**未销账/下一步**：①重建是**离线动作**，本轮**未做「重建期间禁写」互斥**（建议停服重建；vault 侧 SQLite 单写者由内核兜底）；②registry 层无派生物（真相即真相），故重建不涉及；③T5 Web 管理端正式化（选型先报方案）；④`EHR_BIND_ADDR` 改 `0.0.0.0` 前必须先设 token；⑤ghcr 包可见性仍 private；⑥`.dcm`/OCR worker 未做；⑦真·第三方 MCP 客户端互通仍未验。
+
 ## D-022 2026-10-21 · **T4 API token 鉴权交付：静态 Bearer + ro/rw 分权 + 统一中间件**（零新依赖）
 **为什么做**：T3（D-021）交付的「零维护接入」在 skill 侧预留了 `EHR_API_TOKEN`，但**服务端不校验 ⇒ 填了也不生效**——这正是本项目最反感的形态（"参数传进去≠生效"）。T4 是「升级不改配置」的最后一环，也是把服务放到公网前的安全底线。
 **关键结构决策①：鉴权 = 一个中间件层，不是每 handler 各写一遍**。做法：`axum::middleware::from_fn_with_state(st, auth_layer)` 挂在**最外层 Router**（`/api/v1/*` 与 `/mcp` 一次覆盖），token 的 scope 通过 `request.extensions` 下传。理由与 D-017「薄适配层」同形：**权限判定只有一处 ⇒ 不存在"某条路径忘了校验"的漏账**。D5 式代价：中间件只能按 HTTP 方法判读写，**故 `/mcp` 例外**（HTTP 是 POST，但读侧工具应当放行）⇒ MCP 内部按**工具粒度**二次判定。

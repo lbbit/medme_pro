@@ -85,6 +85,21 @@ export EHR_API_TOKEN=mainrw
 - 401 = 缺/错 token；403 = 只读 token 试图写（读写操作需 rw token）。
 - 例外（免鉴权）：`/api/v1/healthz`、`/openapi.json`、Web 首页。
 
+## 派生索引重建（运维）
+
+真相层 = CAS 原件 + 事件日志（append-only）；派生层 = 每人的 `medme.db`（SQLite/FTS 缓存）**可随时丢弃重建**。
+
+```bash
+# 先干跑：只列计划，不动任何文件
+docker compose -f docker-compose.ghcr.yml run --rm --no-deps ehr-api --rebuild-index=dry-run
+# 真重建：删派生库 → 从事件日志回放（全量重建），逐人打印 timeline/labs 计数
+docker compose -f docker-compose.ghcr.yml run --rm --no-deps ehr-api --rebuild-index
+# 只重建某人
+docker compose -f docker-compose.ghcr.yml run --rm --no-deps ehr-api --rebuild-index=<person_id>
+```
+
+重建只碰派生层（`medme.db` + wal/shm），**不动真相层**（`log/`、`objects/`）；重建后 timeline/labs/检索计数应与重建前一致。
+
 ## 文档
 
 | 路径 | 说明 |
