@@ -37,6 +37,9 @@ usage() {
   detail PID SHA              文档详情（含 OCR 文本层 / extraction）
   original PID SHA            下载原件字节（CAS 按 hash 寻址，每次核 sha256）
   upload PID FILE             上传原件（multipart，仅 .txt/.pdf）
+  audit [--person PID] [--op OP]
+                            审计视图（两层真相层：registry 建档/改档/归档 + vault 导入/删除）
+                            --op 过滤：create|update|delete（registry 侧）或 导入|导出|分享|删除（vault 侧）
 EOF
 }
 
@@ -188,6 +191,17 @@ print(json.dumps(b,ensure_ascii=False))
     PID="${1:-}"; FILE="${2:-}"; [ -n "$PID" ] && [ -n "$FILE" ] || die "upload 需要 person_id 与文件路径"
     [ -f "$FILE" ] || die "文件不存在: $FILE"
     _c -X POST "$BASE/persons/$PID/documents" -F "file=@$FILE" | _pp ;;
+  audit)
+    # ⚠️ 外层 case 已 shift 过 CMD ⇒ 这里**不能再 shift**（否则会吃掉第一个参数）。
+    Q=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --person) Q+=(--data-urlencode "person=$2"); shift 2;;
+        --op)     Q+=(--data-urlencode "op=$2");     shift 2;;
+        *) die "未知参数 $1";;
+      esac
+    done
+    _c -G "$BASE/audit" ${Q[@]+"${Q[@]}"} | _pp ;;
   *)
     usage; die "未知命令 $CMD";;
 esac

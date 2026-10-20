@@ -21,6 +21,7 @@ pub mod rebuild; // 目标验收④：派生索引全量重建（删 medme.db �
 pub mod rebuildlock; // D-024：重建期互斥（锁文件+陈旧锁回收）——把「建议停服重建」从口头约定变成机制
 pub mod apidoc; // T8：docs/API.md 人类可读接口文档的生成器（从运行时 OpenAPI 渲染，漂移门禁 api-doc-check.sh）
 pub mod entries; // D-028：写侧手动条目（self-measurement / note / profile-event）——与上游同一条「合成文本当文件过一遍 import」路径
+pub mod audit; // D-030：审计视图（vault 内核事件日志 + person registry 两层真相层，口径分层不假装只有一层）
 mod b64; // base64 解码（写侧工具传二进制原件用；零新依赖，模块内自带单测）
 pub mod mcp; // 阶段4：MCP server（零新依赖 JSON-RPC over POST /mcp，薄适配层复用 vaults）
 pub use vaults::UploadReply; // 供 utoipa path!宏体解析(同 PersonNew 惯例)
@@ -519,6 +520,26 @@ fn entry_err_to_api(e: entries::EntryError) -> ApiError {
     }
 }
 
+// ---------- handler（审计视图：D-030）----------
+/// 审计视图：两层真相层合并（**口径分层**，不假装只有一层）。
+/// - `source="registry"`：person registry 的 append-only 原始事件（create/update/delete，**不折叠**）。
+/// - `source="vault"`：上游 `Vault::audit_log()` 的投影（导入/导出/分享/删除）——**复用上游判据，不另写一份**。
+/// 参数 `person`/`op` 是**真过滤**（真进判据，不是摆设）。
+#[utoipa::path(get, path = "/api/v1/audit", tag = "system",
+    params(("person" = Option<String>, Query, description = "只看某人（person_id）"),
+           ("op" = Option<String>, Query, description = "只看某动作：create|update|delete（registry 侧）或 导入|导出|分享|删除（vault 侧）")),
+    responses((status = 200, description = "audit entries (newest first)", body = audit::AuditReply)))]
+async fn get_audit(
+    State(st): State<Arc<AppState>>,
+    Query(qp): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<audit::AuditReply>, ApiError> {
+    let q = audit::AuditQuery {
+        person: qp.get("person").cloned(),
+        op: qp.get("op").cloned(),
+    };
+    tokio::task::block_in_place(|| audit::audit_view(&st.home, &q).map_err(ApiError::from)).map(Json)
+}
+
 // ---------- stubs（契约先行，随阶段替换实现）----------
 macro_rules! not_implemented {
     ($name:ident, $msg:expr) => {
@@ -528,7 +549,6 @@ macro_rules! not_implemented {
     };
 }
 not_implemented!(stub_extraction, "extraction write: pending agent flow");
-not_implemented!(stub_audit, "audit view: pending");
 // 人员域三 stub：路由即契约(tests MOUNTED 表守卫)。刻意不进 CONTRACT/openapi——{pid} 模板与已文档化的
 // /persons(get+post)同 path 不同 op，utoipa derive 无法拆分挂载；待 GET/PATCH/DELETE 实装时一并入文档。
 not_implemented!(stub_person_detail, "person detail+profile summary: pending profile::materialize wiring");
@@ -551,7 +571,8 @@ not_implemented!(stub_person_delete, "archive person(tombstone): pending registr
     ),
     paths(healthz, list_persons, create_person, get_timeline, get_search, get_labs, get_medications, get_conditions, upload_document, list_documents,
           get_document_detail, get_document_original,
-          get_measurements, post_self_measurement, post_note, post_profile_event),
+          get_measurements, post_self_measurement, post_note, post_profile_event,
+          get_audit),
     components(schemas(Person, PersonNew, vaults::TimelineItem, vaults::SearchItem, vaults::UploadReply,
                        vaults::DocumentListItem, vaults::DocumentDetail, vaults::TextLayerMeta, vaults::ExtractionPass,
                        vaults::LabPointOut, vaults::LabSeriesOut, vaults::LabsReply,
@@ -560,7 +581,8 @@ not_implemented!(stub_person_delete, "archive person(tombstone): pending registr
                        entries::SelfMeasuredValueIn, entries::SelfMeasurementIn,
                        entries::NoteIn, entries::ProfileEventIn, entries::EntryReply,
                        entries::MeasurementsQuery, entries::MeasurementsReply,
-                       entries::MeasurementOut, entries::MeasurementValueOut))
+                       entries::MeasurementOut, entries::MeasurementValueOut,
+                       audit::AuditQuery, audit::AuditReply, audit::AuditEntryOut))
 )]
 struct ApiDoc;
 
@@ -572,7 +594,6 @@ struct ApiDoc;
 /// （逐条断言本表里的端点真返回 501）。
 pub const CONTRACT: &[(&str, &str, &str, &str)] = &[
     ("put", "/api/v1/documents/{sha}/extraction", "entries", "AI agent 结构化发现(引用不替代，字段级 evidence 锚点)"),
-    ("get", "/api/v1/audit", "system", "审计视图(person/op 过滤，内容哈希留痕)"),
 ];
 
 fn stub_item(op: &str, tag: &str, summary: &str) -> Value {
@@ -808,7 +829,7 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/persons/{pid}/entries/note", post(post_note)) // D-028 实装毕业(此前 stub→501)
         .route("/persons/{pid}/entries/profile-event", post(post_profile_event)) // D-028 实装毕业(此前 stub→501)
         .route("/documents/{sha}/extraction", put(stub_extraction))
-        .route("/audit", get(stub_audit))
+        .route("/audit", get(get_audit)) // D-030 实装毕业(此前 stub→501；vault 侧复用上游 audit_log()，registry 侧读原始事件)
         .with_state(st.clone());
 
     Router::new()

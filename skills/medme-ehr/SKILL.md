@@ -39,6 +39,7 @@ metadata:
 | 「下载原件」 | `ehr.sh original PID SHA` | CAS 按 hash 寻址，服务端每次核 sha256 |
 | 「给某人建个档」 | `ehr.sh person-create "张三" --gender male --birthday 1990-01-02` | 返回 `id`；建档前先 `persons` 核对同名者 |
 | 「把这张化验单存进档案」 | `ehr.sh upload PID 文件.txt` | 仅 .txt/.pdf；重传同字节 `deduped=true` |
+| 「这个人档案里都发生过什么 / 谁动过」 | `ehr.sh audit [--person PID] [--op OP]` | **两层真相层**：`source=registry`（建档/改档/归档）与 `source=vault`（导入/删除）；`--op` 取 `create\|update\|delete` 或上游中文名 `导入\|导出\|分享\|删除` |
 
 完整字段契约见 `references/rest-contracts.md`（真源 = 运行时 `GET /openapi.json`）。
 

@@ -1,5 +1,25 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-030 2026-10-25 · **T13 审计端点实装：`GET /api/v1/audit` 从 stub→501 毕业为真实现（stub 端点 2→1）**
+**为什么做**：D-028/D-029 收尾时都点名的最后一个 stub 端点之一是 `GET /audit`。它与前面几个「补读侧」的端点**不同类**——前面几个是「数据已经算好、只差一个端子」（labs/medications/conditions），而 audit 是**新语义**：「**发生过什么**」而不是「现在是什么」。目标验收②里「数据维护写入」若没有审计视图，等于写入动作**不留痕**⇒ 这一步是目标验收②自身的一个缺口，不只是清单消项。
+**关键结构决策①：口径分层，不假装只有一层**。本服务有**两层真相层**：①`source=registry`——person registry 的 append-only **原始事件**（create/update/delete），**不折叠**（折叠会把 update 历史抹平、把 delete 墓碑藏掉 ⇒ 审计就变成了「现在长什么样」的复读，正是 audit 要避免的）；②`source=vault`——上游内核事件日志。**回执里用 `source` 字段把两层显式区分**，不让消费方误以为这是一份单一、完备的流水。
+**关键结构决策②：vault 侧复用上游判据，本层不另写一份**。直接调用上游 `Vault::audit_log()`（上游自己的投影：导入/导出/分享/删除；`DocumentAdded`/`OcrAdded`/`ExtractionAdded` 是内部派生写入，**上游刻意跳过**）⇒ **本层不另写「哪些事件算审计条目」的判据**（D2：一个语义只允许一处实现）。硬证据不是「两边都有数据」（那可以靠两套不同实现蒙混），而是 **vault 侧条目与上游 `audit_log()` 逐条相等**（动作名/时刻/内容哈希/归属人）——已由 `tests/audit.rs` 钉死。
+**关键结构决策③：registry 侧不臆造内容哈希**。registry 事件**没有**内容哈希（它记的是主数据变更，不是文件）⇒ `sha256` 缺省，**不编**。反之 vault 侧的导入条目**带** sha256 且逐字等于上传原件的 sha256 ⇒ 内容哈希留痕可核验。
+**关键结构决策④：参数真进判据，且两种命名并存是如实的**。`?person=`/`?op=` 是真过滤（`op` 大小写不敏感）。动作名**不擅自归一**：registry 侧用 `create`/`update`/`delete`，vault 侧用上游中文动作名 `导入`/`导出`/`分享`/`删除`——**归一会让上游口径失真**（消费方再也分不清哪条来自哪一层）。未知人过滤 ⇒ **0 条**（不是 404/500：审计是全局视图，问「某人有哪些审计条目」答「没有」是合法答案）。
+**关键结构决策⑤：一条诚实的边界写进文档（不粉饰）**。上游 `audit_log()` **不展示**手动条目的合成导入 ⇒ 「写了一条自测/笔记」在 `source=vault` 里**看不到行**，只能在该人的 timeline/documents 里看到。**不造一条「写入」事件来补齐**——那是编造。这条边界**写进 PLAN 与文档**，而不是藏起来。
+**证据链（缺一即不算交付）**：
+①**`audit-e2e.sh`（新增门禁）真进程 12 门 PASS / fails=0**：`/audit` → **200**；**M1 两层真相层都在**（registry=2 条 create + vault=1 条导入，count=3）且导入条目的 `sha256` **逐字等于**上传原件的 sha256；**M2 参数真进判据**（`all=3` → `?person=A`=2 / `?op=create`=2 / `?op=导入`=1 / 未知人=**0**）；**M3 OpenAPI 里是真 operation + typed schema**（`AuditReply`/`AuditEntryOut` 含 `source` 口径字段）；**M4 audit 不在 CONTRACT 表**；**M5 CONTRACT 表里剩 1 个 stub**（`extraction`）。
+②**`cargo test --all-targets` 全绿**：新增 `tests/audit.rs` **3 门**（库级：两层真相层都在 + **vault 侧与上游 `audit_log()` 逐条相等** + registry 侧不折叠 + 无内容哈希不臆造 / 过滤真生效（含大小写不敏感、别人 id ⇒ 0 条）/ HTTP 级：200 + person 过滤 + 不在 CONTRACT 表）+ 旧门禁**未破** ⇒ 合计 **60 门全绿**（lib 18 / apidoc 3 / audit 3 / auth 7 / conds 4 / contract 1 / entries 6 / mcp 12 / meds 2 / rebuild 3 / sha_gate 1）。
+③**旧 e2e 门禁全绿未被破坏**：`ehtest.sh`(34 门) / `mcp-e2e.sh` / `auth-e2e.sh` / `audit-e2e.sh` / `entries-e2e.sh` / `conds-e2e.sh` / `meds-e2e.sh` / `rebuild-e2e.sh` / `rebuild-lock-e2e.sh` / `skill-rest-check.sh` / `skill-contract-check.sh` / `api-doc-check.sh` / `web-e2e.sh`（起真服务复验，fails=0）**全 fails=0**。
+④**零新依赖**：`ehr-api/Cargo.lock` 与 `Cargo.toml` **未改动**（依赖包数 **204** 不变，可验事实）。
+⑤**dry-run 优先**：先跑库级 `cargo test --all-targets`（不起服务、不落状态）与 `--print-openapi` 干跑渲染（**paths=16 / operations=18**，audit 原是 stub 路径 ⇒ 路径数不变），再起真进程跑 audit-e2e 与旧门禁复验。
+⑥**参数/状态生效有证据**：`api-doc-check.sh` **fails=0**（文档 **35632 bytes** 与生成物逐字一致）；门禁 A5 的 stub 计数由 **2 降到 1**（数字变化即客观证据）；`?op=导入` ⇒ **1** 而 `?op=create` ⇒ **2** 而全量 ⇒ **3**（过滤器真进判据）；未知人 ⇒ **0**（不是 404/500）。
+⑦**skill 层同步暴露**：`ehr.sh audit [--person PID] [--op OP]` 新命令 + SKILL.md 命令表 1 行 + `references/rest-contracts.md` 契约行（两层真相层的口径说明）+ `skill-rest-check.sh` 扩到 **16 命令 + 5 条新断言**（两层都在 / person 过滤收窄 / op 过滤生效 / 未知人 0 条）⇒ **agent 侧真的能调**。
+**新坑两则（D4 同族）**：
+①**门禁红先问「它跑的是哪份二进制」**（D-026 新坑①的复验）：本轮 `skill-rest-check.sh` 首跑 **fails=5**，五门全是 `KeyError: 'count'`/`'entries'`——症状看着像「audit 返回体形状不对」，真凶是**陈旧 release 二进制**（10月21构建，早于 D-030）⇒ 门禁调的是一个**没有 audit 端点的旧服务**。重建 release 后 **fails=0**。**判据：KeyError 打在响应 JSON 字段上 ⇒ 先怀疑「服务版本不对」，再怀疑「序列化形状错」**（D-011「红门先查门禁自身」的第四变种）。
+②**`web-e2e.sh` 的端口变量是小写 `base`（不是 `BASE`）**⇒ 传 `BASE=...` 会被脚本忽略，脚本去打默认 8585（无服务）⇒ **fails=3**，报错是「建档失败 + JSONDecodeError」，完全看不出「地址没传对」。**教训：门禁脚本的环境变量名要照抄 usage 注释，别按 shell 惯例猜大写**（与 D-029 新坑④「抄既有门的形状，别只抄它的意图」同族）。
+**未销账/下一步**：①**stub 端点只剩 1 个**：`PUT /documents/{sha}/extraction`——**新功能**（非「补读侧」）⇒ 需单独设计（字段级 evidence 锚点该怎么表达？上游 `deid::verify` 要求每个字符串字段是**原文逐字子串**，且 `evidence` 必须是原文逐字子串）；②**MCP 侧还没有审计工具**（REST 独有）——若补 **须复用同一 `audit_view()`**，不得另写一份判据；③**T5 Web 管理端正式化**（选型先报方案再动手）仍是目标验收①的最后一块；④「家庭自测趋势」专用视图仍未做（agent 需自己按 `self_measured` 过滤）；⑤`EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑥ghcr 包可见性仍 private；⑦真·第三方 MCP 客户端互通仍未验；⑧`.dcm`/OCR worker 未做；⑨**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在（D-027 未销账⑧）。
+
 ## D-029 2026-10-21 · **T12 MCP 侧补齐三个读侧工具：`get_medications`/`get_conditions`/`get_measurements`（MCP 工具数 8→11）**
 **为什么做**：D-028 未销账②明确点名的缺口是「`medications`/`conditions`/`measurements` **MCP 侧均无对应工具**（REST 独有，SKILL.md 已如实标注）——刻意的不对称（REST 是事实源，D-021），但它留了个真缺口：**只吃 MCP 的宿主拿不到用药跨度/病程泳道/家庭自测**。这三面恰恰是 agent 回答「他在吃什么药」「病程怎么走的」「家里自测血压多少」三类高频问题的唯一入口 ⇒ 「agent 可按人查档并辅助诊断」（目标验收③）在这三面是**残的**。本轮补齐，且**不新建任何判据**。
 **关键结构决策①：必须复用同一函数**（D-028 未销账②的原文要求：「须复用同一 `meds_aggregate`/`conditions_aggregate`/`measurements_projection`，不得另写一份判据」）。MCP 侧三个新工具**直接调用** REST 侧那三个函数（`vaults::meds_aggregate` / `vaults::conditions_aggregate` / `entries::measurements_projection`），**零新判据、零新解析路径**。硬证据不是「两边都有数据」，而是 **MCP 返回的 docref 与 REST 返回的 docref 逐字相等**（`tests/mcp.rs::mcp_new_read_tools_match_rest_facets`）——「各自看起来有数据」可以靠两套不同实现蒙混，「docref 逐字相等」不能。

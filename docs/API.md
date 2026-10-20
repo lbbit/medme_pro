@@ -44,7 +44,7 @@
 
 | 方法 | 路径 | 说明 | 状态 |
 |---|---|---|---|
-| `GET` | `/api/v1/audit` | 审计视图(person/op 过滤，内容哈希留痕)（stub→501） | ⚠️ stub（501） |
+| `GET` | `/api/v1/audit` | 审计视图：两层真相层合并（**口径分层**，不假装只有一层）。 - `source="registry"`：person registry 的 append-only 原始事件（create/update/delete，**不折叠**）。 - `source="vault"`：上游 `Vault::audit_log()` 的投影（导入/导出/分享/删除）——**复用上游判据，不另写一份**。 参数 `person`/`op` 是**真过滤**（真进判据，不是摆设）。 | ✅ 已实装 |
 | `PUT` | `/api/v1/documents/{sha}/extraction` | AI agent 结构化发现(引用不替代，字段级 evidence 锚点)（stub→501） | ⚠️ stub（501） |
 | `GET` | `/api/v1/healthz` | 健康检查 | ✅ 已实装 |
 | `GET` | `/api/v1/persons` | 人员列表（读 registry/persons.jsonl 全量折叠；MVP 规模足够，规模化后换派生索引——真相层不变） | ✅ 已实装 |
@@ -67,17 +67,21 @@
 
 ### `GET /api/v1/audit`
 
-审计视图(person/op 过滤，内容哈希留痕)（stub→501）
-
-> ⚠️ **本端点当前返回 501（尚未实装）**——下方是已固定的契约形状，实现后语义不再变。
+审计视图：两层真相层合并（**口径分层**，不假装只有一层）。 - `source="registry"`：person registry 的 append-only 原始事件（create/update/delete，**不折叠**）。 - `source="vault"`：上游 `Vault::audit_log()` 的投影（导入/导出/分享/删除）——**复用上游判据，不另写一份**。 参数 `person`/`op` 是**真过滤**（真进判据，不是摆设）。
 
 - 鉴权：需要 Bearer token
+
+**参数**
+
+| 名 | 位置 | 必填 | 说明 |
+|---|---|---|---|
+| `person` | query | 否 | 只看某人（person_id） |
+| `op` | query | 否 | 只看某动作：create|update|delete（registry 侧）或 导入|导出|分享|删除（vault 侧） |
 **响应**
 
 | 码 | 说明 |
 |---|---|
-| `200` | planned |
-| `501` | not implemented yet (stage-2 in progress) |
+| `200` | audit entries (newest first) |
 
 
 **示例**
@@ -85,7 +89,7 @@
 ```bash
 curl -X GET \
   -H 'Authorization: Bearer $EHR_API_TOKEN' \
-  'http://127.0.0.1:8443/api/v1/audit'
+  'http://127.0.0.1:8443/api/v1/audit?person=<person>&op=<op>'
 ```
 
 ### `PUT /api/v1/documents/{sha}/extraction`
@@ -585,6 +589,38 @@ curl -X GET \
 
 ## 6. 数据模型（components.schemas）
 
+### `AuditEntryOut`
+
+审计条目（两层真相层合并后的统一视图）。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `detail` | object | 否 | 概要（文件名 / 动作细节 / 变更后的主数据）。**可选键**（registry 的 delete 墓碑无 data）。 |
+| `op` | string | 是 | 动作名。registry 侧 = `create`/`update`/`delete`；vault 侧 = 上游中文动作名 （`导入`/`导出`/`分享`/`删除`）——**原样透传，不归一**（归一会让上游口径失真）。 |
+| `person_id` | string | 是 | 归属的人（person_id）。vault 侧由「哪个人的 vault」推出。 |
+| `sha256` | object | 否 | 内容 sha256（可核验、防篡改）。**可选键**（registry 事件没有内容哈希）。 |
+| `source` | string | 是 | 真相层来源：`registry`（本项目的人员主数据）/ `vault`（上游内核事件日志）。 |
+| `ts` | string | 是 | 事件时刻（RFC3339 UTC）。 |
+
+### `AuditQuery`
+
+审计查询参数。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `op` | object | 否 | 只看某个动作（大小写不敏感）。registry 侧 `create`/`update`/`delete`； vault 侧上游中文动作名 `导入`/`导出`/`分享`/`删除`。 |
+| `person` | object | 否 | 只看某个人（person_id）。缺省 = 全部人。 |
+
+### `AuditReply`
+
+审计回执。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `count` | integer | 是 | 命中的条目数。 |
+| `entries` | array<AuditEntryOut> | 是 | 命中的审计条目（**新est first**，与上游 `audit_log()` 的展示口径一致）。 |
+| `persons_scanned` | integer | 是 | 参与审计的人数（registry 侧有 vault 的人 ∪ registry 里出现过的人）。 |
+
 ### `ConditionOut`
 
 一条诊断（跨文档合并后仍保留全部出处）。
@@ -906,7 +942,6 @@ measurements 投影的整个回执。
 
 | 方法 | 路径 | 计划语义 |
 |---|---|---|
-| `GET` | `/api/v1/audit` | 审计视图(person/op 过滤，内容哈希留痕)（stub→501） |
 | `PUT` | `/api/v1/documents/{sha}/extraction` | AI agent 结构化发现(引用不替代，字段级 evidence 锚点)（stub→501） |
 
 > 端点形状**已固定**（路由已挂、已进 OpenAPI），实现后语义不变；调用它们现在只会得到 501。

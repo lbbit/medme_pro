@@ -72,11 +72,11 @@ check "upload.fields"    "content_hash,deduped,document_id,doc_type,text_indexed
 check "medications.fields" "person_id,documents_scanned,med_count,mention_count,medications,drug_key,name,raw_names,atc,latest_dose,latest_raw_name,start,end,status,docrefs,unverified,mentions,date,dose,raw_name,docref,origin"
 
 # 2) SKILL.md / rest-contracts.md 里承诺的命令必须都被 helper 支持
-for c in health persons person-create timeline search labs medications documents detail original upload measurements self-measure note profile-event; do
+for c in health persons person-create timeline search labs medications documents detail original upload measurements self-measure note profile-event audit; do
   grep -q "ehr.sh $c" "$SKILL" || { echo "  FAIL SKILL.md 未提命令 $c"; fails=$((fails+1)); }
   "$E" --help | grep -qE "^  $c( |\$)" || { echo "  FAIL helper 不支持命令 $c"; fails=$((fails+1)); }
 done
-echo "  PASS 命令面 SKILL ↔ helper 对齐(15 个)"
+echo "  PASS 命令面 SKILL ↔ helper 对齐(16 个)"
 
 # 2b) 写侧手动条目（D-028）：helper 三个写命令必须真写进去，读回 measurements
 SM=$("$E" self-measure "$PID" --value bp_systolic=128 --value bp_diastolic=82 --unit mmHg --taken-at 2026-10-20T08:30:00+08:00)
@@ -94,6 +94,14 @@ gate "measurements_kind_filter" "$("$E" measurements "$PID" --kind note | python
 gate "measurements_bad_kind_400" "$(curl -s -o /dev/null -w '%{http_code}' -G "http://127.0.0.1:$PORT/api/v1/persons/$PID/measurements" --data-urlencode "kind=nonsense")" "400"
 gate "measurements_bad_date_400" "$(curl -s -o /dev/null -w '%{http_code}' -G "http://127.0.0.1:$PORT/api/v1/persons/$PID/measurements" --data-urlencode "from=not-a-date")" "400"
 gate "self_measure_implausible_400" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/api/v1/persons/$PID/entries/self-measurement" -H 'content-type: application/json' -d '{"values":[{"analyte_key":"bp_systolic","value":138388,"unit":"mmHg"}]}')" "400"
+
+# 2c) 审计视图（D-030）：helper 的 audit 命令真能调，且两层真相层/参数过滤都在
+AU=$("$E" audit)
+gate "audit_count_positive" "$(echo "$AU" | python3 -c 'import json,sys;print(1 if json.load(sys.stdin)["count"]>0 else 0)')" "1"
+gate "audit_has_two_layers" "$(echo "$AU" | python3 -c 'import json,sys;d=json.load(sys.stdin);s={e["source"] for e in d["entries"]};print(1 if {"registry","vault"}<=s else 0)')" "1"
+gate "audit_person_filter_narrows" "$("$E" audit --person "$PID" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(1 if d["count"]>0 and all(e["person_id"]=="'"$PID"'" for e in d["entries"]) else 0)')" "1"
+gate "audit_op_filter_works" "$("$E" audit --op create | python3 -c 'import json,sys;d=json.load(sys.stdin);print(1 if d["count"]>0 and all(e["op"]=="create" for e in d["entries"]) else 0)')" "1"
+gate "audit_unknown_person_zero" "$("$E" audit --person 00000000-0000-4000-8000-000000000000 | python3 -c 'import json,sys;print(json.load(sys.stdin)["count"])')" "0"
 
 # 3) 关键不变量：数值只在 labs 里、证据带 docref、search 0 命中不报错
 LABS_JSON=$("$E" labs "$PID")

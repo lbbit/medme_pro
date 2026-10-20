@@ -51,6 +51,22 @@ struct RegistryEvent {
     data: Option<PersonNew>,
 }
 
+/// registry 里的一条**原始事件**（真相层原样；审计视图用）。
+///
+/// 与 `Person`（折叠后的当前态）不同：这里**不折叠**，一条 op 就是一行真相。
+/// 审计视图要的就是「发生过什么」而不是「现在是什么」⇒ 单独暴露原始事件。
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct RegistryEventOut {
+    /// `create`/`update`/`delete`
+    pub op: String,
+    /// 事件时刻（RFC3339 UTC，秒精度）
+    pub ts: String,
+    pub person_id: String,
+    /// 事件携带的主数据（`delete` 墓碑无 data ⇒ 缺省）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<PersonNew>,
+}
+
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
@@ -131,6 +147,41 @@ impl PersonStore {
             }
         }
         Ok(order.iter().filter_map(|id| cur.get(id)).filter(|c| !c.deleted).map(|c| c.p.clone()).collect())
+    }
+
+    /// 读出 registry 的**全部原始事件**（不折叠），按写入顺序。
+    ///
+    /// 审计视图用：`list()` 给的是「当前态」，审计要的是「发生过什么」——
+    /// 折叠会把 update 的历史抹平、把 delete 的墓碑藏掉，两种都是「以为有、其实没有」。
+    /// 真相层是 append-only JSONL ⇒ 逐行读出来就是全部历史，无需额外索引。
+    pub fn events(&self) -> Result<Vec<RegistryEventOut>> {
+        let contents = match std::fs::read_to_string(&self.file) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(e).with_context(|| format!("read {}", self.file.display())),
+        };
+        let mut out = Vec::new();
+        for (ln, line) in contents.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let ev: RegistryEvent = serde_json::from_str(line).with_context(|| {
+                format!("{}:{} corrupt registry line", self.file.display(), ln + 1)
+            })?;
+            out.push(RegistryEventOut {
+                op: match ev.op {
+                    Op::Create => "create",
+                    Op::Update => "update",
+                    Op::Delete => "delete",
+                }
+                .to_string(),
+                ts: ev.ts,
+                person_id: ev.person_id,
+                data: ev.data,
+            });
+        }
+        Ok(out)
     }
 
     pub fn create(&self, req: &PersonNew) -> Result<Person> {
