@@ -182,8 +182,7 @@ async fn mcp_reads_same_truth_layer_as_rest() {
 
 /// MCP 面不污染 REST 契约：paths 数不变（≥16），且未把 /mcp 塞进 OpenAPI。
 #[tokio::test(flavor = "multi_thread")]
-async fn mcp_route_does_not_disturb_rest_contract() {
-    let app = fixture("contract");
+async fn mcp_route_does_not_disturb_rest_contract() {    let app = fixture("contract");
     let res = app.clone().oneshot(Request::builder().uri("/openapi.json").body(Body::empty()).unwrap()).await.unwrap();
     let doc: Value = serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap()).unwrap();
     let n = doc["paths"].as_object().unwrap().len();
@@ -193,4 +192,127 @@ async fn mcp_route_does_not_disturb_rest_contract() {
 
 mod ehr_api_mcp_test {
     pub const METHOD_NOT_FOUND: i64 = -32601;
+}
+
+// ============ 写侧（D-019）：建档 / 传原件 ============
+
+/// 写侧闭环：MCP 建档 → MCP 传原件 → MCP 读侧查到同一 sha 与中文原文。
+/// **不绕 REST**：agent 全程只走 MCP（PLAN 阶段4 第二步②的目标）。
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_write_side_roundtrip_is_self_contained() {
+    let app = fixture("write");
+
+    // 1) create_person
+    let created = tool_data(&call_tool(&app, "create_person",
+        json!({"name":"写侧测试","birthday":"1990-05-06","gender":"male","id_note":"CASE-1"})).await);
+    let pid = created["id"].as_str().expect("created person has id").to_string();
+    assert_eq!(created["name"], "写侧测试");
+    assert_eq!(created["birthday"], "1990-05-06");
+    assert_eq!(created["id_note"], "CASE-1");
+
+    // 2) upload_document（base64 传原件）
+    let sample = "姓名：李四\n检查项目：血常规\n白细胞计数 9.9 10^9/L 正常\n";
+    let b64 = b64_encode(sample.as_bytes());
+    let up = tool_data(&call_tool(&app, "upload_document",
+        json!({"person_id":pid,"filename":"血常规.txt","content_base64":b64})).await);
+    let sha = up["content_hash"].as_str().expect("content_hash returned").to_string();
+    assert_eq!(sha.len(), 64);
+    assert_eq!(up["deduped"], false);
+    assert_eq!(up["text_indexed"], true, "txt must be indexed for search: {up}");
+
+    // 3) 读侧立刻可见（同一真相层）
+    let persons = tool_data(&call_tool(&app, "list_persons", json!({})).await);
+    assert_eq!(persons["count"], 1);
+    assert_eq!(persons["persons"][0]["id"], pid);
+
+    let tl = tool_data(&call_tool(&app, "get_timeline", json!({"person_id":pid})).await);
+    assert_eq!(tl["count"], 1, "uploaded doc must appear in timeline: {tl}");
+
+    let sr = tool_data(&call_tool(&app, "search_records", json!({"person_id":pid,"q":"白细胞"})).await);
+    assert_eq!(sr["count"], 1, "uploaded doc must be searchable: {sr}");
+
+    let det = tool_data(&call_tool(&app, "get_document_detail", json!({"person_id":pid,"sha256":sha})).await);
+    assert!(det["text"].as_str().unwrap_or("").contains("白细胞计数"), "text layer missing: {det}");
+
+    // 4) 幂等：同字节重传 ⇒ deduped=true 且 sha 不变
+    let up2 = tool_data(&call_tool(&app, "upload_document",
+        json!({"person_id":pid,"filename":"血常规.txt","content_base64":b64})).await);
+    assert_eq!(up2["deduped"], true, "re-upload of same bytes must dedupe: {up2}");
+    assert_eq!(up2["content_hash"], sha);
+}
+
+/// 写侧参数校验必须先于任何 IO：坏 base64 / 空内容 / 缺参 ⇒ -32602，且不留半成品。
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_write_side_rejects_bad_arguments() {
+    let app = fixture("writebad");
+
+    // 坏 base64 ⇒ -32602（并带原因文本，agent 才知道怎么改）
+    let r = call_tool(&app, "upload_document",
+        json!({"person_id":"p","filename":"a.txt","content_base64":"!!!!"})).await;
+    assert_eq!(r["_code"], -32602, "bad base64 must be rejected: {r}");
+    assert!(r["content"][0]["text"].as_str().unwrap_or("").contains("base64"),
+        "error text must say what's wrong: {r}");
+
+    // 缺 content_base64 ⇒ -32602
+    let r = call_tool(&app, "upload_document", json!({"person_id":"p","filename":"a.txt"})).await;
+    assert_eq!(r["_code"], -32602);
+
+    // 空名字 ⇒ -32602
+    let r = call_tool(&app, "create_person", json!({"name":"   "})).await;
+    assert_eq!(r["_code"], -32602);
+
+    // 校验失败 ⇒ **没有建出任何档**（副作用不得先发生）
+    let persons = tool_data(&call_tool(&app, "list_persons", json!({})).await);
+    assert_eq!(persons["count"], 0, "rejected writes must leave no trace: {persons}");
+}
+
+/// 写侧对「不存在的人」必须报 -32001（agent 换人，不是重试）。
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_upload_to_unknown_person_is_32001() {
+    let app = fixture("write404");
+    let r = call_tool(&app, "upload_document",
+        json!({"person_id":"00000000-0000-0000-0000-000000000000","filename":"a.txt",
+               "content_base64":b64_encode(b"x")})).await;
+    assert_eq!(r["isError"], true);
+    assert_eq!(r["_code"], -32001, "unknown person must be -32001: {r}");
+}
+
+/// 不支持的扩展名 ⇒ -32003（区别于「服务坏了」-32002，agent 据此改格式）。
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_upload_unsupported_type_is_32003() {
+    let app = fixture("write501");
+    let created = tool_data(&call_tool(&app, "create_person", json!({"name":"类型门禁"})).await);
+    let pid = created["id"].as_str().unwrap().to_string();
+    let r = call_tool(&app, "upload_document",
+        json!({"person_id":pid,"filename":"scan.dcm","content_base64":b64_encode(b"DICM")})).await;
+    assert_eq!(r["isError"], true);
+    assert_eq!(r["_code"], -32003, "unsupported extension must be its own code: {r}");
+}
+
+/// 写侧工具也必须被 tools/list 公布（挂名不实现检测自动覆盖：公布的名字都要能被 call 认领）。
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_write_tools_are_advertised() {
+    let app = fixture("writelist");
+    let tools = result(&rpc(&app, json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})).await)["tools"]
+        .as_array().expect("tools array").clone();
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    for want in ["create_person", "upload_document"] {
+        assert!(names.contains(&want), "{want} must be advertised, got {names:?}");
+    }
+    assert_eq!(tools.len(), 8, "6 read + 2 write tools: {names:?}");
+}
+
+/// 测试侧 base64 编码器（生产侧只需解码；这里独立实现一遍，避免「用被测代码造输入」）。
+fn b64_encode(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
 }

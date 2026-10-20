@@ -56,17 +56,35 @@ if echo "$DETAIL" | grep -q '"extraction"'; then
   else echo "  FAIL extraction 缺 parseable"; fails=$((fails+1)); fi
 else echo "  PASS detail.extraction_optional_absent(可缺省,文档已载明)"; fi
 
-# 2) SKILL.md 里提到的 6 个工具名必须都在 tools/list 里公布
+# 2) SKILL.md 里提到的 8 个工具名必须都在 tools/list 里公布
 TOOLS=$(rpc '{"jsonrpc":"2.0","id":7,"method":"tools/list"}')
 miss=""
-for t in list_persons get_timeline search_records get_labs list_documents get_document_detail; do
+for t in list_persons get_timeline search_records get_labs list_documents get_document_detail create_person upload_document; do
   case "$TOOLS" in *"\"$t\""*) ;; *) miss="$miss $t";; esac
   grep -q "$t" "$SKILL" || { echo "  FAIL SKILL.md 未提工具 $t"; fails=$((fails+1)); }
 done
-[ -z "$miss" ] && echo "  PASS tools_declared_in_skill = 6" || { echo "  FAIL tools/list 缺:$miss"; fails=$((fails+1)); }
+[ -z "$miss" ] && echo "  PASS tools_declared_in_skill = 8" || { echo "  FAIL tools/list 缺:$miss"; fails=$((fails+1)); }
+NTOOLS=$(echo "$TOOLS" | jq_ 'print(len(d["result"]["tools"]))')
+gate "tools_count" "$NTOOLS" "8"
+
+# 2b) 写侧：SKILL.md 承诺的写侧字段名必须出现在真实写侧响应中
+B64=$(printf '姓名：钱九\n检查项目：血常规\n白细胞计数 13.1 10^9/L 偏高\n' | base64 -w0)
+WPID=$(rpc '{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"create_person","arguments":{"name":"SKILL写侧","gender":"female","birthday":"1992-07-08"}}}' | jq_ 'print(d["result"]["structuredContent"]["id"])')
+if [ -n "$WPID" ] && [ "$WPID" != "None" ]; then echo "  PASS create_person person_id=$WPID"; else echo "  FAIL create_person 无 person_id"; fails=$((fails+1)); fi
+WRESP=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\",\"params\":{\"name\":\"upload_document\",\"arguments\":{\"person_id\":\"$WPID\",\"filename\":\"血常规.txt\",\"content_base64\":\"$B64\"}}}")
+for f in content_hash deduped text_indexed stored_raw_only messages; do
+  case "$WRESP" in *"\"$f\""*) ;; *) echo "  FAIL 写侧缺字段 $f"; fails=$((fails+1));; esac
+done
+[ $fails -eq 0 ] && echo "  PASS 写侧字段全部存在(5 个)"
+# 写侧返回值字段名必须与 tool-contracts.md 承诺一致（create_person 的 id/name/birthday/gender）
+CRESP=$(rpc '{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"create_person","arguments":{"name":"字段核对"}}}' | jq_ 'print(",".join(sorted(d["result"]["structuredContent"].keys())))')
+for f in id name birthday gender id_note created_at updated_at; do
+  case "$CRESP" in *"$f"*) ;; *) echo "  FAIL create_person 缺字段 $f"; fails=$((fails+1));; esac
+done
+echo "  PASS create_person 字段核对完成"
 
 # 3) SKILL.md 与 tool-contracts.md 里写的错误码必须真的对得上
-for code in -32602 -32601 -32001 -32002; do
+for code in -32602 -32601 -32001 -32002 -32003; do
   grep -q -- "$code" "$SKILL" || grep -q -- "$code" "$REFS" || { echo "  FAIL 文档未载明 $code"; fails=$((fails+1)); }
 done
 ERRP=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"get_labs\",\"arguments\":{\"person_id\":\"00000000-0000-0000-0000-000000000000\"}}}")

@@ -14,7 +14,7 @@
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::{vaults, ApiError, AppState, StatusCode};
+use crate::{b64, vaults, ApiError, AppState, PersonNew, StatusCode};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -26,6 +26,12 @@ const INVALID_PARAMS: i64 = -32602;
 /// 应用层错误（本项目自定义区间 -32000..-32099）
 const ERR_NO_SUCH_PERSON: i64 = -32001;
 const ERR_INTERNAL: i64 = -32002;
+/// 写入侧的类型不支持（如 .dcm 需 ocr/dicom worker）——与「服务坏了」区分开，agent 据此换格式。
+const ERR_UNSUPPORTED_TYPE: i64 = -32003;
+
+/// 写侧单件上限（解码后字节数）。防止 agent 一口气塞 500MB 把内存打爆。
+/// 32MB 覆盖绝大多数病历 PDF/影像元数据；超出即 -32602（改参数，不重试）。
+const MAX_UPLOAD_BYTES: usize = 32 * 1024 * 1024;
 
 fn err_obj(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
@@ -67,7 +73,7 @@ pub fn handle_message(st: &Arc<AppState>, msg: &Value) -> Option<Value> {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "medme-ehr", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "多人电子健康档案读侧工具集。person_id 为 UUID；先用 list_persons 拿人，再用 search_records / get_labs / get_timeline 查档。所有内容来自原件 CAS+事件日志，text/extraction 透传不猜。",
+            "instructions": "多人电子健康档案工具集。读侧：person_id 为 UUID；先用 list_persons 拿人，再用 search_records / get_labs / get_timeline 查档。写侧：create_person 建档、upload_document 传原件（二进制用 base64）。所有内容来自原件 CAS+事件日志，text/extraction 透传不猜。",
         })),
         "ping" => ok_obj(id.clone(), json!({})),
         "notifications/initialized" | "initialized" => ok_obj(id.clone(), json!({})),
@@ -104,17 +110,22 @@ pub fn handle_http(st: &Arc<AppState>, body: &Value) -> Value {
     }
 }
 
-fn str_arg<'a>(args: &'a Value, k: &str) -> Result<&'a str, i64> {
+/// 校验失败 = (错误码, 原因)。原因要能指导 agent 改参数，而不是让它盲目重试（D5）。
+type ArgErr = (i64, String);
+
+fn str_arg<'a>(args: &'a Value, k: &str) -> Result<&'a str, ArgErr> {
     args.get(k)
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())
-        .ok_or(INVALID_PARAMS)
+        .ok_or((INVALID_PARAMS, format!("`{k}` is required and must be a non-empty string")))
 }
 
-fn u64_arg(args: &Value, k: &str, default: u64) -> Result<u64, i64> {
+fn u64_arg(args: &Value, k: &str, default: u64) -> Result<u64, ArgErr> {
     match args.get(k) {
         None | Some(Value::Null) => Ok(default),
-        Some(v) => v.as_u64().ok_or(INVALID_PARAMS),
+        Some(v) => v
+            .as_u64()
+            .ok_or((INVALID_PARAMS, format!("`{k}` must be a non-negative integer"))),
     }
 }
 
@@ -122,6 +133,7 @@ fn u64_arg(args: &Value, k: &str, default: u64) -> Result<u64, i64> {
 fn domain_code(e: &ApiError) -> i64 {
     match e.0 {
         StatusCode::NOT_FOUND => ERR_NO_SUCH_PERSON,
+        StatusCode::NOT_IMPLEMENTED => ERR_UNSUPPORTED_TYPE,
         _ => ERR_INTERNAL,
     }
 }
@@ -129,9 +141,10 @@ fn domain_code(e: &ApiError) -> i64 {
 /// 单个工具的执行体（在 block_in_place 临界区里跑：rusqlite/Vault 非 Send，同 REST 模式）。
 fn call_tool(st: &Arc<AppState>, id: Value, name: &str, args: &Value) -> Value {
     // 参数校验放在 async 之外，先于任何 IO —— 非法参数不该打开任何文件。
+    // 校验失败必须**带原因**（agent 要知道是名字空、base64 坏、还是超限），不能只丢一个码（D5）。
     let prepared = match prepare(name, args) {
         Ok(p) => p,
-        Err(code) => return tool_err(id, code, format!("invalid arguments for tool `{name}`")),
+        Err((code, why)) => return tool_err(id, code, format!("invalid arguments for tool `{name}`: {why}")),
     };
     let outcome = tokio::task::block_in_place(|| match prepared {
         Prepared::Persons => st.store.list().map(|v| json!({ "count": v.len(), "persons": v })).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))),
@@ -184,6 +197,26 @@ fn call_tool(st: &Arc<AppState>, id: Value, name: &str, args: &Value) -> Value {
                 Err(e) => Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))),
             }
         }
+        // ---------- 写侧（D-019）：建档 / 传原件 ----------
+        Prepared::CreatePerson { ref req } => {
+            let p = st.store.create(req).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+            serde_json::to_value(p).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
+        Prepared::UploadDocument { ref pid, ref filename, ref bytes } => {
+            require_person(st, pid)?;
+            let _serial = vaults::LockToken::acquire(pid); // 与 REST 上传同一把「每人写锁」
+            let vault = vaults::open_person_vault(&st.home, pid)?;
+            let reply = vaults::ingest_upload(&vault, filename, bytes).map_err(|e| {
+                let es = format!("{e:#}");
+                // 与 REST 面同语义：不支持的扩展名是契约内状态码(501)，不是 500（D5）
+                if es.contains("unsupported extension") {
+                    ApiError(StatusCode::NOT_IMPLEMENTED, es)
+                } else {
+                    ApiError(StatusCode::INTERNAL_SERVER_ERROR, es)
+                }
+            })?;
+            serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
     });
     match outcome {
         Ok(data) => tool_ok(id, data),
@@ -214,9 +247,31 @@ enum Prepared {
     Labs { pid: String },
     Documents { pid: String },
     DocumentDetail { pid: String, sha: String },
+    /// 写侧：建档（person registry append-only 真相层）
+    CreatePerson { req: PersonNew },
+    /// 写侧：传原件（二进制以 base64 传，走与 REST 同一 ingest 路径）
+    UploadDocument { pid: String, filename: String, bytes: Vec<u8> },
 }
 
-fn prepare(name: &str, args: &Value) -> Result<Prepared, i64> {
+/// 字符串参数（可空）：缺省=None，非字符串⇒-32602。
+fn opt_str_arg(args: &Value, k: &str) -> Result<Option<String>, ArgErr> {
+    match args.get(k) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or((INVALID_PARAMS, format!("`{k}` must be a string")))?;
+            let t = s.trim();
+            if t.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(t.to_string()))
+            }
+        }
+    }
+}
+
+fn prepare(name: &str, args: &Value) -> Result<Prepared, ArgErr> {
     Ok(match name {
         "list_persons" => Prepared::Persons,
         "get_timeline" => Prepared::Timeline { pid: str_arg(args, "person_id")?.to_string() },
@@ -231,7 +286,35 @@ fn prepare(name: &str, args: &Value) -> Result<Prepared, i64> {
             pid: str_arg(args, "person_id")?.to_string(),
             sha: str_arg(args, "sha256")?.to_string(),
         },
-        _ => return Err(METHOD_NOT_FOUND), // 未知工具名走 METHOD_NOT_FOUND（非参数问题）
+        // ---------- 写侧 ----------
+        "create_person" => {
+            let name = str_arg(args, "name")?.to_string();
+            let req = PersonNew {
+                name,
+                birthday: opt_str_arg(args, "birthday")?,
+                gender: opt_str_arg(args, "gender")?,
+                id_note: opt_str_arg(args, "id_note")?,
+            };
+            Prepared::CreatePerson { req }
+        }
+        "upload_document" => {
+            let pid = str_arg(args, "person_id")?.to_string();
+            let filename = str_arg(args, "filename")?.to_string();
+            let b64s = str_arg(args, "content_base64")?.to_string();
+            let bytes = b64::decode(&b64s)
+                .map_err(|e| (INVALID_PARAMS, format!("`content_base64` is not valid base64: {e}")))?;
+            if bytes.is_empty() {
+                return Err((INVALID_PARAMS, "`content_base64` decoded to 0 bytes".into()));
+            }
+            if bytes.len() > MAX_UPLOAD_BYTES {
+                return Err((
+                    INVALID_PARAMS,
+                    format!("decoded size {} exceeds limit {} bytes", bytes.len(), MAX_UPLOAD_BYTES),
+                ));
+            }
+            Prepared::UploadDocument { pid, filename, bytes }
+        }
+        _ => return Err((METHOD_NOT_FOUND, format!("unknown tool: {name}"))), // 未公布的工具名（非参数问题）
     })
 }
 
@@ -276,6 +359,26 @@ fn tool_schemas() -> Vec<Value> {
                 "person_id": pid,
                 "sha256": { "type": "string", "description": "64 位小写 hex 内容哈希" }
             }, "required": ["person_id", "sha256"] }
+        }),
+        // ---------- 写侧 ----------
+        json!({
+            "name": "create_person",
+            "description": "建档：新建一个人并返回 person_id（写入 registry/persons.jsonl 真相层）。已有同名者请先 list_persons 核对，避免重复建档。",
+            "inputSchema": { "type": "object", "properties": {
+                "name": { "type": "string", "description": "姓名（必填，非空）" },
+                "birthday": { "type": "string", "description": "出生日期，宽松格式如 1988-03-02 或 1988" },
+                "gender": { "type": "string", "description": "性别（原文透传，不做归一推断）" },
+                "id_note": { "type": "string", "description": "就诊卡号/病历号等外部锚点" }
+            }, "required": ["name"] }
+        }),
+        json!({
+            "name": "upload_document",
+            "description": "传原件：把一份病历原件（txt/pdf）写入指定人的档案（原件入 CAS 永不丢，自动建立检索文本层）。二进制须 base64 编码。返回 content_hash(=docref)、deduped、text_indexed。",
+            "inputSchema": { "type": "object", "properties": {
+                "person_id": pid,
+                "filename": { "type": "string", "description": "原始文件名，含扩展名（如 血常规.txt）" },
+                "content_base64": { "type": "string", "description": "原件字节的标准 base64（可含换行）" }
+            }, "required": ["person_id", "filename", "content_base64"] }
         }),
     ]
 }

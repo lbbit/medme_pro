@@ -1,5 +1,22 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-019 2026-10-20 · **阶段4 第二步②：MCP 写侧工具落地（建档 / 传原件），工具数 6→8**
+**为什么做**：D-018 交付后 agent 只能读，写档必须绕 REST —— 这不是「AI agent 可按人查档/写档」的验收标准（PLAN 目标验收③）。
+**结构决策（与 D-017 同形，不变）**：写侧**不新开一条真相层**——`create_person` 直接调 `persons::PersonStore::create`（append-only JSONL），`upload_document` 直接调 `vaults::ingest_upload`（与 REST 上传**同一条 ingest 路径 + 同一把「每人写锁」**）。**MCP 与 REST 因此仍无分叉**：同一个 sha、同一条时间线、同一个 docref。
+**关键设计决策：JSON 传二进制 = base64，但 base64 手写不引 crate**。理由同 D-017 的「零新依赖」：base64 协议面小到能自己钉死并被测试锁死（`src/b64.rs` 5 个单测：RFC4648 向量 / 256 字节二进制往返 / 垃圾输入拒收）。**`Cargo.lock` 依赖数 204 → 204 未变**（可验事实，非声称）。
+**base64 解码的严格性（比 RFC 更严）**：padding 必须自洽（字符数 %4 与 '=' 个数匹配）、**被丢弃的位必须为 0**（否则同一串 base64 可对应多个字节序列=投毒面）、忽略折行空白（LLM 常把长串折行）。非法输入一律 **-32602 且带原因文本**，绝不返回「部分结果」（D5）。
+**新增错误码 -32003（不支持的文件类型）**：`.dcm` 等需 ocr/dicom worker 的类型此前会落到 -32002（"服务坏了"）——agent 无法据此换格式。新码让 agent 知道「改用 txt/pdf」。与 REST 面的 501 语义对齐。
+**参数校验必须带原因**：校验失败时 `content[0].text` 给出具体原因（"`content_base64` is not valid base64: ..."）而非只丢一个码——D-017 定的「错误码即行为指引」在写侧更吃重：agent 要知道**怎么改**。
+**证据链（缺一即不算交付）**：
+①`cargo test --all-targets` 全绿：**b64 5 + contract 1 + mcp 10 + sha_gate 1**。mcp 新增 5 门写侧：自闭环写侧（create→upload→search/labs 可见→重传 deduped 且 sha 不变）／坏参数零副作用（**被拒的写不得留下半成品**，list_persons 仍为 0）／写侧 -32001（换人不是重试）／写侧 -32003／写侧工具必须被 tools/list 公布（防挂名不实现）。
+②`mcp-e2e.sh` 真进程 **22 门 PASS / fails=0**（原 15 门 + 写侧 7 门）。关键门：`upload_document` 返回的 sha **与对解码后字节求的 sha256 逐字相等**、重传 `deduped=True`、坏 base64 ⇒ -32602、`.dcm` ⇒ -32003。
+③`skill-contract-check.sh` **18 门 PASS / fails=0**（原 13 门 + 写侧 5 门）：写侧 5 个字段名与 create_person 7 个字段名**逐个存在于真实写侧响应**；SKILL.md 与 tool-contracts.md 已同步到 8 工具 + 5 个错误码。
+④**依赖面零变化**：`Cargo.lock` 未改动（204 项不变）。
+**新坑两则（D4 同族）**：
+①**base64 第一版实现有 3 个真 bug**：padding 计数在 `seen_pad` 时被重复累加、末组截断字节数算错、丢弃位掩码用错（`0xFFFF` 应按 rem 分别取 4/2 位）。**四个单测同时红了**——这正是"自己实现的东西必须自己测"的收益：不是 e2e 才发现，是单元测试当场定位。教训补条：**手写协议实现必须先过 RFC 向量单测再谈端到端**。
+②**e2e 探针自己算错期望值（先怀疑测量方法·第五次应验）**：`upload_document` 的期望 sha 一开始对 **base64 串**求 sha256，而服务端算的是**解码后字节**的 sha ⇒ 一看像"服务端哈希不对"，实则探针错。修正后逐字相等。**同一坑第四个字面相似：期望值算错 ⇒ 看起来像产品 bug，先量期望值的算法**。
+**未销账/下一步**：①SKILL 尚未注册进 `~/.qwenpaw/skill_pool`（真·agent 自动发现未验）⇒ 留 T3 一起做；②`.dcm`/OCR worker 未做（-32003 是诚实的"暂不支持"，不是静默失败）；③真·第三方 MCP 客户端互通仍未验（D-017③ 同类）。
+
 ## D-017 2026-10-20 · 用户下达 T1~T5 待办（已入 PLAN「待办队列」）
 T1 CI(tag→ghcr) / T2 双编排(本地build+ghcr引用) / T3 免维护部署+SKILL接入文档 / T4 公网级 token 鉴权 / T5 Web 管理端。
 执行序=编号序；T4 是 T5/T3 上公网的前置。T5 选型时先报方案再动手(协作偏好#1)。

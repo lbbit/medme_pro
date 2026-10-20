@@ -16,6 +16,7 @@ use utoipa::OpenApi;
 mod persons;
 pub use persons::{Person, PersonNew, PersonStore};
 pub mod vaults;
+mod b64; // base64 解码（写侧工具传二进制原件用；零新依赖，模块内自带单测）
 pub mod mcp; // 阶段4：MCP server（零新依赖 JSON-RPC over POST /mcp，薄适配层复用 vaults）
 pub use vaults::UploadReply; // 供 utoipa path!宏体解析(同 PersonNew 惯例)
 use axum::extract::{Path as AxPath, Query};

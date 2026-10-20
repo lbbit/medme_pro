@@ -31,9 +31,9 @@ jq_() { python3 -c "import json,sys;d=json.load(sys.stdin);$1"; }
 V=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | jq_ 'print(d["result"]["protocolVersion"])')
 gate "protocolVersion" "$V" "2025-06-18"
 
-# 2) tools/list = 6
+# 2) tools/list = 8（6 读 + 2 写）
 N=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | jq_ 'print(len(d["result"]["tools"]))')
-gate "tools_count" "$N" "6"
+gate "tools_count" "$N" "8"
 
 # 3) 建档 + 上传（REST 侧写入 ⇒ MCP 侧必须读到同一真相层）
 PID=$(curl -s -X POST "127.0.0.1:$PORT/api/v1/persons" -H 'content-type: application/json' \
@@ -73,6 +73,30 @@ V=$(curl -s "127.0.0.1:$PORT/openapi.json" | jq_ 'print(len(d["paths"]))')
 if [ "$V" -ge 16 ] 2>/dev/null; then echo "  PASS openapi_paths>=16 = $V"; else echo "  FAIL openapi_paths=$V"; fails=$((fails+1)); fi
 V=$(curl -s "127.0.0.1:$PORT/openapi.json" | jq_ 'print("/mcp" in d["paths"])')
 gate "mcp_not_in_openapi" "$V" "False"
+
+# 7) 写侧闭环（真进程 · 全程只走 MCP · agent 不必绕 REST）
+#    create_person → upload_document(base64) → 读侧立刻可见 → 重传幂等
+B64=$(printf '姓名：孙九\n检查项目：血常规\n白细胞计数 12.4 10^9/L 偏高\n' | base64 -w0)
+# ⚠️ 期望 sha 必须对**解码后的字节**求值（不是对 base64 串）——先量后改(D-011 纪律)。
+WANT_SHA=$(printf '姓名：孙九\n检查项目：血常规\n白细胞计数 12.4 10^9/L 偏高\n' | sha256sum | cut -d' ' -f1)
+WPID=$(rpc '{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"create_person","arguments":{"name":"写侧门禁","gender":"female"}}}' \
+       | jq_ 'print(d["result"]["structuredContent"]["id"])')
+if [ -n "$WPID" ] && [ "$WPID" != "None" ]; then echo "  PASS create_person person_id=$WPID"; else echo "  FAIL create_person 无 person_id"; fails=$((fails+1)); fi
+WSHA=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"tools/call\",\"params\":{\"name\":\"upload_document\",\"arguments\":{\"person_id\":\"$WPID\",\"filename\":\"血常规.txt\",\"content_base64\":\"$B64\"}}}" \
+       | jq_ 'd=d["result"]["structuredContent"];print(d["content_hash"],d["deduped"],d["text_indexed"])' | tr ' ' '/')
+gate "upload_document(hash/deduped/indexed)" "$WSHA" "$WANT_SHA/False/True"
+V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"tools/call\",\"params\":{\"name\":\"search_records\",\"arguments\":{\"person_id\":\"$WPID\",\"q\":\"白细胞\"}}}" | jq_ 'print(d["result"]["structuredContent"]["count"])')
+gate "write_then_read.search_count" "$V" "1"
+V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"tools/call\",\"params\":{\"name\":\"get_labs\",\"arguments\":{\"person_id\":\"$WPID\"}}}" | jq_ 'print(len(d["result"]["structuredContent"]["series"])>0)')
+gate "write_then_read.labs_nonempty" "$V" "True"
+V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":18,\"method\":\"tools/call\",\"params\":{\"name\":\"upload_document\",\"arguments\":{\"person_id\":\"$WPID\",\"filename\":\"血常规.txt\",\"content_base64\":\"$B64\"}}}" | jq_ 'print(d["result"]["structuredContent"]["deduped"])')
+gate "reupload_idempotent" "$V" "True"
+# 坏 base64 ⇒ -32602（参数校验先于任何 IO）
+V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":19,\"method\":\"tools/call\",\"params\":{\"name\":\"upload_document\",\"arguments\":{\"person_id\":\"$WPID\",\"filename\":\"a.txt\",\"content_base64\":\"!!!!\"}}}" | jq_ 'print(d["result"]["_code"])')
+gate "bad_base64=-32602" "$V" "-32602"
+# 不支持的类型 ⇒ -32003（与「服务坏了」区分）
+V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"upload_document\",\"arguments\":{\"person_id\":\"$WPID\",\"filename\":\"s.dcm\",\"content_base64\":\"$B64\"}}}" | jq_ 'print(d["result"]["_code"])')
+gate "unsupported_type=-32003" "$V" "-32003"
 
 echo "[证据] mcp-e2e.sh fails=$fails"
 exit $([ "$fails" -eq 0 ] && echo 0 || echo 1)
