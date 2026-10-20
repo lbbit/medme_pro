@@ -100,6 +100,10 @@ docker compose -f docker-compose.ghcr.yml run --rm --no-deps ehr-api --rebuild-i
 
 重建只碰派生层（`medme.db` + wal/shm），**不动真相层**（`log/`、`objects/`）；重建后 timeline/labs/检索计数应与重建前一致。
 
+> ⚠️ `--rebuild-index` 需镜像含本命令：ghcr 上的 `v0.1.0` 镜像**尚不含**该 flag（CI 需打新 tag），
+> 本地验证用 `docker compose -f deploy/docker-compose.local.yml build` 后的镜像，或直接跑仓库内的二进制。
+> 重建是**离线动作**：建议先停服再重建（重建期间无写互斥）。
+
 ## 文档
 
 | 路径 | 说明 |
