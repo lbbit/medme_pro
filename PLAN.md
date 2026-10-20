@@ -54,7 +54,15 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
-## 当前状态（2026-10-20 · **阶段4 第二步②已交付：MCP 写侧工具（D-019）**）
+## 当前状态（2026-10-20 · **T1 CI + T2 双编排已交付（D-020）**）
+
+- ✅ **T1 交付（CI → ghcr）**：`.github/workflows/ci-image.yml`（触发=push tag `v*` / 手动）→ 多阶段构建 → push `ghcr.io/lbbit/medme_pro:<tag>` + `:latest`。**CI run #39391649300 = completed success**；镜像真实存在（digest `sha256:c1ec0c499e071...`）且本机 `docker pull` 成功。CI 内自动按 `upstream.pin` 拉固定 commit 的上游源码（`upstream-medme/` 被 gitignore 但 ehr-api 是 path 依赖）。
+- ✅ **T2 交付（双编排）**：`deploy/docker-compose.local.yml`（本地 build）+ `deploy/docker-compose.ghcr.yml`（引用 ghcr 镜像免构建）+ 共用 `deploy/.env.sample`。**ghcr 编排端到端 GREEN**：up → 容器 stderr `[证据] ... EHR_HOME=/home/ehr | ADDR=0.0.0.0:8443` → healthz 200 → openapi paths=16 → 写侧闭环（建档 UUID `5bec9f2d` → 上传 sha `4b325fb0` → timeline count=1 → labs series=2/points=2 真解析）→ down 后 8585→000。
+- ⚠️ **ghcr 包可见性=private**（本机自用已 docker login 成功；对外 pull 需在 GitHub 网页设 public 或给 PAT 加 `admin:packages`）。
+- 🔄 **下一步（阶段4 第三步 → T3）**：T3「免维护接入」——README 一键部署块 + SKILL 接入块（skill 归档 repo 内，纯 md + curl，API base 走 env，不写死 token）；随后 T4 token 鉴权。
+- ⚠️ 未销账：真·第三方 MCP 客户端互通未验（D-017③ 同类，代偿=协议层断言+双面一致性）；`.dcm`/OCR worker 未做（⇒ `-32003`）。
+
+### 历史状态（阶段4 第二步②，D-019）
 
 - ✅ **MCP 写侧交付（D-019）**：MCP 工具数 **6 → 8**，新增 `create_person`（建档）与 `upload_document`（传原件）⇒ agent 全流程**不必绕 REST**。
 - ✅ 证据：`cargo test --all-targets` 全绿（**b64 5 + contract 1 + mcp 10** + sha_gate 1）；`mcp-e2e.sh` 真进程 **22 门 PASS / fails=0**（含写侧闭环：create_person→upload_document→search/labs 立刻可见→重传 deduped=true、sha 与解码后字节 sha256 逐字相等）；`skill-contract-check.sh` **18 门 PASS / fails=0**（写侧 5 字段 + create_person 7 字段逐个存在于真实写侧响应）；**Cargo.lock 依赖数 204 未变（零新依赖）**。
@@ -104,8 +112,8 @@
 
 ## 待办队列（2026-10-20 用户下达，序号即优先级执行顺序，完成后打勾并记 DECISIONS）
 
-- [ ] T1 GitHub Actions CI：打 tag(v*) → 自动 build 多阶段镜像 → push ghcr.io/lbbit/medme_pro:<tag>（GH_TOKEN 权限/GCR 写入需验证；tag 触发规则、缓存策略写入 workflow 注释）
-- [ ] T2 双编排文件：`deploy/docker-compose.local.yml`(本地 build) + `deploy/docker-compose.ghcr.yml`(引用 ghcr 镜像,免构建一键起)；共用 .env 样例
+- [x] T1 GitHub Actions CI：打 tag(v*) → 自动 build 多阶段镜像 → push ghcr.io/lbbit/medme_pro:<tag>（GH_TOKEN 权限/GCR 写入需验证；tag 触发规则、缓存策略写入 workflow 注释）—— **D-020：CI run success，镜像可 pull**
+- [x] T2 双编排文件：`deploy/docker-compose.local.yml`(本地 build) + `deploy/docker-compose.ghcr.yml`(引用 ghcr 镜像,免构建一键起)；共用 .env 样例 —— **D-020：ghcr 编排端到端 GREEN**
 - [ ] T3 部署/接入方式"免维护设计"：README 提供一键复制粘贴的 部署块 + **SKILL 接入块（MCP 不交付，见 D-018：skill=纯md+curl，Copilot CLI 实测，归档 repo 内随版本走）**（skill 文件放仓库固定路径、API base 用 env、SKILL 内不写死 token——升级不改配置才算达标）
 - [ ] T4 API token 鉴权（面向公网）：静态 Bearer token(env 注入,可多 token 按只读/读写分权),中间件层统一拦截,OpenAPI 标 securitySchemes；验收=无 token 401、对 token 全绿
 - [ ] T5 Web 管理端：人员/时间线/上传/检索最小可用（技术栈选型时先报方案再动手）

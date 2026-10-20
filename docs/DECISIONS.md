@@ -1,5 +1,21 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-020 2026-10-20 · **T1 CI 打通 + T2 双编排交付**：打 tag(v*) → GitHub Actions 构建 → ghcr.io/lbbit/medme_pro:<tag>；两个 compose（local build / ghcr 引用）共用 .env.sample
+**为什么做**：T1/T2 是"免维护部署"（T3）与公网暴露（T4）的前置——镜像发布链不通，则"一键起"只能靠每台机器本地 build。
+**关键结构决策①：CI 必须自己拉上游源码**。`upstream-medme/` 被 .gitignore 排除（只读浅克隆，不进版本库），而 ehr-api 通过 **path 依赖**引用 `upstream-medme/packages/*` ⇒ runner 上直接 build 必然失败。做法：新增 `upstream.pin`（固定 commit `9c9251d7abb8...`），CI 在 build 前拉该 commit 的 tarball 解出 `Cargo.toml`/`Cargo.lock`/`packages/`。**固定 commit 而非 main = 构建可复现**（上游不动则构建产物不动）。
+**关键结构决策②：包权限模型——「包必须由 GITHUB_TOKEN 创建」**。见新坑①：谁先创建了同名 package，CI 的 GITHUB_TOKEN 能否推就取决于包与仓库的关联关系，**不是加 permissions 就够**。
+**证据链（缺一即不算交付）**：
+①**GHCR 写入能力已实测**（本机 PAT `write:packages`）：`docker push ghcr.io/lbbit/medme_pro:v0.0.0-probe` 成功（digest sha256:2619a61f...）。这一步先做，是因为"能不能推 ghcr"是 T1 唯一真未知项。
+②**CI run #39391649300 = completed success**（`build-and-push-image`，触发=push tag v0.1.0）。步骤逐条：checkout success → 拉上游 success → 解析 tag success → buildx success → 登录 ghcr success → 构建并推送 success。
+③**镜像真实存在且可拉**：ghcr 包 versions = tags `['latest','v0.1.0']`，digest `sha256:c1ec0c499e071f387a4bf3e46e0c87cbc0375e7a469167310e8cdac78bf38ba3`；本机 `docker pull ghcr.io/lbbit/medme_pro:v0.1.0` = Downloaded newer image（digest 逐字相等）。
+④**T2 ghcr 编排端到端 GREEN**（不是"文件写好了"）：`docker compose -f docker-compose.ghcr.yml up -d` → 容器 stderr `[证据] ehr-api v0.0.1 | mode=serve | EHR_HOME=/home/ehr | ADDR=0.0.0.0:8443`（D1 同源）→ `GET /api/v1/healthz` HTTP 200 `{"home":"/home/ehr","status":"ok"}` → openapi **paths=16** → 写侧闭环：POST /persons 201 得 UUID `5bec9f2d...` → multipart 上传 `sha=4b325fb0...`、deduped=false → timeline count=1（真中文 title）→ **labs series_count=2 / total_points=2（wbc 值 6.2 真解析出来，附 docref）** → `down` 后 8585 → HTTP 000。
+⑤**本地等价 context 构建 dry-run 也全绿**（CI 之前先在本机验同一 Dockerfile 同参数，避免把"能编译"寄望于 CI）：`docker build` exit=0，容器内 `[证据] openapi_paths=16` + `dry-run exit=0`。
+**新坑三则（D4 同族）**：
+①**"包已被手工创建"会让 CI 的 GITHUB_TOKEN 推不动**——第一次 CI run（#39391036648）失败于 `failed to push ghcr.io/lbbit/medme_pro:v0.1.0: denied: permission_denied: read_package`。**真因**：我在探针阶段用 PAT 手工创建了 `medme_pro` 包，但该包**未关联任何仓库**（`repository=None`）；CI 用的 `GITHUB_TOKEN`（`packages: write`）只能推**与本仓库关联**或**由自己创建**的包，PAT 也不带 `admin:packages` ⇒ 连包关联/可见性 API 都是 404（`PUT /user/packages/container/medme_pro/repositories` → 404）。**处置**：删掉手工建的包（`DELETE /user/packages/container/medme_pro` → 204）→ 删 tag 重推 → CI 用 GITHUB_TOKEN 重建包并自动关联 ⇒ 第二次 run 全绿。**教训：发布链上"谁创建了包"是权限的一部分，不能只写 `permissions: packages: write`**；探针用的手工 push 必须清理干净，否则污染后续自动化。
+②**buildx 不继承 compose 的 extra_hosts**（D-016 已记的坑，本轮再次踩到）：`docker build` 想用宿主代理须显式 `--add-host=host.docker.internal:host-gateway`，否则容器内 `Could not resolve proxy name`；compose 的 `extra_hosts` **只作用于运行期容器，不传给 buildkit**。
+③**"漏传 build-arg"会让构建以"网络太慢"面貌失败**：不带 `HTTPS_PROXY` 时 `cargo fetch` 报 `transfer too slow: failed to transfer more than 10 bytes in 30s`（static.crates.io 直连被限速，D-006 同族），看上去像镜像源坏了，实则是代理没传进去。**先量网络事实再判源坏**。
+**未销账/下一步**：①**ghcr 包可见性仍为 private**（`visibility: private`；PAT 无 `admin:packages` 故 PATCH 404）——要让别人 `docker pull` 需在 GitHub 网页把包设为 public 或给 PAT 加 `admin:packages`；本机自用不受影响（已 docker login 成功）。②CI 构建耗时 ~8-10min（冷 cache），已开 GHA cache（`cache-to: type=gha,mode=max`），第二次起应显著变快。③T3（README 一键部署块 + SKILL 接入块）、T4（token 鉴权）、T5（Web 管理端）待做。
+
 ## D-018 2026-10-20 · SKILL/MCP 定位修正：**SKILL 即全部，MCP 降为可选**；skill 归档在仓库内、Copilot CLI 是测试 harness
 用户澄清:①skill 不注册 ~/.qwenpaw/skill_pool(不在本机 QwenPaw 用)；skill 归档于 medme_pro 仓库,
 随代码版本走。②测试途径=Copilot CLI(BYOK,复用 qwen3.8-27b-project 的 copilot-strata.sh 配方,
