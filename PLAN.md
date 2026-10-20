@@ -54,8 +54,21 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
-## 当前状态（2026-10-23 · **T9 用药端点已实装（D-026）· stub 端点 8→7**）
+## 当前状态（2026-10-23 · **T10 病程泳道端点已实装（D-027）· stub 端点 7→6**）
 
+- ✅ **T10 交付（`/persons/{pid}/conditions` 从 stub→501 毕业为真实现）**：①`vaults.rs` 新增 `conditions_aggregate()`——与 `labs`/`medications` **同一次 `parser::aggregate()`** 的第三块输出，**同源同判据**（复用 D-026 抽出的 `collect_agg_rows()` + `rows_to_source_docs()`，**不另写一份取样逻辑**）；②**判据分工如实透传上游语义**（D-027 决策②）：上游 conditions 面**没有** doc_type 白名单，只跳过「手动录入类」文档 ⇒ 本层**不加私造白名单**；③**不推断 = 不粉饰**：`raw_text` 原样透传（上游无术语归一字典）、ICD 码**仅当原件印了才有**、`onset` 缺失即 `None`；④每条诊断带 `docrefs`（**跨文档合并后保留全部出处**）⇒ 可一路溯源到原件字节（D2）；⑤`conditions` 从 `CONTRACT` 表移出、正式进 utoipa `paths(...)` ⇒ OpenAPI/文档不再宣称 501（反向保险 `contract_entries_really_return_501` 保留，conds-e2e M5 门专门断言）。
+- ✅ **顺手修掉一个真并发 bug（D-027 决策⑥）**：暂存目录名此前**只按内容哈希**命名 ⇒ **同内容**原件**并发**摄取共用目录 ⇒ 一方 `remove_dir_all` 删掉另一方暂存文件 ⇒ 对方解析失败 ⇒ 该文档**静默落成 raw-only**（无文本层）⇒ 在 labs/medications/conditions/search 四个面**全部隐形**，而上传接口照样回 200（典型的「以为有、其实没有」D5）。**症状像业务抖动**（实测 conds 门禁 5 跑 3 红）。修法 = 目录名加 **进程 id + 单调计数器**（`AtomicU64`）⇒ 每次调用独占，**零新依赖**；已用单测 `staging_dir_is_unique_per_call` 钉死不变量。
+- ✅ **证据链（缺一即不算交付）**：
+  - ①**`conds-e2e.sh`（新增门禁）真进程 12 门 PASS / fails=0**：`/conditions` → **200**；**M1 反凭空造**（化验单 docref 不出现）+ ICD 只透传不臆造 + 原文写法原样；**M2 provenance verified conditions=4**（每条诊断原文都在**经 HTTP 取回的其 docref 原件**里逐字出现）；**M3a labs 未退化**（诊断行未被读成假指标）；**M3b medications 未退化**；**M4 OpenAPI 里是真 operation + typed schema**；未知人 **404**；**M5 不在 CONTRACT 表**。
+  - ②**`cargo test --all-targets` 全绿**：新增 `tests/conds.rs` **4 门**（库级聚合 + 证据回链 + 反凭空造 + ICD 透传 + labs/meds 不回归；HTTP 级端点 200/回链/不在 CONTRACT 表）+ 旧门禁**未破** ⇒ 合计 **45 门全绿**。
+  - ③**旧 e2e 门禁全绿未被破坏**：`ehtest.sh`(34 门) / `mcp-e2e.sh` / `auth-e2e.sh` / `rebuild-e2e.sh` / `rebuild-lock-e2e.sh` / `skill-rest-check.sh` / `skill-contract-check.sh` / `api-doc-check.sh`(8 门) / `web-e2e.sh`（起真服务复验 fails=0）**全 fails=0**。
+  - ④**零新依赖**：`ehr-api/Cargo.lock` 与 `Cargo.toml` **未改动**（依赖包数 **204** 不变，可验事实）。
+  - ⑤**dry-run 优先**：先跑库级 `cargo test --all-targets` 与 `--print-api-doc` 干跑渲染，再起真进程跑 conds-e2e 与旧门禁复验。
+  - ⑥**参数/状态生效有证据**：`api-doc-check.sh` 首跑 **fails=1**（文档仍写 501＝漂移）⇒ `--write` 重生成（**25746 bytes**）⇒ 复跑 **fails=0**；门禁 A5 的 stub 计数由 **7 降到 6**。
+- 🔄 **下一步**：①**stub 端点继续毕业**（剩 **6 个**：`measurements`/三个 `entries`/`extraction`/`audit`）——**注意 `measurements` 与前几个不同类**：它是 `SelfMeasurement/ProfileEvent` 事件回放投影，而**其写侧（三个 `entries`）都还是 501** ⇒ 无法像 conditions 那样只补读侧就毕业，**需先决定写侧是否纳入范围**；②**T5 Web 管理端正式化（选型先报方案再动手）**——目标验收①的最后一块；③T3 待办未打勾（其实已交付，待与 T5 合并收口）；④公网暴露前：`EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑤ghcr 包可见性仍 private；⑥真·第三方 MCP 客户端互通仍未验；⑦`.dcm`/OCR worker 未做。
+- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（`ehr-api/web/index.html` 编译期内嵌，非正式前端，无构建链）；目标验收②中 `medications`/`conditions` **已实装**（D-026/D-027），但 `measurements`/三个 `entries`/`extraction`/`audit` 共 **6 个端点仍是 stub→501**（文档已逐个标注）；`medications`/`conditions` **MCP 侧暂无对应工具**（REST 独有，SKILL.md 已如实标注）；`docs/API.md` 是**生成物**，改接口必须跑 `./api-doc-check.sh --write`，手改会被 A3 门禁打回；文档覆盖的是 **REST 面**，`/mcp` 的工具契约仍在 `skills/medme-ehr/references/tool-contracts.md`；**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」⇒ 未分类文档走 labs 全文正则 ⇒ 诊断行被读成假化验指标，非本轮引入的回归）已用门禁钉死事实，修法不在本层（D5）。
+
+### 历史状态（2026-10-23 · **T9 用药端点已实装（D-026）· stub 端点 8→7**）
 - ✅ **T9 交付（`/persons/{pid}/medications` 从 stub→501 毕业为真实现）**：①`vaults.rs` 抽出**共用取样路径** `collect_agg_rows()` + `rows_to_source_docs()` ⇒ `labs` 与 `medications` **同源同判据、同一次 `parser::aggregate()`**（一个语义只允许一处实现）；②**`doc_type` 如实传给 `aggregate`**（D-026 决策①，最硬的一条）：已分类的必须如实传（否则化验单被当处方挖药，「肌酐 112 umol/L」读成 112U 药），**判不出类型的（unknown）要还原成 `None`**（上游语义「None=宽松放行」，传 `Some("unknown")` 会让该文档**两个面都读不出**——实测 labs 变 0 条）；③每条 mention 带 `docref`（=出处原件 sha256）、药名/剂量**原样透传不改写**、`status` 恒 `active` **不擅自改写成「已停」**；④`medications` 从 `CONTRACT` 表移出、正式进 utoipa `paths(...)` ⇒ OpenAPI/文档不再宣称 501（反向保险 `contract_entries_really_return_501` 保留）。
 - ✅ **证据链（缺一即不算交付）**：
   - ①**`meds-e2e.sh`（新增门禁）真进程 12 门 PASS / fails=0**：`/medications` → **200**；**M1 类型分流**（用药只来自处方，化验单 docref 不出现）；**M2 provenance verified mentions=3**（每条 mention 的药名/剂量都在**经 HTTP 取回的其原件原文**里逐字出现——「docref 指向某原件」与「药名真从那份原件来」是两件事）；**M3 labs 未退化**（同一化验单仍读出指标点、docref 仍指向化验单）；**M4 OpenAPI 里是真 operation + typed schema**；未知人 **404**；**M5 不在 CONTRACT 表**。
@@ -176,3 +189,5 @@
 - [x] T6 派生索引全量重建（目标验收④）：显式 `--rebuild-index` 命令 + 重建门禁 —— **D-023：已交付（rebuild-e2e 22 门 / tests/rebuild 3 门 / 零新依赖）**
 - [x] T7 重建期写互斥（销账 D-023 未销账项①）：跨进程锁文件 + 服务面 503 拒写 + 并发重建被拒 + 陈旧锁回收 —— **D-024：已交付（rebuild-lock-e2e 15 门 PASS / fails=0；单测 2 门；Cargo.lock 零新依赖）**
 - [x] T8 人类可读接口文档（目标验收⑤）：`docs/API.md` 由运行时 OpenAPI 自动生成 + 漂移门禁 —— **D-025：已交付（api-doc-check.sh 8 门 PASS / fails=0；tests/apidoc 3 门；单测 1 门；顺手修掉 labs 端点「文档说 501、实际 200」的漂移）**
+- [x] T9 用药端点实装（`/persons/{pid}/medications` 从 stub→501 毕业）：与 labs 同源同判据的 `agg.meds` 面 + doc_type 如实分流 + 逐条证据回链 —— **D-026：已交付（meds-e2e 12 门 PASS / fails=0；tests/meds 2 门；Cargo.lock 零新依赖）**
+- [x] T10 病程泳道端点实装（`/persons/{pid}/conditions` 从 stub→501 毕业）：第三个 aggregate 面 `agg.conditions` + 反凭空造门 + 顺手修掉暂存目录并发互删真 bug —— **D-027：已交付（conds-e2e 12 门 PASS / fails=0；tests/conds 4 门；45 门全绿；零新依赖）**

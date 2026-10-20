@@ -202,8 +202,21 @@ pub fn ingest_upload(vault: &Vault, filename: &str, bytes: &[u8]) -> Result<Uplo
 }
 
 fn staging_dir(hash: &str) -> std::path::PathBuf {
-    // hash命名=天然去重+并发安全；放在系统temp(可弃置)，EHR_HOME属运维区不放垃圾(D3分层)。
-    std::env::temp_dir().join(format!("medme-ehr-staging-{hash}"))
+    // ⚠️ D-027 修一个真 bug（此前是 `medme-ehr-staging-{hash}`，**只按内容哈希**命名）：
+    //   同内容的两份原件**并发**摄取时会共用同一个暂存目录 ⇒ 其中一方
+    //   `remove_dir_all` 把对方刚写好的暂存文件删掉 ⇒ 对方 `parser::extract`
+    //   读不到文件 ⇒ 返回 None ⇒ 该文档被当成「解析失败」**静默落成 raw-only**
+    //   （text_indexed=false、**无文本层**）⇒ 随后它在 labs/medications/conditions/
+    //   search 四个面上**全部隐形**，且上传接口照样回 200 + content_hash ——
+    //   典型的「以为有、其实没有」（D5）。症状：同内容并发上传时门禁随机红、
+    //   指标条数忽多忽少（实测 conds 门禁 5 跑 3 红）。
+    //   修法：暂存目录名 = 内容哈希 + 进程 id + 单调计数器 ⇒ **每次调用独占**，
+    //   既不会互删，也不需要引依赖（用 std::sync::atomic::AtomicU64）。
+    //   注：内容哈希仍留在名字里（可读性 + 便于事后清理定位），但**不再作为唯一键**。
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // 放在系统temp(可弃置)，EHR_HOME属运维区不放垃圾(D3分层)。
+    std::env::temp_dir().join(format!("medme-ehr-staging-{hash}-{}-{n}", std::process::id()))
 }
 
 // ---- sha256 docref → 单文档详情 / CAS 原件流（API-DESIGN「documents/{sha256}」两行的落地）----
@@ -658,4 +671,83 @@ pub fn meds_aggregate(vault: &Vault, person_id: &str) -> Result<MedicationsReply
         mention_count,
         medications,
     })
+}
+
+// ---- 病程泳道（conditions）：parser::aggregate() 的 conditions 面（D-027）----
+// D-027：把 `/persons/{pid}/conditions` 从 stub→501 毕业为真实现。
+// 与 labs/medications **同一次** aggregate 调用产出（同源，不另跑一遍解析）——
+// 同一次扫描、同一份取样判据（collect_agg_rows/rows_to_source_docs）。
+//
+// ⚠️ 判据分工（与上游同源，**不在本层另造**）：
+//   上游 conditions 面**没有** doc_type 白名单门（不像 meds 只放行 prescription、
+//   labs 只放行 lab_report）——它只跳过「手动录入类」文档（self_measurement/note/
+//   profile_event，见 aggregate.rs 的 is_manual_entry），因为随手写的一句
+//   「头晕，是不是又高血压了」不该凭空变成一条诊断。
+//   我们的 rows_to_source_docs 已把 unknown 还原成 None（=「调用方没分类」），
+//   于是未分类文档**照常参与** conditions 抽取（上游宽松语义）——这是**如实透传**，
+//   不是本层的判断。
+
+/// 一条诊断（跨文档合并后仍保留全部出处）。
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ConditionOut {
+    /// 诊断原文写法（上游**不做**术语归一，故原样透传）
+    pub raw_text: String,
+    /// 最早一次提及的日期；来源文档无日期时 None
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onset: Option<String>,
+    /// 原文括号里印着的 ICD 码（如 E11.9）——**仅当原件印了**才有；
+    /// 上游不校验、不臆造，此处原样透传（不据此改写展示名）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icd_code: Option<String>,
+    /// 提及该诊断的全部原件 docref（= content_hash，去重升序）
+    pub docrefs: Vec<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ConditionsReply {
+    pub person_id: String,
+    /// 参与聚合的文档数（仅 text 层齐备者；同 labs/medications 判据）
+    pub documents_scanned: usize,
+    /// 诊断条数
+    pub condition_count: usize,
+    pub conditions: Vec<ConditionOut>,
+}
+
+/// 病程泳道聚合。同一批文档、同一次 parser::aggregate（与 labs/medications 同源判据）。
+pub fn conditions_aggregate(vault: &Vault, person_id: &str) -> Result<ConditionsReply> {
+    let rows = collect_agg_rows(vault)?;
+    let docs = rows_to_source_docs(&rows);
+    let agg = parser::aggregate(&docs);
+    let docref_of = |idx: usize| rows.get(idx).map(|r| r.sha.clone()).unwrap_or_default();
+    let conditions: Vec<ConditionOut> = agg.conditions.iter().map(|c| ConditionOut {
+        raw_text: c.raw_text.clone(),
+        onset: c.onset.map(|d| d.format("%Y-%m-%d").to_string()),
+        icd_code: c.icd_code.clone(),
+        docrefs: c.sources.iter().map(|i| docref_of(*i)).collect(),
+    }).collect();
+    Ok(ConditionsReply {
+        person_id: person_id.to_string(),
+        documents_scanned: rows.len(),
+        condition_count: conditions.len(),
+        conditions,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D-027：暂存目录名必须**每次调用都不同**。
+    ///
+    /// 回归的真实 bug：暂存目录曾只按内容哈希命名 ⇒ 同内容并发摄取共用一个目录，
+    /// 一方 `remove_dir_all` 删掉另一方的暂存文件 ⇒ 后者解析失败 ⇒ 该文档**静默**
+    /// 落成 raw-only（无文本层）⇒ 在 labs/medications/conditions/search 四个面上隐形。
+    /// 症状是「门禁随机红、指标条数忽多忽少」——看着像业务抖动，实为真 bug。
+    #[test]
+    fn staging_dir_is_unique_per_call() {
+        let a = staging_dir("deadbeef");
+        let b = staging_dir("deadbeef");
+        assert_ne!(a, b, "同内容两次摄取的暂存目录必须不同，否则会互删暂存文件");
+        assert!(a.to_string_lossy().contains("deadbeef"), "内容哈希应留在名字里（便于定位）");
+    }
 }

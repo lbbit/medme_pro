@@ -49,7 +49,7 @@
 | `GET` | `/api/v1/healthz` | 健康检查 | ✅ 已实装 |
 | `GET` | `/api/v1/persons` | 人员列表（读 registry/persons.jsonl 全量折叠；MVP 规模足够，规模化后换派生索引——真相层不变） | ✅ 已实装 |
 | `POST` | `/api/v1/persons` | 建档 —— person registry 是本项目唯一新增真相层（append-only JSONL，与内核事件日志同哲学） | ✅ 已实装 |
-| `GET` | `/api/v1/persons/{pid}/conditions` | conditions(AggregatedCondition 病程泳道)（stub→501） | ⚠️ stub（501） |
+| `GET` | `/api/v1/persons/{pid}/conditions` | 病程泳道——与 labs/medications 同一批文档、同一次 parser::aggregate 的第三块输出（D-027）。 诊断原文**原样透传不归一**（上游无术语归一字典），ICD 码仅当原件印了才有； 证据回链 docref（CAS sha）可一路溯源到原件字节（D2）。 | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/documents` | 文档列表（documents.json 折叠视图，docref=sha256）。timeline 的扩展列版。 | ✅ 已实装 |
 | `POST` | `/api/v1/persons/{pid}/documents` | MVP 直传同步入库(锁=每人串行占位)；OCR/DICOM worker 化后置。见 vaults::ingest_upload。 | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/documents/{sha}` | GET /persons/{pid}/documents/{sha} —— document + OCR文本层 + extraction JSON(API-DESIGN)。 | ✅ 已实装 |
@@ -182,17 +182,21 @@ curl -X POST \
 
 ### `GET /api/v1/persons/{pid}/conditions`
 
-conditions(AggregatedCondition 病程泳道)（stub→501）
-
-> ⚠️ **本端点当前返回 501（尚未实装）**——下方是已固定的契约形状，实现后语义不再变。
+病程泳道——与 labs/medications 同一批文档、同一次 parser::aggregate 的第三块输出（D-027）。 诊断原文**原样透传不归一**（上游无术语归一字典），ICD 码仅当原件印了才有； 证据回链 docref（CAS sha）可一路溯源到原件字节（D2）。
 
 - 鉴权：需要 Bearer token
+
+**参数**
+
+| 名 | 位置 | 必填 | 说明 |
+|---|---|---|---|
+| `pid` | path | 是 | person uuid |
 **响应**
 
 | 码 | 说明 |
 |---|---|
-| `200` | planned |
-| `501` | not implemented yet (stage-2 in progress) |
+| `200` | aggregated condition lane (raw diagnosis text + onset + evidence docrefs) |
+| `404` | person not found |
 
 
 **示例**
@@ -531,6 +535,26 @@ curl -X GET \
 
 ## 6. 数据模型（components.schemas）
 
+### `ConditionOut`
+
+一条诊断（跨文档合并后仍保留全部出处）。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `docrefs` | array<string> | 是 | 提及该诊断的全部原件 docref（= content_hash，去重升序） |
+| `icd_code` | object | 否 | 原文括号里印着的 ICD 码（如 E11.9）——**仅当原件印了**才有； 上游不校验、不臆造，此处原样透传（不据此改写展示名） |
+| `onset` | object | 否 | 最早一次提及的日期；来源文档无日期时 None |
+| `raw_text` | string | 是 | 诊断原文写法（上游**不做**术语归一，故原样透传） |
+
+### `ConditionsReply`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `condition_count` | integer | 是 | 诊断条数 |
+| `conditions` | array<ConditionOut> | 是 |  |
+| `documents_scanned` | integer | 是 | 参与聚合的文档数（仅 text 层齐备者；同 labs/medications 判据） |
+| `person_id` | string | 是 |  |
+
 ### `DocumentDetail`
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -727,7 +751,6 @@ curl -X GET \
 |---|---|---|
 | `GET` | `/api/v1/audit` | 审计视图(person/op 过滤，内容哈希留痕)（stub→501） |
 | `PUT` | `/api/v1/documents/{sha}/extraction` | AI agent 结构化发现(引用不替代，字段级 evidence 锚点)（stub→501） |
-| `GET` | `/api/v1/persons/{pid}/conditions` | conditions(AggregatedCondition 病程泳道)（stub→501） |
 | `POST` | `/api/v1/persons/{pid}/entries/note` | Note 条目（stub→501） |
 | `POST` | `/api/v1/persons/{pid}/entries/profile-event` | ProfileEvent(parser::profile_event payload)（stub→501） |
 | `POST` | `/api/v1/persons/{pid}/entries/self-measurement` | {type,value,unit,taken_at} → SelfMeasurement import（stub→501） |
