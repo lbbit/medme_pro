@@ -10,3 +10,4 @@
 !upstream-medme/packages/
 !deploy/Dockerfile
 
+!ehr-api/web/

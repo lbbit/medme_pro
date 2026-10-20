@@ -71,4 +71,26 @@ async fn contract_paths_are_routed_and_documented() {
         let res = app.clone().oneshot(req).await.unwrap();
         assert_ne!(res.status(), StatusCode::NOT_FOUND, "route missing for {method} {concrete}");
     }
+
+    // 4) Web 管理端最小版（D-016）：GET / 必须回 HTML（内容非空 + content-type text/html）。
+    //    守卫点：include_str! 的 web/index.html 若被移出构建上下文，编译期即失败；
+    //    路由若被摘掉，下面断言失败——「页面在库里但没人能打开」是本项目 D5 类漏账。
+    {
+        let res = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "web index must be served at /");
+        let ct = res.headers().get(axum::http::header::CONTENT_TYPE).cloned();
+        let is_html = ct
+            .as_ref()
+            .map(|v| v.to_str().unwrap_or("").starts_with("text/html"))
+            .unwrap_or(false);
+        assert!(is_html, "web index content-type must be text/html, got {ct:?}");
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8_lossy(&bytes).to_string();
+        assert!(html.len() > 2000, "web index looks truncated: {} bytes", html.len());
+        assert!(html.contains("/api/v1"), "web index must call the JSON API same-origin");
+    }
 }

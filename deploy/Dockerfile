@@ -32,6 +32,7 @@ COPY ehr-api/vendor /src/ehr-api/vendor
 RUN cd ehr-api && cargo fetch --offline && echo "[证据] vendored deps resolvable offline"
 
 COPY ehr-api /src/ehr-api
+# ↑ 整目录拷贝含 web/index.html（include_str! 内嵌，D-016）；Dockerfile 行尾注释会被当参数解析
 # dry-run 探针: --print-openapi 仍校验 EHR_HOME(启动前置同一代码路径),给个临时目录即可;
 # 用 mktemp -d 而非写死路径,避免污染层。
 RUN cd ehr-api && cargo build --release --locked && \

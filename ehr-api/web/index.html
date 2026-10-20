@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>medme-ehr 管理端（最小版）</title>
+<style>
+ :root{--fg:#1c1c1e;--mut:#6b6b70;--line:#e3e3e6;--bg:#fafafa;--acc:#0b6bcb}
+ *{box-sizing:border-box} body{margin:0;font:14px/1.6 -apple-system,"Segoe UI",system-ui,"Noto Sans CJK SC",sans-serif;color:var(--fg);background:var(--bg)}
+ header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:baseline}
+ h1{font-size:16px;margin:0} .ver{color:var(--mut);font-size:12px}
+ main{display:grid;grid-template-columns:280px 1fr;gap:0;height:calc(100vh - 53px)}
+ aside{border-right:1px solid var(--line);overflow:auto;padding:12px}
+ section{overflow:auto;padding:16px 20px}
+ button{font:inherit;padding:5px 10px;border:1px solid var(--line);background:#fff;border-radius:6px;cursor:pointer}
+ button:hover{border-color:var(--acc);color:var(--acc)}
+ input,select{font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px;width:100%}
+ .row{display:flex;gap:8px;margin-bottom:10px} .row>*{flex:1}
+ ul{list-style:none;margin:0;padding:0} li{padding:7px 8px;border-radius:6px;cursor:pointer}
+ li:hover{background:#eef4fb} li.on{background:#e3efff;color:var(--acc);font-weight:600}
+ table{border-collapse:collapse;width:100%} td,th{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;font-size:13px;vertical-align:top}
+ .mark{background:#ffe9a8;border-radius:2px}
+ pre{white-space:pre-wrap;word-break:break-word;background:#fff;border:1px solid var(--line);border-radius:8px;padding:10px;margin:0}
+ .mut{color:var(--mut)} .err{color:#c02626} pre.msg{color:#c02626}
+ .tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+ .tabs button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+</style>
+</head>
+<body>
+<header>
+  <h1>medme-ehr 管理端</h1>
+  <span class="ver" id="ver">…</span>
+  <span class="ver" style="margin-left:auto">真相层 = 原件 CAS + 事件日志 · 派生索引可重建</span>
+</header>
+<main>
+<aside>
+  <div class="row">
+    <input id="newName" placeholder="新人员姓名">
+    <button id="btnAdd">建档</button>
+  </div>
+  <ul id="plist"></ul>
+</aside>
+<section>
+  <div class="tabs" id="tabs"></div>
+  <div id="pane"></div>
+</section>
+</main>
+<script>
+const API = location.origin + "/api/v1";
+let persons = [], cur = null, tab = "timeline";
+
+async function j(path, opt) {
+  const r = await fetch(API + path, opt);
+  const t = await r.text();
+  let d; try { d = JSON.parse(t); } catch (e) { d = { raw: t }; }
+  if (!r.ok) throw new Error((d && d.error) || (r.status + " " + t.slice(0,200)));
+  return d;
+}
+const esc = s => String(s==null?"":s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const hl = s => esc(s).replace(/\[([^\]]+)\]/g, '<span class="mark">$1</span>');
+
+async function loadPersons() {
+  persons = await j("/persons");
+  const pl = document.getElementById("plist");
+  pl.innerHTML = persons.map(p => `<li data-id="${p.id}" class="${cur===p.id?"on":""}">${esc(p.name)}</li>`).join("");
+  [...pl.children].forEach(li => li.onclick = () => { cur = li.dataset.id; loadPersons(); render(); });
+}
+function tabs() {
+  const t = ["timeline","documents","labs","search"];
+  document.getElementById("tabs").innerHTML = t.map(x =>
+    `<button data-t="${x}" class="${tab===x?"on":""}">${{timeline:"时间线",documents:"文档",labs:"指标",search:"检索"}[x]}</button>`).join("");
+  [...document.getElementById("tabs").children].forEach(b => b.onclick = () => { tab = b.dataset.t; render(); });
+}
+function out(html) { document.getElementById("pane").innerHTML = html; }
+function fail(e) { out(`<pre class="msg">[ERROR] ${esc(e.message)}</pre>`); }
+
+async function render() {
+  tabs();
+  if (!cur) return out('<p class="mut">← 左侧选择或新建人员。</p>');
+  const p = persons.find(x => x.id === cur);
+  try {
+    if (tab === "timeline") {
+      const d = await j(`/persons/${cur}/timeline`);
+      out(`<h2>${esc(p.name)} · 时间线 <span class="mut">count=${d.count}</span></h2>` +
+        (d.count ? `<table><tr><th>日期</th><th>标题</th><th>类型</th></tr>` +
+          d.items.map(i => `<tr><td>${esc((i.doc_date||"—").slice(0,10))}</td><td>${esc(i.title||"—")}</td><td class="mut">${esc(i.doc_type||"")}</td></tr>`).join("") + `</table>`
+          : '<p class="mut">该人员暂无记录。上传 txt/pdf 后此处出现。</p>'));
+    } else if (tab === "documents") {
+      const d = await j(`/persons/${cur}/documents`);
+      out(`<h2>${esc(p.name)} · 文档 <span class="mut">count=${d.count}</span></h2>` +
+        `<div class="row"><input type="file" id="f"><button id="up">上传原件</button></div>` +
+        (d.count ? `<table><tr><th>sha256</th><th>文件名</th><th>大小</th></tr>` +
+          d.items.map(i => `<tr><td><a href="#" data-sha="${i.content_hash}" class="det">${esc((i.content_hash||"").slice(0,12))}…</a></td><td>${esc(i.original_name||"")}</td><td class="mut">${esc(i.byte_size)} B · ${esc(i.mime_type)}</td></tr>`).join("") + `</table>`
+          : '<p class="mut">暂无文档。</p>'));
+      const up = document.getElementById("up");
+      if (up) up.onclick = async () => {
+        const f = document.getElementById("f").files[0]; if (!f) return alert("先选文件");
+        const fd = new FormData(); fd.append("file", f);
+        try { const r = await j(`/persons/${cur}/documents`, { method: "POST", body: fd });
+          alert(`已入库 sha=${(r.content_hash||"").slice(0,12)}… deduped=${!!r.deduped}`); render();
+        } catch (e) { alert("上传失败: " + e.message); }
+      };
+      document.querySelectorAll("a.det").forEach(a => a.onclick = async ev => {
+        ev.preventDefault();
+        try { const d = await j(`/persons/${cur}/documents/${a.dataset.sha}`);
+          out(`<h2>${esc(d.filename)}</h2><p class="mut">sha256=${esc(d.sha256)}</p><pre>${esc((d.text||"").slice(0,4000))}</pre>`);
+        } catch (e) { fail(e); }
+      });
+    } else if (tab === "labs") {
+      const d = await j(`/persons/${cur}/labs`);
+      out(`<h2>${esc(p.name)} · 指标 <span class="mut">series=${(d.series||[]).length}</span></h2>` +
+        ((d.series||[]).length ? (d.series||[]).map(s =>
+          `<h3>${esc(s.group_name||s.analyte_key||"未命名序列")} <span class="mut">${esc(s.unit_canonical||"")} · n=${(s.points||[]).length}${s.any_abnormal?" · 异常":""}</span></h3><table><tr><th>日期</th><th>值</th><th>flag</th><th>证据</th></tr>` +
+          (s.points||[]).map(pt => `<tr><td>${esc(pt.date||"—")}</td><td>${esc(pt.value)}${esc(s.unit_canonical?" "+s.unit_canonical:"")}</td><td>${esc(pt.flag||"")}</td><td class="mut">${esc((pt.docref||"").slice(0,12))}</td></tr>`).join("") + `</table>`).join("")
+          : '<p class="mut">无已解析指标。上传含检验数据的 txt 报告后重试。</p>'));
+    } else {
+      out(`<h2>${esc(p.name)} · 检索</h2><div class="row"><input id="q" placeholder="如：血常规"><button id="go">搜索</button></div><div id="res"></div>`);
+      const go = document.getElementById("go");
+      const run = async () => {
+        const q = document.getElementById("q").value.trim(); if (!q) return;
+        try { const d = await j(`/persons/${cur}/search?q=${encodeURIComponent(q)}`);
+          document.getElementById("res").innerHTML = `<p class="mut">q=${esc(d.q)} count=${d.count}</p>` +
+            (d.items||[]).map(i => `<h3>${esc(i.title||"")}</h3><pre>${hl(i.snippet||"")}</pre>`).join("");
+        } catch (e) { fail(e); }
+      };
+      go.onclick = run; document.getElementById("q").onkeydown = e => { if (e.key === "Enter") run(); };
+    }
+  } catch (e) { fail(e); }
+}
+
+document.getElementById("btnAdd").onclick = async () => {
+  const name = document.getElementById("newName").value.trim(); if (!name) return;
+  try { const p = await j("/persons", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
+    document.getElementById("newName").value = ""; cur = p.id; await loadPersons(); render();
+  } catch (e) { alert("建档失败: " + e.message); }
+};
+
+(async () => {
+  try { const o = await (await fetch("/openapi.json")).json();
+    document.getElementById("ver").textContent = `${o.info.title} v${o.info.version} · paths=${Object.keys(o.paths||{}).length}`;
+  } catch (e) { document.getElementById("ver").textContent = "openapi 不可达"; }
+  try { await loadPersons(); } catch (e) { fail(e); }
+  render();
+})();
+</script>
+</body>
+</html>

@@ -433,6 +433,26 @@ pub fn openapi_json() -> Value {
     doc
 }
 
+// ---------- Web 管理端最小版：单文件静态页，编译期内嵌（D-016） ----------
+// 选型理由（PLAN 阶段3 待决项「Next 服务选型」在此钉死为“不引入 Node 工具链”）：
+// 本机 node/npm 均不存在（实测 command not found），引入 Next/React 会让镜像构建依赖
+// 外网 npm registry + 宿主工具链；最小版的管理需求（建档/选人/时间线/文档上传/指标/检索）
+// 全部已有 JSON API，纯前端零依赖即可覆盖。将来要换正式前端，只需把 web/ 换成真站点，
+// API 契约（/openapi.json, paths=16）不动。
+const WEB_INDEX_HTML: &str = include_str!("../web/index.html");
+
+async fn web_index() -> Response {
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/html; charset=utf-8",
+        )],
+        WEB_INDEX_HTML,
+    )
+        .into_response()
+}
+
 // ---------- router（判据：新增路由必同时进 CONTRACT —— 反向保险见 tests/contract.rs）----------
 async fn openapi_route() -> Json<Value> {
     Json(openapi_json())
@@ -463,6 +483,7 @@ pub fn router(st: Arc<AppState>) -> Router {
     Router::new()
         .nest("/api/v1", api)
         .route("/openapi.json", get(openapi_route)) // 服务端每次现合成，与代码内 CONTRACT 常量必然同步（D1）
+        .route("/", get(web_index)) // Web 管理端最小版：同源零依赖，避免跨域反代；刷新任意路由均回首页(D-016)
 }
 
 /// serve/dry-run 共用的 home 校验：canonicalize、要求已存在、建 vaults/ 派生目录。
