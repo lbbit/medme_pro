@@ -1,0 +1,33 @@
+# medme-ehr · T2 编排 B：**引用 ghcr 镜像**（免构建，一键起）
+# 用法：
+#   cd deploy && cp .env.sample .env && docker compose -f docker-compose.ghcr.yml up -d
+# 前提：ghcr.io/lbbit/medme_pro:<tag> 已存在（T1 CI 打 tag v* 自动发布）。
+#
+# ⚠️ D4：up 之后必看容器 stderr 的 [证据] 行（ADDR/EHR_HOME 与实际 bind 同源,D1）。
+#   dry-run 自检：docker compose -f docker-compose.ghcr.yml run --rm --no-deps ehr-api --print-openapi >/dev/null
+services:
+  # init-container(E6)：与 local 编排同形——named volume 首次挂载属主由本容器预建。
+  boot:
+    image: busybox
+    command: ["sh", "-c", "mkdir -p /home/ehr && chown -R 10001:10001 /home/ehr && ls -ld /home/ehr"]
+    volumes:
+      - ehr-home:/home/ehr
+
+  ehr-api:
+    image: ghcr.io/lbbit/medme_pro:${EHR_IMAGE_TAG:-latest}
+    pull_policy: ${EHR_PULL_POLICY:-missing}       # missing=本地有就用本地(离线可用)；always=强制拉最新
+    init: true
+    restart: unless-stopped
+    depends_on:
+      boot: { condition: service_completed_successfully }
+    ports:
+      - "${EHR_BIND_ADDR:-127.0.0.1}:${EHR_BIND_PORT:-8585}:8443"
+    environment:
+      EHR_HOME: ${EHR_HOME:-/home/ehr}
+      EHR_ADDR: ${EHR_CONTAINER_ADDR:-0.0.0.0:8443}
+      RUST_LOG: info
+    volumes:
+      - ehr-home:/home/ehr
+
+volumes:
+  ehr-home:

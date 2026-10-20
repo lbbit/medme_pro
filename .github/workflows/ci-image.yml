@@ -1,0 +1,96 @@
+# medme-ehr · T1 CI：打 tag(v*) → 构建多阶段镜像 → push ghcr.io/lbbit/medme_pro:<tag>
+#
+# 触发规则：
+#   - push tag:  v*            （唯一发布触发器，例：v0.1.0）
+#   - workflow_dispatch:       （手动重跑；输入 tag 用于覆盖镜像 tag 名）
+# 缓存策略：GitHub Actions 内置 docker/build-push-action GHA cache（按 Dockerfile 分层，
+#   layer key 含 Dockerfile 内容哈希，源码改动只失效 build 层之上）。
+#   同时用 cargo 依赖层缓存（Dockerfile 里 COPY Cargo.toml/lock 先 fetch）。
+# 凭据：GITHUB_TOKEN + packages: write（推 ghcr 同名包），registry 固定 ghcr.io。
+# 通道：本仓库构建期允许联网（见 DECISIONS D-016），不走 vendor 离线路线。
+
+name: build-and-push-image
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '镜像 tag 名（覆盖被推送的 ref 名）'
+        required: true
+        default: 'manual'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 拉取上游 medme 源码（固定 commit，见 upstream.pin）
+        run: |
+          set -euo pipefail
+          . upstream.pin
+          echo "[证据] upstream = $UPSTREAM_REPO@$UPSTREAM_COMMIT"
+          for URL in \
+            "https://codeload.github.com/$UPSTREAM_REPO/tar.gz/$UPSTREAM_COMMIT" \
+            "https://ghfast.top/https://github.com/$UPSTREAM_REPO/archive/$UPSTREAM_COMMIT.tar.gz" ; do
+            echo "try $URL"
+            if curl -sSfL --retry 2 --max-time 600 -o /tmp/upstream.tar.gz "$URL"; then
+              break
+            fi
+          done
+          test -s /tmp/upstream.tar.gz
+          mkdir -p upstream-medme
+          tar xzf /tmp/upstream.tar.gz -C /tmp
+          SRC=$(find /tmp -maxdepth 1 -type d -name "medme-*" | head -1)
+          test -n "$SRC"
+          cp "$SRC/Cargo.toml" "$SRC/Cargo.lock" upstream-medme/
+          cp -r "$SRC/packages" upstream-medme/
+          echo "[证据] upstream packages: $(ls upstream-medme/packages | tr '\n' ' ')"
+
+      - name: 解析镜像 tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "[证据] CI image tag = ghcr.io/${{ github.repository }}:$TAG"
+
+      - name: Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          build-args: |
+            CARGO_SPARSE_URL=https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/
+            CARGO_STATIC_ROOT=https://static.crates.io
+            APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false

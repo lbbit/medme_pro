@@ -1,0 +1,18 @@
+# medme-ehr · 上游 medme 源码锚点（CI 用）
+#
+# 为什么需要：`upstream-medme/` 被 .gitignore 排除（它是只读参考的浅克隆，不进版本库），
+# 而 ehr-api 通过 path 依赖引用 upstream-medme/packages/* ⇒ GitHub runner 上没有这份源码，
+# 直接 build 必然失败（"failed to read .../packages/core-model/Cargo.toml"）。
+#
+# 解决：CI 在 build 之前按下面的 **固定 commit** 拉一份上游 tarball 解到 upstream-medme/。
+# 固定 commit（不是 main 分支）= 构建可复现：上游不变则构建结果不变。
+#
+# 更新锚点步骤（本机）：
+#   git -C upstream-medme fetch --depth 1 origin main && git -C upstream-medme reset --hard FETCH_HEAD
+#   git -C upstream-medme rev-parse HEAD   # 把输出写回本文件的 UPSTREAM_COMMIT
+#
+# 通道：本机 GitHub 大文件被限速（D-006），故优先走 ghfast.top 镜像前缀；
+#       GitHub Actions runner 在境外，直连 codeload 更快 —— CI 里直连，失败再退镜像。
+
+UPSTREAM_REPO=Chesterguan/medme
+UPSTREAM_COMMIT=9c9251d7abb80472b2bfcef51ea8552ae1628e90
