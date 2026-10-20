@@ -14,6 +14,9 @@
 | `get_timeline` | `person_id` | `person_id`, `count`, `items[]`：`doc_date`/`doc_type`/`title`（`doc_date` 倒序，文档级） |
 | `search_records` | `person_id`, `q`；可选 `limit`(1–100, 默认 20) | `person_id`, `q`, `count`, `items[]`：`title`/`snippet`（命中片段 `[词]` 高亮） |
 | `get_labs` | `person_id` | `person_id`, `count`, `series[]`：`group_name`/`unit_canonical`/`any_abnormal`，`points[]`：`date`/`value`/`flag`(H/L)/`docref` |
+| `get_medications` | `person_id` | `person_id`, `documents_scanned`, `med_count`, `mention_count`, `medications[]`：`name`/`raw_names`/`status`(恒 `active`，上游不推断停药)/`docrefs[]`/`mentions[]`：`date`/`dose`/`raw_name`/`docref`/`origin` |
+| `get_conditions` | `person_id` | `person_id`, `documents_scanned`, `condition_count`, `conditions[]`：`raw_text`(原文写法，不做术语归一)/`onset`(**缺省即无该键**：来源文档无日期时无)/`icd_code`(**仅当原件印了**才有)/`docrefs[]` |
+| `get_measurements` | `person_id`；可选 `kind`(`self_measurement`/`note`/`profile_event`)、`from`/`to`(`YYYY-MM-DD`，含端点) | `person_id`, `count`, `measurements[]`：`document_id`/`kind`/`taken_at`/`docref`/`payload_readable`/`values[]`(`analyte_key`/`value`/`unit`/`ref_low`/`ref_high`/`ref_source`/`flag`)/`text`/`event_kind`/`event_at`；**无参考区间时 `flag` 缺省**（不猜「正常」）；`payload_readable=false` 表示结构化载荷读不出来（原文仍在 `text` 里） |
 | `list_documents` | `person_id` | `person_id`, `count`, `items[]`：`content_hash`(=docref sha256)/`original_name`/`doc_type`/`doc_date`/`byte_size` |
 | `get_document_detail` | `person_id`, `sha256`(64 位小写 hex) | 恒在：`content_hash`/`original_name`/`mime_type`/`byte_size`/`imported_at`/`document_id`/`doc_type`/`doc_date`/`doc_date_end`/`title`/`language`/`page_count`/`encounter_id`/`text_indexed`/`text_truncated_bytes`；**可选(缺省即无该键)**：`text`(无文本层时无)、`ocr_meta`、`extraction`(`{parseable, json?, raw?}`)；解析降级时 `parseable=false` 且内容留在 raw |
 

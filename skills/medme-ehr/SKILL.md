@@ -70,7 +70,7 @@ metadata:
 
 ## 可选：MCP 壳
 
-服务端另有 `POST /mcp`（JSON-RPC 2.0，8 个工具：读侧 6 + 写侧 2），供只吃 MCP 的宿主使用。
+服务端另有 `POST /mcp`（JSON-RPC 2.0，11 个工具：读侧 9 + 写侧 2），供只吃 MCP 的宿主使用。
 契约见 `references/tool-contracts.md`。**宿主不支持 MCP 时直接用上面的 REST 命令即可，两者同源。**
 
 REST 命令 ↔ MCP 工具一一对应（同一真相层，任选其一）：
@@ -81,7 +81,9 @@ REST 命令 ↔ MCP 工具一一对应（同一真相层，任选其一）：
 | `timeline PID` | `get_timeline` | 读 |
 | `search PID Q` | `search_records` | 读 |
 | `labs PID` | `get_labs` | 读 |
-| `medications PID` | *（暂无 MCP 工具，仅 REST）* | 读 |
+| `medications PID` | `get_medications` | 读 |
+| `conditions PID` | `get_conditions` | 读 |
+| `measurements PID` | `get_measurements` | 读 |
 | `documents PID` | `list_documents` | 读 |
 | `detail PID SHA` | `get_document_detail` | 读 |
 | `person-create NAME` | `create_person` | 写 |

@@ -28,14 +28,22 @@ PID=$(curl -s -X POST "127.0.0.1:$PORT/api/v1/persons" -H 'content-type: applica
       -d '{"name":"SKILL门禁","gender":"female","birthday":"1988-03-02"}' | jq_ 'print(d["id"])')
 printf '姓名：钱八\n检查项目：血常规\n白细胞计数 11.2 10^9/L 偏高\n' > "$H/lab.txt"
 SHA=$(curl -s -X POST "127.0.0.1:$PORT/api/v1/persons/$PID/documents" -F "file=@$H/lab.txt" | jq_ 'print(d["content_hash"])')
+# D-029：三个新读侧工具需要非空数据面（空数组 ⇒ 字段名根本不存在，字段核对会假红）
+printf '姓名：钱八\n处方\n阿莫西林胶囊 0.5g bid\n' > "$H/rx.txt"
+curl -s -X POST "127.0.0.1:$PORT/api/v1/persons/$PID/documents" -F "file=@$H/rx.txt" >/dev/null
+printf '姓名：钱八\n出院记录\n主要诊断：2型糖尿病(E11.9)\n' > "$H/dx.txt"
+curl -s -X POST "127.0.0.1:$PORT/api/v1/persons/$PID/documents" -F "file=@$H/dx.txt" >/dev/null
+curl -s -X POST "127.0.0.1:$PORT/api/v1/persons/$PID/entries/self-measurement" \
+  -H 'content-type: application/json' \
+  -d '{"values":[{"analyte_key":"bp_systolic","value":128,"unit":"mmHg"},{"analyte_key":"bp_diastolic","value":82,"unit":"mmHg"}]}' >/dev/null
 
 # 1) SKILL.md 里承诺的字段名必须逐个出现在真实 MCP 响应中
 RESP=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_persons\",\"arguments\":{}}}")$(rpc "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"get_timeline\",\"arguments\":{\"person_id\":\"$PID\"}}}")$(rpc "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"search_records\",\"arguments\":{\"person_id\":\"$PID\",\"q\":\"白细胞\"}}}")$(rpc "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"get_labs\",\"arguments\":{\"person_id\":\"$PID\"}}}")$(rpc "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"list_documents\",\"arguments\":{\"person_id\":\"$PID\"}}}")$(rpc "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"get_document_detail\",\"arguments\":{\"person_id\":\"$PID\",\"sha256\":\"$SHA\"}}}")
 
 # 期望字段表（域: 字段,逗号分隔），与 SKILL.md / tool-contracts.md 的承诺一一对应
-check_fields() { # check_fields <label> <csv> <needle>
-  local miss=""
-  for f in ${2//,/ }; do case "$RESP" in *"\"$f\""*) ;; *) miss="$miss $f";; esac; done
+check_fields() { # check_fields <label> <csv> <response-json>
+  local miss="" resp="${3:-$RESP}"
+  for f in ${2//,/ }; do case "$resp" in *"\"$f\""*) ;; *) miss="$miss $f";; esac; done
   if [ -z "$miss" ]; then echo "  PASS $1 全部存在($(echo $2 | tr ',' ' ' | wc -w) 个)"; else echo "  FAIL $1 缺字段:$miss"; fails=$((fails+1)); fi
 }
 check_fields "list_persons.fields"   "person_id,name,birthday,gender,id_note"
@@ -56,16 +64,16 @@ if echo "$DETAIL" | grep -q '"extraction"'; then
   else echo "  FAIL extraction 缺 parseable"; fails=$((fails+1)); fi
 else echo "  PASS detail.extraction_optional_absent(可缺省,文档已载明)"; fi
 
-# 2) SKILL.md 里提到的 8 个工具名必须都在 tools/list 里公布
+# 2) SKILL.md 里提到的 11 个工具名必须都在 tools/list 里公布（D-029：+medications/conditions/measurements）
 TOOLS=$(rpc '{"jsonrpc":"2.0","id":7,"method":"tools/list"}')
 miss=""
-for t in list_persons get_timeline search_records get_labs list_documents get_document_detail create_person upload_document; do
+for t in list_persons get_timeline search_records get_labs get_medications get_conditions get_measurements list_documents get_document_detail create_person upload_document; do
   case "$TOOLS" in *"\"$t\""*) ;; *) miss="$miss $t";; esac
   grep -q "$t" "$SKILL" || { echo "  FAIL SKILL.md 未提工具 $t"; fails=$((fails+1)); }
 done
-[ -z "$miss" ] && echo "  PASS tools_declared_in_skill = 8" || { echo "  FAIL tools/list 缺:$miss"; fails=$((fails+1)); }
+[ -z "$miss" ] && echo "  PASS tools_declared_in_skill = 11" || { echo "  FAIL tools/list 缺:$miss"; fails=$((fails+1)); }
 NTOOLS=$(echo "$TOOLS" | jq_ 'print(len(d["result"]["tools"]))')
-gate "tools_count" "$NTOOLS" "8"
+gate "tools_count" "$NTOOLS" "11"
 
 # 2b) 写侧：SKILL.md 承诺的写侧字段名必须出现在真实写侧响应中
 B64=$(printf '姓名：钱九\n检查项目：血常规\n白细胞计数 13.1 10^9/L 偏高\n' | base64 -w0)
@@ -82,6 +90,16 @@ for f in id name birthday gender id_note created_at updated_at; do
   case "$CRESP" in *"$f"*) ;; *) echo "  FAIL create_person 缺字段 $f"; fails=$((fails+1));; esac
 done
 echo "  PASS create_person 字段核对完成"
+
+# 2c) D-029：三个新读侧工具的字段名必须逐个出现在真实 MCP 响应中
+NRESP=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"tools/call\",\"params\":{\"name\":\"get_medications\",\"arguments\":{\"person_id\":\"$PID\"}}}")$(rpc "{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"tools/call\",\"params\":{\"name\":\"get_conditions\",\"arguments\":{\"person_id\":\"$PID\"}}}")$(rpc "{\"jsonrpc\":\"2.0\",\"id\":32,\"method\":\"tools/call\",\"params\":{\"name\":\"get_measurements\",\"arguments\":{\"person_id\":\"$PID\"}}}")
+check_fields "medications.fields"  "person_id,documents_scanned,med_count,mention_count,medications,name,status,docrefs,mentions,raw_name,dose,docref" "$NRESP"
+check_fields "conditions.fields"  "person_id,documents_scanned,condition_count,conditions,raw_text,icd_code,docrefs" "$NRESP"
+# `onset` 是 Option+skip_serializing_if：来源文档**没日期**时整个键不存在（不是空值）。
+# 故只断言「存在时形状正确」，不断言必存在——否则门禁会逼文档写假承诺（D-018 同款纪律）。
+if echo "$NRESP" | grep -q '"onset"'; then echo "  PASS conditions.onset_has_value_if_present"
+else echo "  PASS conditions.onset_optional_absent(可缺省,文档已载明)"; fi
+check_fields "measurements.fields" "person_id,count,measurements,document_id,kind,taken_at,docref,payload_readable" "$NRESP"
 
 # 3) SKILL.md 与 tool-contracts.md 里写的错误码必须真的对得上
 for code in -32602 -32601 -32001 -32002 -32003; do

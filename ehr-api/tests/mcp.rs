@@ -92,7 +92,10 @@ async fn mcp_argument_validation_rejects_before_io() {
     let app = fixture("argval");
 
     // 未公布的名字 ⇒ -32601
-    let unknown = call_tool(&app, "get_medications", json!({"person_id":"x"})).await;
+    // ⚠️ D-029：此前的探针用的是 `get_medications`（当时它「恰好」是未公布的名字 ⇒ 断言 -32601）。
+    //    D-029 把它实装成真工具后，同一探针会返回 -32001 ⇒ **断言探针本身过期**。
+    //    教训（D-011 同族）：门禁探针依赖「某名字不存在」这一事实时，加功能要连带改探针。
+    let unknown = call_tool(&app, "get_no_such_tool", json!({"person_id":"x"})).await;
     assert_eq!(unknown["isError"], true);
     assert_eq!(unknown["_code"], -32601);
 
@@ -178,6 +181,146 @@ async fn mcp_reads_same_truth_layer_as_rest() {
     // 7) 坏 sha ⇒ 领域错误透出（不是空结果）
     let bad = call_tool(&app, "get_document_detail", json!({"person_id":pid,"sha256":"zz"})).await;
     assert_eq!(bad["isError"], true);
+}
+
+
+// ============ D-029：medications / conditions / measurements 三个读侧工具 ============
+
+/// D-029：MCP 侧补齐 meds/conditions/measurements 三个读侧工具。
+///
+/// 判据（与 D-028 未销账②一致）：**必须复用同一 `meds_aggregate`/`conditions_aggregate`/
+/// `measurements_projection`**，不得另写一份判据；因此本门不只断言「有数据」，
+/// 而是断言 **MCP 返回的 docref 与 REST 返回的 docref 逐字相等**（同源的唯一硬证据）。
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_new_read_tools_match_rest_facets() {
+    let app = fixture("d029");
+
+    // 建档
+    let created = app.clone().oneshot(
+        Request::builder().method("POST").uri("/api/v1/persons")
+            .header("content-type","application/json")
+            .body(Body::from(json!({"name":"D029测试"}).to_string())).unwrap()
+    ).await.unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let person: Value = serde_json::from_slice(&axum::body::to_bytes(created.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let pid = person["id"].as_str().unwrap().to_string();
+
+    // 上传三件：化验单 / 处方 / 出院记录（覆盖 labs / meds / conditions 三个面）
+    for (fname, body_txt) in [
+        ("血常规.txt", "姓名：张三\n检查项目：血常规\n白细胞计数 11.2 10^9/L 偏高\n"),
+        ("处方.txt", "姓名：张三\n处方\n阿莫西林胶囊 0.5g bid\n"),
+        ("出院记录.txt", "姓名：张三\n出院记录\n主要诊断：2型糖尿病(E11.9)\n"),
+    ] {
+        let boundary = "X-BOUND";
+        let body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{fname}\"\r\nContent-Type: text/plain\r\n\r\n{body_txt}\r\n--{boundary}--\r\n");
+        let up = app.clone().oneshot(
+            Request::builder().method("POST").uri(format!("/api/v1/persons/{pid}/documents"))
+                .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        assert_eq!(up.status(), StatusCode::OK);
+    }
+
+    // 写一条自测值（measurements 面的数据源）
+    let sm = app.clone().oneshot(
+        Request::builder().method("POST").uri(format!("/api/v1/persons/{pid}/entries/self-measurement"))
+            .header("content-type","application/json")
+            .body(Body::from(json!({"values":[
+                {"analyte_key":"bp_systolic","value":128,"unit":"mmHg"},
+                {"analyte_key":"bp_diastolic","value":82,"unit":"mmHg"}
+            ]}).to_string())).unwrap()
+    ).await.unwrap();
+    assert_eq!(sm.status(), StatusCode::CREATED);
+
+    // REST 侧取基准（真相层同一份）
+    let rest_meds: Value = serde_json::from_slice(&axum::body::to_bytes(
+        app.clone().oneshot(Request::builder().uri(format!("/api/v1/persons/{pid}/medications")).body(Body::empty()).unwrap())
+            .await.unwrap().into_body(), usize::MAX).await.unwrap()).unwrap();
+    let rest_conds: Value = serde_json::from_slice(&axum::body::to_bytes(
+        app.clone().oneshot(Request::builder().uri(format!("/api/v1/persons/{pid}/conditions")).body(Body::empty()).unwrap())
+            .await.unwrap().into_body(), usize::MAX).await.unwrap()).unwrap();
+    let rest_meas: Value = serde_json::from_slice(&axum::body::to_bytes(
+        app.clone().oneshot(Request::builder().uri(format!("/api/v1/persons/{pid}/measurements")).body(Body::empty()).unwrap())
+            .await.unwrap().into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    // MCP 侧三个新工具
+    let m_meds = tool_data(&call_tool(&app, "get_medications", json!({"person_id":pid})).await);
+    let m_conds = tool_data(&call_tool(&app, "get_conditions", json!({"person_id":pid})).await);
+    let m_meas = tool_data(&call_tool(&app, "get_measurements", json!({"person_id":pid})).await);
+
+    // 同源硬证据：MCP 与 REST 的 docref / 计数逐字相等（不是「看起来有数据」）
+    assert_eq!(m_meds["med_count"], rest_meds["med_count"], "med_count must equal REST: {m_meds}");
+    assert!(m_meds["med_count"].as_u64().unwrap_or(0) > 0, "no meds: {m_meds}");
+    assert_eq!(m_meds["medications"][0]["docrefs"], rest_meds["medications"][0]["docrefs"],
+               "MCP meds docrefs must equal REST (same aggregate, no second judgement)");
+    assert_eq!(m_meds["medications"][0]["status"], "active", "status must be passed through verbatim");
+
+    assert_eq!(m_conds["condition_count"], rest_conds["condition_count"], "condition_count must equal REST");
+    assert!(m_conds["condition_count"].as_u64().unwrap_or(0) > 0, "no conditions: {m_conds}");
+    assert_eq!(m_conds["conditions"][0]["docrefs"], rest_conds["conditions"][0]["docrefs"],
+               "MCP conditions docrefs must equal REST");
+
+    assert_eq!(m_meas["count"], rest_meas["count"], "measurements count must equal REST");
+    assert_eq!(m_meas["count"], 1, "one self-measurement written: {m_meas}");
+    assert_eq!(m_meas["measurements"][0]["kind"], "self_measurement");
+    assert!(m_meas["measurements"][0]["docref"].as_str().unwrap_or("").len() == 64, "docref must be a sha256");
+    // 家庭自测值与医院指标**结构上分开**（上游 GroupKey::SelfMeasured）：
+    // 自测值只出现在 `self_measured=true` 的独立序列里，**绝不与医院指标同序列**。
+    // ⚠️ 判据形状：不是「labs 里不该有自测值」（上游就是在 labs 里给的，只是分组不同），
+    //    而是「医院序列（self_measured=false）里不得出现自测值的 analyte_key」——D-028 同款判据。
+    let labs = tool_data(&call_tool(&app, "get_labs", json!({"person_id":pid})).await);
+    let series = labs["series"].as_array().expect("series array");
+    let self_series = series.iter().filter(|s| s["self_measured"] == true).collect::<Vec<_>>();
+    assert!(!self_series.is_empty(), "self-measured series must exist and be marked: {labs}");
+    let hospital_series = series.iter().filter(|s| s["self_measured"] == false).collect::<Vec<_>>();
+    for h in &hospital_series {
+        let key = h["analyte_key"].as_str().unwrap_or("");
+        assert!(key != "bp_systolic" && key != "bp_diastolic",
+                "home self-measured analyte must not appear in a hospital series: {labs}");
+    }
+    // 反向：自测序列必须真的带着 self_measured=true 这个标志（消费方才知道它是家庭值）
+    assert!(self_series.iter().all(|s| s["self_measured"] == true));
+}
+
+/// D-029：三个新工具的过滤器与错误码语义（参数真进判据，不是摆设）。
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_new_read_tools_validate_filters_and_errors() {
+    let app = fixture("d029err");
+    let created = app.clone().oneshot(
+        Request::builder().method("POST").uri("/api/v1/persons")
+            .header("content-type","application/json")
+            .body(Body::from(json!({"name":"D029错误"}).to_string())).unwrap()
+    ).await.unwrap();
+    let person: Value = serde_json::from_slice(&axum::body::to_bytes(created.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let pid = person["id"].as_str().unwrap().to_string();
+
+    // 缺 person_id ⇒ -32602（参数问题，不是重试）
+    let r = call_tool(&app, "get_conditions", json!({})).await;
+    assert_eq!(r["_code"], -32602, "missing person_id must be INVALID_PARAMS: {r}");
+
+    // 未知人 ⇒ -32001（换人，不是重试）
+    let r = call_tool(&app, "get_medications", json!({"person_id":"nope"})).await;
+    assert_eq!(r["_code"], -32001, "unknown person must be its own code: {r}");
+
+    // 非法 kind ⇒ -32602（参数非法 ⇒ agent 改参数）
+    let r = call_tool(&app, "get_measurements", json!({"person_id":pid,"kind":"nonsense"})).await;
+    assert_eq!(r["_code"], -32602, "bad kind must be INVALID_PARAMS: {r}");
+
+    // 非法日期 ⇒ -32602
+    let r = call_tool(&app, "get_measurements", json!({"person_id":pid,"from":"not-a-date"})).await;
+    assert_eq!(r["_code"], -32602, "bad date must be INVALID_PARAMS: {r}");
+
+    // kind 过滤器真过滤（本例只有自测值 ⇒ kind=note 必为 0 条）
+    let sm = app.clone().oneshot(
+        Request::builder().method("POST").uri(format!("/api/v1/persons/{pid}/entries/self-measurement"))
+            .header("content-type","application/json")
+            .body(Body::from(json!({"values":[{"analyte_key":"heart_rate","value":72,"unit":"bpm"}]}).to_string())).unwrap()
+    ).await.unwrap();
+    assert_eq!(sm.status(), StatusCode::CREATED);
+    let all = tool_data(&call_tool(&app, "get_measurements", json!({"person_id":pid})).await);
+    assert_eq!(all["count"], 1);
+    let notes = tool_data(&call_tool(&app, "get_measurements", json!({"person_id":pid,"kind":"note"})).await);
+    assert_eq!(notes["count"], 0, "kind filter must really filter: {notes}");
 }
 
 /// MCP 面不污染 REST 契约：paths 数不变（≥16），且未把 /mcp 塞进 OpenAPI。
@@ -299,7 +442,7 @@ async fn mcp_write_tools_are_advertised() {
     for want in ["create_person", "upload_document"] {
         assert!(names.contains(&want), "{want} must be advertised, got {names:?}");
     }
-    assert_eq!(tools.len(), 8, "6 read + 2 write tools: {names:?}");
+    assert_eq!(tools.len(), 11, "9 read + 2 write tools (D-029): {names:?}");
 }
 
 /// 测试侧 base64 编码器（生产侧只需解码；这里独立实现一遍，避免「用被测代码造输入」）。

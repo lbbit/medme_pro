@@ -31,9 +31,9 @@ jq_() { python3 -c "import json,sys;d=json.load(sys.stdin);$1"; }
 V=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | jq_ 'print(d["result"]["protocolVersion"])')
 gate "protocolVersion" "$V" "2025-06-18"
 
-# 2) tools/list = 8（6 读 + 2 写）
+# 2) tools/list = 11（9 读 + 2 写；D-029 补齐 meds/conditions/measurements 三个读侧工具）
 N=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | jq_ 'print(len(d["result"]["tools"]))')
-gate "tools_count" "$N" "8"
+gate "tools_count" "$N" "11"
 
 # 3) 建档 + 上传（REST 侧写入 ⇒ MCP 侧必须读到同一真相层）
 PID=$(curl -s -X POST "127.0.0.1:$PORT/api/v1/persons" -H 'content-type: application/json' \
@@ -58,12 +58,39 @@ gate "documents.sha_matches_rest" "$V" "$SHA"
 V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"get_document_detail\",\"arguments\":{\"person_id\":\"$PID\",\"sha256\":\"$SHA\"}}}" | jq_ 'print("白细胞计数" in (d["result"]["structuredContent"].get("text") or ""))')
 gate "detail.text_has_content" "$V" "True"
 
+# 4b) D-029：三个新读侧工具（与 REST 同源：同一 meds_aggregate/conditions_aggregate/measurements_projection）
+#     造一份处方（用药面）+ 一条出院记录（诊断面）+ 一条自测值（measurements 面）
+printf '姓名：钱七\n处方\n阿莫西林胶囊 0.5g bid\n' > "$H/rx.txt"
+curl -s -X POST "127.0.0.1:$PORT/api/v1/persons/$PID/documents" -F "file=@$H/rx.txt" >/dev/null
+printf '姓名：钱七\n出院记录\n主要诊断：2型糖尿病(E11.9)\n' > "$H/dx.txt"
+curl -s -X POST "127.0.0.1:$PORT/api/v1/persons/$PID/documents" -F "file=@$H/dx.txt" >/dev/null
+curl -s -X POST "127.0.0.1:$PORT/api/v1/persons/$PID/entries/self-measurement" \
+  -H 'content-type: application/json' \
+  -d '{"values":[{"analyte_key":"bp_systolic","value":128,"unit":"mmHg"},{"analyte_key":"bp_diastolic","value":82,"unit":"mmHg"}]}' >/dev/null
+V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\",\"params\":{\"name\":\"get_medications\",\"arguments\":{\"person_id\":\"$PID\"}}}" | jq_ 'd=d["result"]["structuredContent"];print(d["med_count"]>0, d["medications"][0]["docrefs"][0]!="")')
+gate "medications.nonempty+docref" "$(echo "$V" | tr ' ' '/')" "True/True"
+V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"tools/call\",\"params\":{\"name\":\"get_conditions\",\"arguments\":{\"person_id\":\"$PID\"}}}" | jq_ 'd=d["result"]["structuredContent"];print(d["condition_count"]>0, d["conditions"][0]["docrefs"][0]!="")')
+gate "conditions.nonempty+docref" "$(echo "$V" | tr ' ' '/')" "True/True"
+V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"tools/call\",\"params\":{\"name\":\"get_measurements\",\"arguments\":{\"person_id\":\"$PID\"}}}" | jq_ 'd=d["result"]["structuredContent"];print(d["count"], d["measurements"][0]["kind"], d["measurements"][0]["docref"]!="")')
+gate "measurements.count+kind+docref" "$(echo "$V" | tr ' ' '/')" "1/self_measurement/True"
+# 过滤器真过滤（不是摆设）
+V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"tools/call\",\"params\":{\"name\":\"get_measurements\",\"arguments\":{\"person_id\":\"$PID\",\"kind\":\"note\"}}}" | jq_ 'print(d["result"]["structuredContent"]["count"])')
+gate "measurements.kind_filter" "$V" "0"
+# 非法 kind ⇒ -32602（参数非法，agent 该改参数）
+V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":25,\"method\":\"tools/call\",\"params\":{\"name\":\"get_measurements\",\"arguments\":{\"person_id\":\"$PID\",\"kind\":\"nonsense\"}}}" | jq_ 'print(d["result"]["_code"])')
+gate "measurements.bad_kind=-32602" "$V" "-32602"
+# 未知人 ⇒ -32001
+V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":\"tools/call\",\"params\":{\"name\":\"get_conditions\",\"arguments\":{\"person_id\":\"nope\"}}}" | jq_ 'print(d["result"]["_code"])')
+gate "conditions.unknown_person=-32001" "$V" "-32001"
+
 # 5) 错误语义（agent 要能据此换人/改参，而不是重试）
 V=$(rpc '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"get_timeline","arguments":{"person_id":"nope"}}}' | jq_ 'd=d["result"];print(d["isError"],d["_code"])' | tr ' ' '/')
 gate "unknown_person=err/-32001" "$V" "True/-32001"
 V=$(rpc '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"get_timeline","arguments":{}}}' | jq_ 'print(d["result"]["_code"])')
 gate "missing_arg=-32602" "$V" "-32602"
-V=$(rpc '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"get_medications","arguments":{}}}' | jq_ 'print(d["result"]["_code"])')
+# ⚠️ D-029：此前的探针用 `get_medications`（当时它「恰好」不在 tools/list ⇒ 断言 -32601）；
+#    D-029 把它实装成真工具后，同一探针会返回 -32602（缺 person_id）⇒ **探针过期**，不是代码坏了。
+V=$(rpc '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"get_no_such_tool","arguments":{}}}' | jq_ 'print(d["result"]["_code"])')
 gate "unknown_tool=-32601" "$V" "-32601"
 V=$(rpc '{"jsonrpc":"2.0","id":13,"method":"no/such"}' | jq_ 'print(d["error"]["code"])')
 gate "unknown_method=-32601" "$V" "-32601"

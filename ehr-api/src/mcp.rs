@@ -14,7 +14,7 @@
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::{auth::Scope, b64, vaults, ApiError, AppState, PersonNew, StatusCode};
+use crate::{auth::Scope, b64, entries, vaults, ApiError, AppState, PersonNew, StatusCode};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -84,7 +84,7 @@ pub fn handle_message_with_scope(
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "medme-ehr", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "多人电子健康档案工具集。读侧：person_id 为 UUID；先用 list_persons 拿人，再用 search_records / get_labs / get_timeline 查档。写侧：create_person 建档、upload_document 传原件（二进制用 base64）。所有内容来自原件 CAS+事件日志，text/extraction 透传不猜。",
+            "instructions": "多人电子健康档案工具集。读侧：person_id 为 UUID；先用 list_persons 拿人，再用 search_records / get_labs / get_medications / get_conditions / get_measurements / get_timeline 查档。写侧：create_person 建档、upload_document 传原件（二进制用 base64）。所有内容来自原件 CAS+事件日志，text/extraction 透传不猜。",
         })),
         "ping" => ok_obj(id.clone(), json!({})),
         "notifications/initialized" | "initialized" => ok_obj(id.clone(), json!({})),
@@ -160,6 +160,8 @@ fn u64_arg(args: &Value, k: &str, default: u64) -> Result<u64, ArgErr> {
 fn domain_code(e: &ApiError) -> i64 {
     match e.0 {
         StatusCode::NOT_FOUND => ERR_NO_SUCH_PERSON,
+        // 400 = 参数不合法（agent 该改参数，不是重试）——与 REST 面的 400 同义。
+        StatusCode::BAD_REQUEST => INVALID_PARAMS,
         StatusCode::NOT_IMPLEMENTED => ERR_UNSUPPORTED_TYPE,
         _ => ERR_INTERNAL,
     }
@@ -202,6 +204,27 @@ fn call_tool(st: &Arc<AppState>, id: Value, name: &str, args: &Value) -> Value {
             let vault = vaults::open_person_vault(&st.home, pid)?;
             let reply = vaults::labs_aggregate(&vault, pid)
                 .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
+        Prepared::Medications { ref pid } => {
+            require_person(st, pid)?;
+            let vault = vaults::open_person_vault(&st.home, pid)?;
+            let reply = vaults::meds_aggregate(&vault, pid)
+                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
+        Prepared::Conditions { ref pid } => {
+            require_person(st, pid)?;
+            let vault = vaults::open_person_vault(&st.home, pid)?;
+            let reply = vaults::conditions_aggregate(&vault, pid)
+                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
+        Prepared::Measurements { ref pid, ref q } => {
+            require_person(st, pid)?;
+            let vault = vaults::open_person_vault(&st.home, pid)?;
+            let reply = entries::measurements_projection(&vault, pid, q)
+                .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
             serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
         }
         Prepared::Documents { ref pid } => {
@@ -272,6 +295,12 @@ enum Prepared {
     Timeline { pid: String },
     Search { pid: String, q: String, limit: usize },
     Labs { pid: String },
+    /// D-029：用药跨度（与 REST 同源：同一 `meds_aggregate`）
+    Medications { pid: String },
+    /// D-029：病程泳道（与 REST 同源：同一 `conditions_aggregate`）
+    Conditions { pid: String },
+    /// D-029：手动条目回放投影（与 REST 同源：同一 `measurements_projection`）
+    Measurements { pid: String, q: entries::MeasurementsQuery },
     Documents { pid: String },
     DocumentDetail { pid: String, sha: String },
     /// 写侧：建档（person registry append-only 真相层）
@@ -308,6 +337,17 @@ fn prepare(name: &str, args: &Value) -> Result<Prepared, ArgErr> {
             limit: u64_arg(args, "limit", 20)?.clamp(1, 100) as usize,
         },
         "get_labs" => Prepared::Labs { pid: str_arg(args, "person_id")?.to_string() },
+        // D-029：与 REST 同名的读侧工具（同一真相层、同一判据，不另写一份）
+        "get_medications" => Prepared::Medications { pid: str_arg(args, "person_id")?.to_string() },
+        "get_conditions" => Prepared::Conditions { pid: str_arg(args, "person_id")?.to_string() },
+        "get_measurements" => Prepared::Measurements {
+            pid: str_arg(args, "person_id")?.to_string(),
+            q: entries::MeasurementsQuery {
+                kind: opt_str_arg(args, "kind")?,
+                from: opt_str_arg(args, "from")?,
+                to: opt_str_arg(args, "to")?,
+            },
+        },
         "list_documents" => Prepared::Documents { pid: str_arg(args, "person_id")?.to_string() },
         "get_document_detail" => Prepared::DocumentDetail {
             pid: str_arg(args, "person_id")?.to_string(),
@@ -373,6 +413,26 @@ fn tool_schemas() -> Vec<Value> {
             "name": "get_labs",
             "description": "某人的检验指标跨文档趋势（series/points，日精度 + H/L 异常标记 + 证据 docref 可溯原件）。",
             "inputSchema": { "type": "object", "properties": { "person_id": pid }, "required": ["person_id"] }
+        }),
+        json!({
+            "name": "get_medications",
+            "description": "某人的用药跨度（药品/剂量/起止日 + 证据 docref 可溯原件）。status 原样透传上游（恒 active，不推断停药）。",
+            "inputSchema": { "type": "object", "properties": { "person_id": pid }, "required": ["person_id"] }
+        }),
+        json!({
+            "name": "get_conditions",
+            "description": "某人的病程泳道（诊断原文写法 + onset + 原件印了的 ICD 码 + 证据 docref）。原文原样透传，不做术语归一。",
+            "inputSchema": { "type": "object", "properties": { "person_id": pid }, "required": ["person_id"] }
+        }),
+        json!({
+            "name": "get_measurements",
+            "description": "某人的手动条目回放投影（自测值/笔记/动作日志）。家庭自测值与医院指标结构上分开；读不出结构化载荷时 payload_readable=false（原文仍在 text 里）。可选 kind/from/to 真过滤。",
+            "inputSchema": { "type": "object", "properties": {
+                "person_id": pid,
+                "kind": { "type": "string", "description": "只看某一类：self_measurement|note|profile_event" },
+                "from": { "type": "string", "description": "起始日期(含) YYYY-MM-DD" },
+                "to": { "type": "string", "description": "结束日期(含) YYYY-MM-DD" }
+            }, "required": ["person_id"] }
         }),
         json!({
             "name": "list_documents",
