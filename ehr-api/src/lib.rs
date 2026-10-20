@@ -18,6 +18,7 @@ mod persons;
 pub use persons::{Person, PersonNew, PersonStore};
 pub mod vaults;
 pub mod rebuild; // 目标验收④：派生索引全量重建（删 medme.db → 从事件日志回放），显式命令 + 逐人计数证据
+pub mod rebuildlock; // D-024：重建期互斥（锁文件+陈旧锁回收）——把「建议停服重建」从口头约定变成机制
 mod b64; // base64 解码（写侧工具传二进制原件用；零新依赖，模块内自带单测）
 pub mod mcp; // 阶段4：MCP server（零新依赖 JSON-RPC over POST /mcp，薄适配层复用 vaults）
 pub use vaults::UploadReply; // 供 utoipa path!宏体解析(同 PersonNew 惯例)
@@ -544,6 +545,30 @@ fn is_public_path(path: &str) -> bool {
     matches!(path, "/api/v1/healthz" | "/openapi.json" | "/")
 }
 
+/// 重建守卫中间件（D-024）：派生索引正在被重建时，**拒绝一切业务读写**（503 + Retry-After）。
+///
+/// 为什么连读也拒：重建会**删掉** medme.db 再回放重建，期间的读可能命中半写状态或
+/// 瞬时"表还在但内容是旧的"。让客户端收到明确 503 并重试，比让它读到不一致的派生态更诚实（D5：不假装）。
+/// 公开路径（healthz/openapi.json/首页）放行——它们不碰派生层。
+async fn rebuild_guard(
+    State(st): State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path().to_string();
+    if !is_public_path(&path) {
+        if let Some(reason) = rebuildlock::block_reason(&st.home) {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::RETRY_AFTER, "5")],
+                Json(json!({ "error": reason })),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
 /// 鉴权中间件：open 模式直接放行；否则必须带合法 Bearer。
 /// 写操作（POST/PUT/PATCH/DELETE）额外要求 rw scope（ro token ⇒ 403）。
 /// /mcp 例外：HTTP 方法是 POST，但权限按 **工具** 判定（读侧工具 ro 即可）⇒ 交由 mcp.rs 内二次判定。
@@ -640,6 +665,9 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/mcp", post(mcp_endpoint))
         // 顶层 Router 无 state 参数 ⇒ 挂 /mcp 时须显式 with_state（内层 api 已消费 st，这里 clone 一个 Arc）
         .with_state(st.clone())
+        // D-024：重建守卫层（重建进行中 ⇒ 业务路径 503）。放在鉴权层**内侧**：
+        // 无 token 的请求仍先得 401（凭证问题优先），有 token 但正在重建才得 503。
+        .layer(axum::middleware::from_fn_with_state(st.clone(), rebuild_guard))
         // T4：统一鉴权拦截层（open 模式下自动放行）。挂在最外层 ⇒ /mcp、/api/v1、/openapi.json 一次覆盖。
         .layer(axum::middleware::from_fn_with_state(st.clone(), auth_layer))
     }

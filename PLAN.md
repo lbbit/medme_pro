@@ -54,7 +54,22 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
-## 当前状态（2026-10-22 · **T6 派生索引全量重建已交付（D-023）**）
+## 当前状态（2026-10-22 · **T7 重建期写互斥已交付（D-024）· T6 全量重建已交付（D-023）**）
+
+- ✅ **T7 交付（销账 D-023 未销账项①「重建期间禁写」互斥）**：①新增 `ehr-api/src/rebuildlock.rs`——**跨进程锁文件** `{EHR_HOME}/.rebuild.lock`（`O_CREAT|O_EXCL` 原子创建，锁内写 `pid/ts/mode`），`RebuildLock` 为 RAII 守卫（drop 即释放文件）；②`--rebuild-index`（真重建）**持锁执行** ⇒ 重建期间运行中的服务对**业务路径一律 503**（`Retry-After: 5`，body 写明「rebuild in progress (pid=…, since=…)」），公开路径（healthz/openapi.json/首页）**放行**（不碰派生层，不该被误伤）；③**并发重建直接被拒**（第二个 `--rebuild-index` 非零退出 + 报 `already held`），不排队、不静默；④**陈旧锁自动回收**（锁内 pid 进程已不存在 ⇒ 视为崩溃残留，服务面不阻塞、下一重建回收）⇒ `kill -9` 不会把服务永久锁死；⑤锁文件**放 home 根而非 `vaults/` 下** ⇒ 重建不会删掉自己的锁（不自锁）。
+- ✅ **证据链（缺一即不算交付）**：
+  - ①**`rebuild-lock-e2e.sh`（新增门禁）真进程 15 门 PASS / fails=0**：基线业务路径 200（L1）→ 持锁后同一路径 **503** 且 body 含 `rebuild in progress`、带 `Retry-After` 头（L2a/b/c）→ 持锁期间 healthz/openapi.json/首页**仍 200**（L3 ×3）→ 并发重建 **rc=1** 且报 `already held`（L5a/b）→ 释放锁后**立刻恢复 200**（L4）→ 陈旧锁(pid=4294967295) **不阻塞服务**且可被重建回收（L6a/b/c）→ 锁文件不在 `vaults/` 下（L7）。
+  - ②**`cargo test --all-targets` 全绿**：新增 `rebuildlock` 单测 **2 门**（取锁后二次取锁失败且报错带原因 + 释放后可再取；陈旧锁被回收且服务面不阻塞）+ 旧门禁 **32 门未破**（lib 10→12 / auth 7 / contract 1 / mcp 10 / rebuild 3 / sha_gate 1）。
+  - ③**旧 e2e 门禁全绿未被破坏**：`ehtest.sh` 34 门 fails=0、`mcp-e2e.sh` fails=0、`auth-e2e.sh` fails=0、`rebuild-e2e.sh` fails=0、`skill-rest-check.sh` fails=0、`skill-contract-check.sh` fails=0、`web-e2e.sh` fails=0（起真服务复验）。
+  - ④**零新依赖**：`ehr-api/Cargo.lock` 未改动（锁用 `std::fs::OpenOptions::create_new` 的原子语义，不引 libc/flock）。
+  - ⑤**参数生效有证据**：锁的**有无**直接改变服务行为（无锁 200 / 有锁 503），且锁释放后**自动恢复**——不是「传进去没反应」也不是「一次性开关」。
+- ✅ **T6 交付（目标验收④销账：派生索引可全量重建，有重建脚本证明）**：①新增 `ehr-api/src/rebuild.rs`——**显式命令** `ehr-api --rebuild-index`（全部人）/ `--rebuild-index=<pid>`（单人）/ `--rebuild-index=dry-run`（只列计划，不动文件）；②动作 = **删派生层（`medme.db`+wal/shm）→ 从事件日志全量回放**（走内核 `open_with_device_id_resilient`，与 POC 步骤09 同一条路径），重建后当场量出 `timeline_entries`/`lab_series`/`lab_points`/`search_probe_hits` 四项计数作为证据；③**真相层零改动**（`log/`、`objects/` 只读）；④JSON 报告走 stdout、`[证据]` 行走 stderr（沿用 D1 惯例，机器可读）。
+- ✅ **T6 证据链**：`rebuild-e2e.sh` 真进程 22 门 PASS / fails=0（dry-run 不删库 R1d → 真重建 exit=0 且 `derived_db_removed=true`/`rebuilt_from_log=true` → 重建前后 timeline 逐字相等 2 vs 2 → FTS 中文探针命中 2 → 真相层 log/+objects/ 仍在 → 重建后再起服务 HTTP 读侧三项计数逐字相等 R6b → 脏参数非零退出 R5）；`tests/rebuild.rs` 3 门；`cargo test --all-targets` 全绿；`ehtest.sh` 34 门 fails=0；**零新依赖**（Cargo.lock 未改动）。
+- 🔄 **下一步**：①T5 Web 管理端正式化（选型先报方案再动手）；②公网暴露前：`EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；③ghcr 包可见性仍 private；④真·第三方 MCP 客户端互通仍未验；⑤`.dcm`/OCR worker 未做。
+- ⚠️ 未销账：重建互斥**是跨进程锁文件**，**不覆盖多机共享存储**（NFS/多副本部署需换分布式锁——本项目部署形态是单副本容器，暂不引入）；503 期间客户端需自行重试（`Retry-After: 5`），**无排队/无补偿**；派生层重建**不重建 registry 层**（`registry/persons.jsonl` 本身即真相，无派生）；ghcr 包可见性、`.dcm`/OCR 未做。
+
+### 历史状态（2026-10-22 · **T6 派生索引全量重建已交付（D-023）**）
+
 
 - ✅ **T6 交付（目标验收④销账：派生索引可全量重建，有重建脚本证明）**：①新增 `ehr-api/src/rebuild.rs`——**显式命令** `ehr-api --rebuild-index`（全部人）/ `--rebuild-index=<pid>`（单人）/ `--rebuild-index=dry-run`（只列计划，不动文件）；②动作 = **删派生层（`medme.db`+wal/shm）→ 从事件日志全量回放**（走内核 `open_with_device_id_resilient`，与 POC 步骤09 同一条路径），重建后当场量出 `timeline_entries`/`lab_series`/`lab_points`/`search_probe_hits` 四项计数作为证据；③**真相层零改动**（`log/`、`objects/` 只读）；④JSON 报告走 stdout、`[证据]` 行走 stderr（沿用 D1 惯例，机器可读）。
 - ✅ **证据链（缺一即不算交付）**：
@@ -65,6 +80,8 @@
   - ⑤**参数生效有证据**：`--rebuild-index=dry-run` 的 `[证据]` 行显式 `mode=rebuild(dry-run)`；真重建行 `mode=rebuild | vaults=1 | timeline_entries=2 | lab_points=5`——参数传进去 = 有对应行为差异（dry-run 不删库 / 真重建删库回放）。
 - 🔄 **下一步**：①T5 Web 管理端正式化（选型先报方案再动手）；②公网暴露前：`EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；③ghcr 包可见性仍 private；④真·第三方 MCP 客户端互通仍未验；⑤`.dcm`/OCR worker 未做。
 - ⚠️ 未销账：重建是**离线运维动作**（需停服或容忍并发写者——本轮未做「重建时禁写」互斥；vault 侧 SQLite 单写者约束由内核兜底，实践中建议停服重建）；派生层重建**不重建 registry 层**（`registry/persons.jsonl` 本身即真相，无派生）；ghcr 包可见性、`.dcm`/OCR 未做。
+
+
 
 ### 历史状态（2026-10-21 · **T4 API token 鉴权已交付（D-022）**）
 
@@ -143,3 +160,5 @@
 - [ ] T3 部署/接入方式"免维护设计"：README 提供一键复制粘贴的 部署块 + **SKILL 接入块（MCP 不交付，见 D-018：skill=纯md+curl，Copilot CLI 实测，归档 repo 内随版本走）**（skill 文件放仓库固定路径、API base 用 env、SKILL 内不写死 token——升级不改配置才算达标）—— **D-021：已交付（README 部署块+接入块 / REST 优先 SKILL / agent-e2e 真 agent 兑现）**
 - [x] T4 API token 鉴权（面向公网）：静态 Bearer token(env 注入,可多 token 按只读/读写分权),中间件层统一拦截,OpenAPI 标 securitySchemes；验收=无 token 401、对 token 全绿 —— **D-022：已交付（auth-e2e 21 门 PASS / fails=0；单测 7+5 门；Cargo.lock 零新依赖）**
 - [ ] T5 Web 管理端：人员/时间线/上传/检索最小可用（技术栈选型时先报方案再动手）
+- [x] T6 派生索引全量重建（目标验收④）：显式 `--rebuild-index` 命令 + 重建门禁 —— **D-023：已交付（rebuild-e2e 22 门 / tests/rebuild 3 门 / 零新依赖）**
+- [x] T7 重建期写互斥（销账 D-023 未销账项①）：跨进程锁文件 + 服务面 503 拒写 + 并发重建被拒 + 陈旧锁回收 —— **D-024：已交付（rebuild-lock-e2e 15 门 PASS / fails=0；单测 2 门；Cargo.lock 零新依赖）**

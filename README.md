@@ -102,7 +102,10 @@ docker compose -f docker-compose.ghcr.yml run --rm --no-deps ehr-api --rebuild-i
 
 > ⚠️ `--rebuild-index` 需镜像含本命令：ghcr 上的 `v0.1.0` 镜像**尚不含**该 flag（CI 需打新 tag），
 > 本地验证用 `docker compose -f deploy/docker-compose.local.yml build` 后的镜像，或直接跑仓库内的二进制。
-> 重建是**离线动作**：建议先停服再重建（重建期间无写互斥）。
+> 重建是**离线动作**：重建期间本命令会持有跨进程互斥锁 `{EHR_HOME}/.rebuild.lock`，
+> 此时**运行中的服务对业务路径一律返回 503**（`Retry-After: 5`），直到重建结束自动恢复；
+> 并发发起第二个重建会被直接拒绝（报 `already held`）。若重建进程被 `kill -9`，
+> 残留锁会被下一次重建/服务自动识别为陈旧并回收（不永久锁死）。
 
 ## 文档
 

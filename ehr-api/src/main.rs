@@ -90,6 +90,10 @@ async fn main() -> Result<()> {
             );
             return Ok(());
         }
+        // D-024：重建期互斥——取跨进程锁（{home}/.rebuild.lock）。持锁期间服务面一律 503（重建守卫层）。
+        // 拿不到锁 ⇒ 直接失败（不排队、不静默）：两个重建同时跑是运维事故，必须显式暴露。
+        let _lock = ehr_api::rebuildlock::RebuildLock::acquire(&home, "rebuild")
+            .map_err(|e| anyhow::anyhow!("rebuild lock: {e:#}"))?;
         let results = match &rebuild_pid {
             Some(pid) => vec![ehr_api::rebuild::rebuild_person(&home, pid)?],
             None => ehr_api::rebuild::rebuild_all(&home)?,
