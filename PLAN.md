@@ -246,3 +246,12 @@
 - [x] T8 人类可读接口文档（目标验收⑤）：`docs/API.md` 由运行时 OpenAPI 自动生成 + 漂移门禁 —— **D-025：已交付（api-doc-check.sh 8 门 PASS / fails=0；tests/apidoc 3 门；单测 1 门；顺手修掉 labs 端点「文档说 501、实际 200」的漂移）**
 - [x] T9 用药端点实装（`/persons/{pid}/medications` 从 stub→501 毕业）：与 labs 同源同判据的 `agg.meds` 面 + doc_type 如实分流 + 逐条证据回链 —— **D-026：已交付（meds-e2e 12 门 PASS / fails=0；tests/meds 2 门；Cargo.lock 零新依赖）**
 - [x] T10 病程泳道端点实装（`/persons/{pid}/conditions` 从 stub→501 毕业）：第三个 aggregate 面 `agg.conditions` + 反凭空造门 + 顺手修掉暂存目录并发互删真 bug —— **D-027：已交付（conds-e2e 12 门 PASS / fails=0；tests/conds 4 门；45 门全绿；零新依赖）**
+
+## 测试资源(2026-10-21 用户提供,已 gitignore 不入库)
+
+- `docs/testres/llmtestapi.md` — LLM 网关(base_url/key/模型列表,实测 1p_deepseek-v4.1-flash 可用,回复带 reasoning_content)
+- `docs/testres/检查单/lbb/` — 2 份真实体检 PDF(2020-09 15页/2021 21页,均有文本层,pdftotext 可抽)
+- `docs/testres/检查单/zmf/` — ~15 张真实检查单照片(血常规/血脂/CT/MRI 等,OCR 需求样本)+1 份 AI 诊断参考 md
+- 用途:T3 SKILL 验收 = Copilot CLI 拿真实检查单走"建档→上传→OCR/结构化→化验趋势→AI解读"全链路;
+  PDF 文本层可直接测 ingest;图片样本检验 OCR feature 决策(开/关的实测依据)。
+- ⚠️ 红线:testres 含个人健康隐私+key,任何日志/报告引用须脱敏;绝不出现在 git/容器镜像/公开渠道。
