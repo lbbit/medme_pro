@@ -158,8 +158,57 @@ pub fn ingest_upload(vault: &Vault, filename: &str, bytes: &[u8]) -> Result<Uplo
     use std::io::Write as _;
     let ext = std::path::Path::new(filename)
         .extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    // D-034：路由判据的**单一事实来源** = `capabilities::route_for_ext`（与能力清单同源）。
+    // ⚠️ 未知扩展名在此**如实拒**（D5：宣称支持一种接不了的类型，比拒掉更坏）。
+    if !crate::capabilities::is_known_ext(&ext) {
+        anyhow::bail!(
+            "unsupported extension \"{ext}\": needs dicom/ocr worker (stage-3+)"
+        );
+    }
+    let route = crate::capabilities::route_for_ext(&ext);
+    // 路由已知但**本构建接不了** ⇒ 如实拒，并说清「怎么开」（不假装支持、不假装坏了）。
+    if !crate::capabilities::route_enabled(route) {
+        anyhow::bail!(
+            "unsupported extension \"{ext}\": {}",
+            crate::capabilities::reject_reason(route)
+        );
+    }
+    // T-OCR(D-034): png/jpg/jpeg/tiff 走 pipeline::ingest 全功能版(PP-OCRv5 ONNX 真识别)；
+    // txt/pdf 维持原 parser::extract 文本层路线(体检PDF列布局问题另走 extraction，D-023)。
+    #[cfg(feature = "ocr")]
+    if route == crate::capabilities::Route::OcrImage {
+        // 与原 staging 同纪律：独占目录(内容哈希+pid+seq)，即用即弃
+        let (o, content_hash) = staging_with(filename, bytes, |staged| {
+            pipeline::ingest(vault, staged).map(|o| {
+                let hash = vault.source_file_by_id(o.source_file_id)
+                    .ok().flatten().map(|sf| sf.content_hash).unwrap_or_default();
+                (o, hash)
+            })
+        })?;
+        let mut reply = raw_reply(content_hash);
+        reply.deduped = matches!(o.status, pipeline::IngestStatus::Deduped | pipeline::IngestStatus::Reindexed);
+        reply.doc_type = o.doc_type.as_ref().map(|d| d.as_str().to_string());
+        reply.text_indexed = !matches!(o.status, pipeline::IngestStatus::StoredNoText);
+        reply.stored_raw_only = matches!(o.status, pipeline::IngestStatus::StoredNoText);
+        // D-034 修一个**真缺陷**（实测证据：容器内 OCR 上传真检查单照片 ⇒ 回执 document_id=null，
+        //   而 timeline 里明明有 document_id=1 ⇒ 同一事实两处不一致，调用方无法据回执定位文档）。
+        //   真因：`pipeline::ingest` 的 IngestOutcome **不带 document_id**（只带 source_file_id），
+        //   而本层此前只设了 doc_type/text_indexed ⇒ document_id 永远缺省。
+        //   修法：从 source_file_id 反查内核已建的 Document 行（`document_by_source_file_id`，
+        //   上游既有 API，零新依赖）⇒ 回执里的 id 与 timeline/documents 里的**同一个**。
+        reply.document_id = vault
+            .document_by_source_file_id(o.source_file_id)
+            .ok()
+            .flatten()
+            .map(|d| d.id);
+        if let Some(p) = o.pages_without_text.first() {
+            reply.messages.push(format!("page {p} produced no OCR text (engine miss/blank page)"));
+        }
+        reply.messages.push("ocr=ppocr-v5(onnx) via pipeline::ingest".into());
+        return Ok(reply);
+    }
     anyhow::ensure!(matches!(ext.as_str(), "txt" | "pdf"),
-        "unsupported extension \".{ext}\": needs dicom/ocr worker (stage-3+)");
+        "unsupported extension \".{ext}\": needs dicom worker (stage-3+)");
     let mime = if ext == "pdf" { "application/pdf" } else { "text/plain" };
     let imp = vault.import(filename, mime, bytes)?; // sha256 CAS 登记，永不改原件
 
@@ -199,6 +248,26 @@ pub fn ingest_upload(vault: &Vault, filename: &str, bytes: &[u8]) -> Result<Uplo
         }
     }
     Ok(reply)
+}
+
+
+/// T-OCR(D-034): 泛化的独占暂存执行器 —— 与 staging_dir 同纪律（内容哈希+pid+seq 独占、即用即弃），
+/// 但把「写暂存→跑回调→清理」打包，供 pipeline::ingest 这类需要真实路径的调用复用。
+/// ⚠️ D-034：仅在 feature `ocr` 下被使用 ⇒ 默认构建下该函数是死代码 ⇒ 用 cfg 包起来。
+#[cfg(feature = "ocr")]
+fn staging_with<T>(filename: &str, bytes: &[u8], f: impl FnOnce(&std::path::Path) -> Result<T>) -> Result<T> {
+    // 复用内核 cas::sha256_hex（单一事实来源，不另引 sha2 依赖）
+    let hash = core_model::cas::sha256_hex(bytes);
+    let tmp_dir = staging_dir(&hash);
+    std::fs::create_dir_all(&tmp_dir).context("mkdir staging")?;
+    let staged = tmp_dir.join(filename.replace('/', "_"));
+    let r = (|staged: &std::path::Path| -> Result<T> {
+        use std::io::Write as _;
+        std::fs::File::create(staged)?.write_all(bytes)?;
+        f(staged)
+    })(&staged);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    r
 }
 
 fn staging_dir(hash: &str) -> std::path::PathBuf {

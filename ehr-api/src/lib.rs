@@ -20,6 +20,7 @@ pub mod vaults;
 pub mod rebuild; // 目标验收④：派生索引全量重建（删 medme.db → 从事件日志回放），显式命令 + 逐人计数证据
 pub mod rebuildlock; // D-024：重建期互斥（锁文件+陈旧锁回收）——把「建议停服重建」从口头约定变成机制
 pub mod apidoc; // T8：docs/API.md 人类可读接口文档的生成器（从运行时 OpenAPI 渲染，漂移门禁 api-doc-check.sh）
+pub mod capabilities; // D-034：ingest 能力清单的**单一事实来源**（路由判据 + 派生清单，默认构建如实拒图片）
 pub mod entries; // D-028：写侧手动条目（self-measurement / note / profile-event）——与上游同一条「合成文本当文件过一遍 import」路径
 pub mod audit; // D-030：审计视图（vault 内核事件日志 + person registry 两层真相层，口径分层不假装只有一层）
 mod b64; // base64 解码（写侧工具传二进制原件用；零新依赖，模块内自带单测）
@@ -82,6 +83,23 @@ async fn healthz(State(st): State<Arc<AppState>>) -> Result<Json<Value>, ApiErro
         "status": if ok { "ok" } else { "no-home" },
         "home": st.home.display().to_string(),
     })))
+}
+
+/// **ingest 能力清单**（D-034）：本构建**能吃哪些文件类型**、哪种类型走哪条路、
+/// 哪种能力**没链接进来**（默认构建没开 OCR ⇒ 图片被如实拒）。
+///
+/// 为什么要有这个端点：「本构建支持什么」此前是**三份实现**（ingest_upload 的判据 /
+/// OpenAPI 的 501 文案 / 门禁脚本里的手写文案）⇒ 改一处漏一处，且红得看不出是漏改还是真坏了。
+/// 现在**真源 = 实现**（`capabilities::route_for_ext`），本端点与 `--print-capabilities`
+/// **从它派生** ⇒ 客户端/agent 自己就能判断「我的文件能不能传」，不必猜、不必看日志。
+///
+/// ⚠️ 诚实边界（D5）：`ocr_available=true` 只说明**链了**引擎，**不保证模型已就绪**
+/// （PP-OCRv5 权重是运行期下载到 `$OAR_HOME` 的）⇒ 真失败时回执会如实带
+/// `stored_raw_only=true` + messages，不假装识别成功。
+#[utoipa::path(get, path = "/api/v1/capabilities", tag = "meta",
+    responses((status = 200, description = "ingest capability manifest (accepted/rejected file types, ocr engine availability)")))]
+async fn get_capabilities() -> Result<Json<Value>, ApiError> {
+    Ok(Json(capabilities::capability_manifest()))
 }
 
 /// 人员列表（读 registry/persons.jsonl 全量折叠；MVP 规模足够，规模化后换派生索引——真相层不变）
@@ -569,7 +587,7 @@ not_implemented!(stub_person_delete, "archive person(tombstone): pending registr
         (name = "records", description = "读侧：timeline/search/documents/labs…（未实现端点先挂契约，现返回501）"),
         (name = "entries", description = "写侧：append-only 条目与文档上传（未实现端点先挂契约，现返回501）")
     ),
-    paths(healthz, list_persons, create_person, get_timeline, get_search, get_labs, get_medications, get_conditions, upload_document, list_documents,
+    paths(healthz, get_capabilities, list_persons, create_person, get_timeline, get_search, get_labs, get_medications, get_conditions, upload_document, list_documents,
           get_document_detail, get_document_original,
           get_measurements, post_self_measurement, post_note, post_profile_event,
           get_audit),
@@ -876,6 +894,7 @@ async fn mcp_endpoint(
 pub fn router(st: Arc<AppState>) -> Router {
     let api = Router::new()
         .route("/healthz", get(healthz))
+        .route("/capabilities", get(get_capabilities)) // D-034：ingest 能力清单（真源=实现，从它派生）
         .route("/persons", get(list_persons).post(create_person))
         .route("/persons/{pid}", get(stub_person_detail)).route("/persons/{pid}", patch(stub_person_update)).route("/persons/{pid}", delete(stub_person_delete)) // 人员详情/修订/归档: pending(stage-2后半)——契约以路由为准(见 tests/contract.rs MOUNTED)
         .route("/persons/{pid}/timeline", get(get_timeline))

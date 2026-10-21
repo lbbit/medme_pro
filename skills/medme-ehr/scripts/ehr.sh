@@ -20,6 +20,7 @@ usage() {
   cat <<'EOF'
 用法: ehr.sh <命令> [参数]
   health                      健康检查
+  capabilities                本构建的 ingest 能力清单（能吃哪些文件类型/哪种被拒+怎么开）
   persons                     人员列表
   person-create NAME [--birthday YYYY-MM-DD] [--gender G] [--id-note S]
   timeline PID                某人健康事件时间线
@@ -75,6 +76,9 @@ esac
 case "$CMD" in
   health)
     _c "$BASE/healthz" | _pp ;;
+  capabilities)
+    # D-034：能力清单**从实现派生**（不是手抄表）⇒ agent 自己能判断「我的文件能不能传」。
+    _c "$BASE/capabilities" | _pp ;;
   persons)
     _c "$BASE/persons" | _pp ;;
   person-create)

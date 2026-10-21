@@ -1,6 +1,6 @@
-# medme-ehr REST 契约（16 路径 / 18 operation · OpenAPI 自动生成）
+# medme-ehr REST 契约（17 路径 / 19 operation · OpenAPI 自动生成）
 
-真源：`ehr-api` 运行时 `GET /openapi.json`（现合成，paths=16 / operations=18）。本文件是人类可读镜像；改动须两边同步。
+真源：`ehr-api` 运行时 `GET /openapi.json`（现合成，paths=17 / operations=19）。本文件是人类可读镜像；改动须两边同步。
 > T16：这两个数字**由门禁核对**，不靠人记——`skill-contract-check.sh` 从 `ehr-api --print-rest-manifest`（实现派生清单）取值，
 > 与本文件、`SKILL.md` 里写的数字逐项比对；漂移即红。实现侧加路由时**不必**手工同步这两处数字。
 > 另：完整路径**清单**（`METHOD path` 逐条）可用 `ehr-api --print-rest-manifest` 的 `paths_list` 直接取。
@@ -15,6 +15,7 @@ Base：`$EHR_API_BASE/api/v1`（默认 `http://127.0.0.1:8585/api/v1`）。
 | 方法+路径 | 作用 | 返回关键字段 |
 |---|---|---|
 | `GET /healthz` | 健康检查 | `status`(`ok`/`no-home`)、`home` |
+| `GET /capabilities` | **ingest 能力清单**（D-034；从实现派生，非手抄）：本构建真能吃哪些文件类型、哪种接不了、怎么开 | `ocr_available`(bool)/`ocr_engine`(null 或引擎名)/`routes[]`：`id`/`name`/`exts[]`/`enabled`/`reject_reason`/`accepted_exts[]`/`rejected_exts[]` |
 | `GET /persons` | 人员列表 | 数组：`id`/`name`/`birthday`/`gender`/`id_note`/`created_at`/`updated_at` |
 | `POST /persons` | 建档（body: `name` 必填；`birthday`/`gender`/`id_note` 选填） | 201 + 同上字段（`id` = person_id） |
 | `GET /persons/{pid}/timeline` | 健康事件时间线（文档级，`doc_date` 倒序） | `person_id`/`count`/`items[]`：`document_id`/`doc_date`/`doc_date_end`/`doc_type`/`title` |
@@ -33,7 +34,7 @@ Base：`$EHR_API_BASE/api/v1`（默认 `http://127.0.0.1:8585/api/v1`）。
 | `PUT /documents/{sha}/extraction` | 尚未实装 | **501** |
 | `GET /audit` | 审计视图（**两层真相层**，口径分层不假装只有一层）：`source=registry`（人员主数据：建档/改档/归档，**不折叠**）+ `source=vault`（上游内核事件日志：导入/导出/分享/删除，**复用上游 `audit_log()` 判据**）。可 `?person=&op=` 过滤 | `persons_scanned`/`count`/`entries[]`：`source`/`op`/`ts`/`person_id`/`detail`/`sha256`（registry 侧无 sha256；vault 侧为原件内容哈希） |
 | `GET /` | Web 管理端最小版（同源单文件 HTML） | HTML |
-| `GET /openapi.json` | OpenAPI 文档 | paths=16 / operations=18 |
+| `GET /openapi.json` | OpenAPI 文档 | paths=17 / operations=19 |
 | `POST /mcp` | MCP JSON-RPC 端点（可选壳，见 tool-contracts.md） | JSON-RPC |
 
 ## 错误语义
@@ -43,7 +44,7 @@ Base：`$EHR_API_BASE/api/v1`（默认 `http://127.0.0.1:8585/api/v1`）。
 | 400 | 参数非法（缺 `q`、坏 `limit`、坏 sha、空上传、未知扩展名之外的多文件、**不可能的自测值**、坏 `kind`/日期） | 改参数后重试 |
 | 401 | 缺/错 token | 换 `EHR_API_TOKEN`（别重试打转） |
 | 404 | 查无此人 / 无该文档 | 换人或向用户确认 |
-| 501 | 该扩展名需 dicom/ocr worker（如 `.dcm`），或该路径尚未实装（现仅 `extraction`） | 换 `.txt`/`.pdf`，或改用已实装路径 |
+| 501 | 该扩展名本构建接不了（图片需 OCR 引擎、`.dcm` 需 dicom worker——**先查 `GET /capabilities` 的 `rejected_exts`**，里面有 `reject_reason` 写明怎么开），或该路径尚未实装（现仅 `extraction`） | 换 `accepted_exts` 里的类型，或按 `reject_reason` 指示开启对应能力 |
 | 500 | 内部错误（含 CAS 完整性不符 = 投毒告警） | 告知用户稍后再试 |
 
 ## 不变量（读数据时必须遵守）

@@ -16,9 +16,39 @@ path = "src/lib.rs"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 
+[features]
+# T-OCR(D-034): OCR(图片检查单 → PP-OCRv5 ONNX) 改为**可选 feature**。
+# 为什么必须可选(实测硬证据, D-034)：oar-ocr 链 ort 的 **prebuilt ONNX Runtime 1.28 静态库**
+# 是用 glibc≥2.38 / libstdc++≥13 编的；宿主是 Ubuntu 22.04(glibc 2.35 / libstdc++ 11)
+# ⇒ 链接期报 `undefined symbol: __isoc23_strtol` 与
+#   `std::__cxx11::basic_string<...>::_M_replace_cold`（这两类是 **C++23 ABI / glibc2.38 符号**，
+#   **不是**「缺 libstdc++」——加 -lstdc++ 无效，因为宿主 libstdc++ 11 根本没有这些符号；
+#   宿主的 `nm -D libstdc++.so.6 | grep _M_replace_cold` 计数 = **0**，铁证）。
+#   在 glibc≥2.38 的容器里(实测 debian:trixie = glibc 2.41 / g++ 14.2)链接**一次通过**。
+# ⇒ 结论：**链接成功 ≠ 二进制能在宿主跑**。新二进制要求 GLIBC_2.38，宿主 ldd 直接报
+#   `version 'GLIBC_2.38' not found` ⇒ 若把 OCR 设为默认，本项目**所有宿主 e2e 门禁全部报废**
+#   （它们都是「起本机 release 二进制打真 HTTP」）。
+# 决策：OCR 走 feature `ocr`（默认 **off**）⇒
+#   ① 默认构建 = 零新依赖、宿主可跑（门禁体系不受影响）；
+#   ② 需要 OCR 的产物在**新 glibc 容器**里用 `--features ocr` 构建并在该容器内运行
+#      （部署形态天然是容器，见 deploy/）。
+ocr = ["dep:pipeline", "dep:ocr"]
+
 [dependencies]
 core-model = { path = "../upstream-medme/packages/core-model" }
 parser     = { path = "../upstream-medme/packages/parser" }
+# T-OCR(D-034): 图片检查单 OCR 落地 —— pipeline 带 ocr 的 ingest 全功能版(PP-OCRv5 ONNX)。
+# ocr 的 `engine` feature 链 oar-ocr(ONNX Runtime 静态链,build 期取二进制);模型文件运行期
+# 自动下载到 OAR_HOME(~/.oar)。镜像体积/首启下载是已知代价(BUILD-NOTES 坑表跟踪)。
+# ⚠️ D-034：这两个依赖是 **optional**（由 feature `ocr` 打开）。理由见 [features] 段：
+#   它们的 prebuilt ONNX Runtime 静态库要求 glibc≥2.38，宿主 glibc 2.35 链不过 ⇒ 不能设为默认。
+pipeline   = { path = "../upstream-medme/packages/pipeline", optional = true }
+# ocr 引擎本体（pipeline 对 ocr 是 default-features=false，engine 在这里显式打开）。
+# ⚠️ D-034 修订：先前注释把链接失败归因为「缺 libstdc++」并加 `-C link-arg=-lstdc++`
+#   —— **那是误诊**：真正缺的是 **glibc 2.38 的 C++23 ABI 符号**（__isoc23_strtol /
+#   _M_replace_cold），宿主 libstdc++ 11 里根本没有，加 -lstdc++ 只能是「链接到同一个
+#   缺符号的库」⇒ 治不了。正确处置＝换更新的工具链（容器里 glibc 2.41 实测通过）。
+ocr        = { path = "../upstream-medme/packages/ocr", features = ["engine"], optional = true }
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"

@@ -45,6 +45,7 @@
 | 方法 | 路径 | 说明 | 状态 |
 |---|---|---|---|
 | `GET` | `/api/v1/audit` | 审计视图：两层真相层合并（**口径分层**，不假装只有一层）。 - `source="registry"`：person registry 的 append-only 原始事件（create/update/delete，**不折叠**）。 - `source="vault"`：上游 `Vault::audit_log()` 的投影（导入/导出/分享/删除）——**复用上游判据，不另写一份**。 参数 `person`/`op` 是**真过滤**（真进判据，不是摆设）。 | ✅ 已实装 |
+| `GET` | `/api/v1/capabilities` | **ingest 能力清单**（D-034）：本构建**能吃哪些文件类型**、哪种类型走哪条路、 哪种能力**没链接进来**（默认构建没开 OCR ⇒ 图片被如实拒）。 | ✅ 已实装 |
 | `PUT` | `/api/v1/documents/{sha}/extraction` | AI agent 结构化发现(引用不替代，字段级 evidence 锚点)（stub→501） | ⚠️ stub（501） |
 | `GET` | `/api/v1/healthz` | 健康检查 | ✅ 已实装 |
 | `GET` | `/api/v1/persons` | 人员列表（读 registry/persons.jsonl 全量折叠；MVP 规模足够，规模化后换派生索引——真相层不变） | ✅ 已实装 |
@@ -90,6 +91,26 @@
 curl -X GET \
   -H 'Authorization: Bearer $EHR_API_TOKEN' \
   'http://127.0.0.1:8443/api/v1/audit?person=<person>&op=<op>'
+```
+
+### `GET /api/v1/capabilities`
+
+**ingest 能力清单**（D-034）：本构建**能吃哪些文件类型**、哪种类型走哪条路、 哪种能力**没链接进来**（默认构建没开 OCR ⇒ 图片被如实拒）。
+
+- 鉴权：需要 Bearer token
+**响应**
+
+| 码 | 说明 |
+|---|---|
+| `200` | ingest capability manifest (accepted/rejected file types, ocr engine availability) |
+
+
+**示例**
+
+```bash
+curl -X GET \
+  -H 'Authorization: Bearer $EHR_API_TOKEN' \
+  'http://127.0.0.1:8443/api/v1/capabilities'
 ```
 
 ### `PUT /api/v1/documents/{sha}/extraction`

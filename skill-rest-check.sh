@@ -72,11 +72,11 @@ check "upload.fields"    "content_hash,deduped,document_id,doc_type,text_indexed
 check "medications.fields" "person_id,documents_scanned,med_count,mention_count,medications,drug_key,name,raw_names,atc,latest_dose,latest_raw_name,start,end,status,docrefs,unverified,mentions,date,dose,raw_name,docref,origin"
 
 # 2) SKILL.md / rest-contracts.md 里承诺的命令必须都被 helper 支持
-for c in health persons person-create timeline search labs medications documents detail original upload measurements self-measure note profile-event audit; do
+for c in health capabilities persons person-create timeline search labs medications documents detail original upload measurements self-measure note profile-event audit; do
   grep -q "ehr.sh $c" "$SKILL" || { echo "  FAIL SKILL.md 未提命令 $c"; fails=$((fails+1)); }
   "$E" --help | grep -qE "^  $c( |\$)" || { echo "  FAIL helper 不支持命令 $c"; fails=$((fails+1)); }
 done
-echo "  PASS 命令面 SKILL ↔ helper 对齐(16 个)"
+echo "  PASS 命令面 SKILL ↔ helper 对齐(17 个)"
 
 # 2b) 写侧手动条目（D-028）：helper 三个写命令必须真写进去，读回 measurements
 SM=$("$E" self-measure "$PID" --value bp_systolic=128 --value bp_diastolic=82 --unit mmHg --taken-at 2026-10-20T08:30:00+08:00)
@@ -102,6 +102,20 @@ gate "audit_has_two_layers" "$(echo "$AU" | python3 -c 'import json,sys;d=json.l
 gate "audit_person_filter_narrows" "$("$E" audit --person "$PID" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(1 if d["count"]>0 and all(e["person_id"]=="'"$PID"'" for e in d["entries"]) else 0)')" "1"
 gate "audit_op_filter_works" "$("$E" audit --op create | python3 -c 'import json,sys;d=json.load(sys.stdin);print(1 if d["count"]>0 and all(e["op"]=="create" for e in d["entries"]) else 0)')" "1"
 gate "audit_unknown_person_zero" "$("$E" audit --person 00000000-0000-4000-8000-000000000000 | python3 -c 'import json,sys;print(json.load(sys.stdin)["count"])')" "0"
+
+# 2d) D-034：能力清单（capabilities）——**清单说的与真上传行为必须逐条一致**，且 helper 能调。
+#     判据形状：不是「清单自洽」，而是「清单说能吃的真能传、说接不了的真被拒」。
+CAP=$("$E" capabilities)
+gate "capabilities_ocr_available_is_bool" "$(echo "$CAP" | python3 -c 'import json,sys;print(1 if isinstance(json.load(sys.stdin)["ocr_available"],bool) else 0)')" "1"
+gate "capabilities_has_accepted_and_rejected" "$(echo "$CAP" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(1 if isinstance(d["accepted_exts"],list) and isinstance(d["rejected_exts"],list) else 0)')" "1"
+gate "capabilities_txt_accepted" "$(echo "$CAP" | python3 -c 'import json,sys;print(1 if "txt" in json.load(sys.stdin)["accepted_exts"] else 0)')" "1"
+printf 'capability probe\n' > "$H/cap.txt"
+UP=$("$E" upload "$PID" "$H/cap.txt")
+gate "capabilities_accepted_really_uploads" "$(echo "$UP" | python3 -c 'import json,sys;print(1 if json.load(sys.stdin).get("content_hash") else 0)')" "1"
+printf 'not-a-real-jpg' > "$H/cap.jpg"
+REJ=$("$E" upload "$PID" "$H/cap.jpg" 2>&1)
+gate "capabilities_rejected_really_rejected" "$(echo "$REJ" | grep -c 'no OCR engine')" "1"
+gate "capabilities_reject_reason_actionable" "$(echo "$REJ" | grep -c -- '--features ocr')" "1"
 
 # 3) 关键不变量：数值只在 labs 里、证据带 docref、search 0 命中不报错
 LABS_JSON=$("$E" labs "$PID")

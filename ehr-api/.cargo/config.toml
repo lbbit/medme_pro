@@ -1,5 +1,18 @@
-[source.crates-io]
-replace-with = "vendored-sources"
-
-[source.vendored-sources]
-directory = "vendor"
+# medme-ehr / ehr-api · 本地 cargo 配置
+#
+# D-034 修订：原先此处有
+#   [target.'cfg(target_os = "linux")'] rustflags = ["-C", "link-arg=-lstdc++"]
+# 那是在 **误诊**「ONNX Runtime 静态库缺 libstdc++」时的处置。真相（D-034 有实测证据）：
+#   缺的不是 libstdc++ 这个**库**，而是 **glibc ≥2.38 的 C++23 ABI 符号**
+#   （__isoc23_strtol / std::__cxx11::basic_string<...>::_M_replace_cold）——
+#   宿主 Ubuntu 22.04 的 libstdc++ 11 里根本没有这些符号
+#   （`nm -D /usr/lib/x86_64-linux-gnu/libstdc++.so.6 | grep -c _M_replace_cold` = 0）。
+#   ⇒ 加 -lstdc++ 只能「链接到同一个缺符号的库」，治不了。已删除该 rustflags。
+#
+# 正确处置：OCR 走 feature `ocr`（默认 off，见 Cargo.toml [features]），
+#   需要 OCR 的产物在 glibc≥2.38 的容器（实测 debian:trixie = glibc 2.41 / g++ 14.2）里构建。
+#
+# 注：原先此文件还有 vendored-sources 段（离线 vendor/ 兜底）。OCR 依赖进 Cargo.lock 后
+#   vendor/（199 crate）不再覆盖 lock 里的全部包，启用 vendored-sources 会让 cargo 直接报错
+#   「replacement directory does not contain package ...」⇒ 已移除该段，改走 ~/.cargo/config.toml
+#   的 TUNA 通道（D-007/D-007b）。如需离线兜底，重跑 `cargo vendor` 重新生成 vendor/ 再启用。

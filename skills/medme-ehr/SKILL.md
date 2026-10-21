@@ -9,7 +9,7 @@ metadata:
 
 # medme-ehr 档案工具集（REST 优先 · MCP 可选）
 
-服务端是 `ehr-api` 的 REST API（OpenAPI 自动生成，16 路径 / 18 operation，base = `$EHR_API_BASE/api/v1`）。
+服务端是 `ehr-api` 的 REST API（OpenAPI 自动生成，17 路径 / 19 operation，base = `$EHR_API_BASE/api/v1`）。
 > 这两个数字**由 `skill-contract-check.sh` 核对**（实现派生清单 `--print-rest-manifest` 为真源），不是手抄快照。
 **本 skill 只需一个能执行 shell 的 agent**（Copilot CLI / codex / QwenPaw / 手机端脚本），零注册、零守护进程。
 
@@ -26,6 +26,7 @@ metadata:
 | 用户想干什么 | 命令 | 注意 |
 |---|---|---|
 | 服务活着吗 | `ehr.sh health` | `status:ok` |
+| 「这个服务能收什么文件」 | `ehr.sh capabilities` | 能力清单**从实现派生**：`accepted_exts`（真能吃）/ `rejected_exts`（接不了+怎么开）；**上传前先看它**，别把 501 当故障 |
 | 「有哪些人 / 找一下某人」 | `ehr.sh persons` | 永远的第一步 |
 | 「什么时候做过什么检查」 | `ehr.sh timeline PID` | 文档级，`doc_date` 倒序，无日期件排最后 |
 | 「报告里提到 X 吗」 | `ehr.sh search PID "白细胞"` | 中文全文检索，命中片段带 `[高亮]` |
@@ -59,7 +60,7 @@ metadata:
 3. **检索零结果 ≠ 没病**：`search` 命中 0 时先换短词再试（`白细胞` 而非 `白细胞计数`），再下「查无此记录」结论。
 4. **不是医疗器械**：本服务只做资料整理与检索，不给诊断结论、不建议用药。
 5. **错误即指引**：400 参数非法（改参数重试）/ 401 缺或错 token（换 `EHR_API_TOKEN`）/ 403 只读 token 想写（换读写 token）/ 404 查无此人（换人或问用户）/ 501 该类型或该路径未实装（换 .txt/.pdf，或改用已实装路径）/ 500 内部错误（告知用户稍后再试）。别重试打转。
-6. **写侧边界**：`upload` 只吃 .txt/.pdf；原件永远进 CAS 永不丢，但 PDF 解析失败时只能存原件、建不了检索文本层（返回 `stored_raw_only=true`）。
+6. **写侧边界**：`upload` 能吃什么类型**由服务端能力清单决定**（`ehr.sh capabilities`）——默认构建真能吃的是 `.txt`/`.pdf`；图片类型（.jpg/.png/...）与 .dcm 被**如实拒**（不是故障，错误信息里写了怎么开）。原件永远进 CAS 永不丢，但 PDF 解析失败时只能存原件、建不了检索文本层（返回 `stored_raw_only=true`）。
 
 ## 零维护要点（升级不改配置）
 
