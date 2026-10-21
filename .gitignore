@@ -9,3 +9,6 @@ memory-diag-note.tmp
 
 # deploy/.env 含本地真值，不入库（T2 共用环境样例另存 .env.sample）
 deploy/.env
+
+# 用户私有测试资源(真实体检单/LLM网关key) — 绝不入库(D5/AGENTS:私密数据绝不泄露)
+docs/testres/
