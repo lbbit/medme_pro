@@ -1,5 +1,7 @@
 # D-011:本仓首次checkpoint化。target/(upstream+poc+ehr-api合计~5G)与运行时日志不进版本库。
 target/
+# D-035:OCR 变体的**独立构建目录**(默认构建必须保持零 OCR 依赖,D-034 决策③)
+target-ocr/
 *.log
 .DS_Store
 # ehr-api/poc 若改用共享 CARGO_TARGET_DIR(medme-shared-target,在仓库外)则天然不入库；此规则兜底本地直编
@@ -12,3 +14,10 @@ deploy/.env
 
 # 用户私有测试资源(真实体检单/LLM网关key) — 绝不入库(D5/AGENTS:私密数据绝不泄露)
 docs/testres/
+
+# D-035: OCR 变体的**构建期下载物**——不入库(可由 Dockerfile.ocr 构建期重取,
+#   且 sha256 已在 Dockerfile.ocr 里硬编码核对 ⇒ 重取即可复现,无需把二进制/权重提交进 git)
+#   deploy/ort/libonnxruntime.a   101M  ONNX Runtime 1.28 预编译静态库(构建期下)
+#   deploy/oar-models/*.onnx      21M   PP-OCRv5 权重(构建期从 ModelScope 取,镜像内已烤入)
+deploy/ort/
+deploy/oar-models/

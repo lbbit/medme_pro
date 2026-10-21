@@ -1,8 +1,8 @@
-# medme-ehr MCP 工具契约（读侧 10 + 写侧 2，共 12）
+# medme-ehr MCP 工具契约（读侧 11 + 写侧 2，共 13）
 
 真源：`ehr-api/src/mcp.rs` 的 `tool_schemas()` 与 `call_tool()`。本文件是它的人类可读镜像；改动须两边同步。
 **工具清单的真源是实现**：`ehr-api --print-mcp-tools`（干跑，stdout 为 JSON）输出
-`{count,read,write,names[],read_names[],write_names[]}`——本文档标题里的「共 12 / 读侧 10 / 写侧 2」
+`{count,read,write,names[],read_names[],write_names[]}`——本文档标题里的「共 13 / 读侧 11 / 写侧 2」
 由 `skill-contract-check.sh` 与该输出**逐项核对**（不一致 ⇒ 门禁红）。写侧工具名单**只此一处**
 （`mcp::WRITE_TOOLS`），鉴权分权（ro/rw）也读它 ⇒ 「公布清单」与「谁能写」不会漂移。
 传输：`POST /mcp`，JSON-RPC 2.0，`protocolVersion=2025-06-18`，无 session。
@@ -22,6 +22,7 @@
 | `get_conditions` | `person_id` | `person_id`, `documents_scanned`, `condition_count`, `conditions[]`：`raw_text`(原文写法，不做术语归一)/`onset`(**缺省即无该键**：来源文档无日期时无)/`icd_code`(**仅当原件印了**才有)/`docrefs[]` |
 | `get_measurements` | `person_id`；可选 `kind`(`self_measurement`/`note`/`profile_event`)、`from`/`to`(`YYYY-MM-DD`，含端点) | `person_id`, `count`, `measurements[]`：`document_id`/`kind`/`taken_at`/`docref`/`payload_readable`/`values[]`(`analyte_key`/`value`/`unit`/`ref_low`/`ref_high`/`ref_source`/`flag`)/`text`/`event_kind`/`event_at`；**无参考区间时 `flag` 缺省**（不猜「正常」）；`payload_readable=false` 表示结构化载荷读不出来（原文仍在 `text` 里） |
 | `get_audit` | —（全部人/全部动作）；可选 `person`(=person_id，别名 `person_id`)、`op` | `persons_scanned`, `count`, `entries[]`：`source`(`registry`=人员主数据 / `vault`=上游内核事件日志)/`op`(`create`\|`update`\|`delete` 或上游中文 `导入`\|`导出`\|`分享`\|`删除`)/`ts`/`person_id`/`detail`(可缺省)/`sha256`(**registry 侧缺省**：registry 事件无内容哈希) |
+| `get_capabilities` | —（无参） | `ocr_available`(bool：本二进制**链了** OCR 引擎)/`ocr_engine`(null 或引擎名)/`routes[]`：`id`/`name`/`exts[]`/`enabled`/`reject_reason`(`enabled=true` 时为 null)/`accepted_exts[]`(**本构建真能吃**)/`rejected_exts[]`(**接不了**，原因在 `routes[]` 的 `reject_reason` 里) |
 | `list_documents` | `person_id` | `person_id`, `count`, `items[]`：`content_hash`(=docref sha256)/`original_name`/`doc_type`/`doc_date`/`byte_size` |
 | `get_document_detail` | `person_id`, `sha256`(64 位小写 hex) | 恒在：`content_hash`/`original_name`/`mime_type`/`byte_size`/`imported_at`/`document_id`/`doc_type`/`doc_date`/`doc_date_end`/`title`/`language`/`page_count`/`encounter_id`/`text_indexed`/`text_truncated_bytes`；**可选(缺省即无该键)**：`text`(无文本层时无)、`ocr_meta`、`extraction`(`{parseable, json?, raw?}`)；解析降级时 `parseable=false` 且内容留在 raw |
 

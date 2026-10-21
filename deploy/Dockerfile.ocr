@@ -1,0 +1,119 @@
+# medme-ehr · **OCR 变体镜像**（`--features ocr`，图片检查单 → PP-OCRv5 ONNX）
+#
+# 为什么单独一个 Dockerfile（而不是给 deploy/Dockerfile 加个变体分支）：
+#   ①**基础镜像必须换**：ONNX Runtime 1.28 的 prebuilt 静态库要求 **glibc ≥ 2.38**
+#     （C++23 ABI 符号 __isoc23_strtol / _M_replace_cold）。默认镜像的
+#     `rust:1-slim-bookworm` + `debian:bookworm-slim` 是 **glibc 2.36** ⇒ 链不过
+#     （D-034 有实测证据）。⇒ build/runtime 都必须换成 **trixie（glibc 2.41）**。
+#   ②**默认构建必须保持零 OCR 依赖**：宿主 e2e 门禁全是「起本机 release 二进制打真
+#     HTTP」，一旦默认带 OCR，宿主机就跑不了（`ldd` ⇒ version 'GLIBC_2.38' not found）
+#     ⇒ 门禁体系会**整体报废**（D-034 决策③）。所以 OCR 是**独立镜像**，不是默认镜像的
+#     一个 feature 开关。
+#   ③**运行期不下载模型**：PP-OCRv5 的三个模型文件在**构建期**取好并烤进镜像，
+#     `OAR_HOME` 指向该只读目录 ⇒ 首启不联网、不写用户目录。
+#     机制：ocr crate 的 default feature 含 `auto-download` ⇒ oar-ocr 的
+#     `resolve_path(裸文件名)` → 查 `$OAR_HOME` 缓存 → 命中 **size + .sha256 sidecar**
+#     ⇒ 直接复用，**不走网络**（上游 registry 的 sha256 已在本文件里硬编码为判据）。
+#
+# 通道决策（沿用 D-007~D-010）：
+#   - crates.io 走 TUNA(sparse+static)，镜像源 URL 由 compose build-args 注入（D1）；
+#   - ONNX Runtime 预编译静态库来自 cdn.pyke.io（D-035 记：直连证书链会失败 ⇒ 走代理）；
+#   - 模型来自 ModelScope（与上游 oar-ocr 同一 URL 形态），**sha256 由本文件硬编码核对**。
+#   - 代理主机名在 **build 阶段**也要能解析 ⇒ compose 里 `build.extra_hosts` 必须有
+#     `host.docker.internal:host-gateway`（D-033 新坑①同源：extra_hosts 只写服务级时
+#     build 阶段解析不到 ⇒ 报错面貌是「网络抖动」，真凶是代理主机名没映射）。
+#
+# 用法：
+#   cd deploy && docker compose -f docker-compose.ocr.yml up -d --build
+# 验收（dry-run 优先）：
+#   docker compose -f docker-compose.ocr.yml run --rm --no-deps ehr-api --print-capabilities
+#   ⇒ ocr_available=true 且 accepted_exts 含 png/jpg
+
+ARG RUST_IMAGE=rust:1-slim-trixie
+ARG DEBIAN_IMAGE=debian:trixie-slim
+
+########## build 阶段 ##########
+FROM ${RUST_IMAGE} AS build
+ARG CARGO_SPARSE_URL
+ARG CARGO_STATIC_ROOT
+ARG APT_MIRROR
+ARG HTTPS_PROXY
+ARG HTTP_PROXY
+# D-016: 构建期允许联网。代理指向宿主 mihomo(host.docker.internal→docker0 网关, allow-lan 已开);
+# 置空 ARG 即全直连。cargo 走小写 env,CIO_* 是老版本 cargo 的等价名。
+ENV https_proxy=${HTTPS_PROXY} http_proxy=${HTTP_PROXY} \
+    CIO_PROXY=${HTTPS_PROXY} NO_PROXY=localhost,127.0.0.1,host.docker.internal
+
+# cargo 通道(D-007)：sparse index + static 下载双段镜像；--locked 用已提交的 Cargo.lock 固定版本
+RUN mkdir -p /usr/local/cargo && printf '[source.crates-io]\nreplace-with = "tuna"\n\n[source.tuna]\nregistry = "sparse+%s"\n\n[registries.tuna-static]\nregistry = "sparse+%s"\n' \
+      "$CARGO_SPARSE_URL" "$CARGO_STATIC_ROOT" > /usr/local/cargo/config.toml
+
+# ort-sys 的 prebuilt 下载用 ureq + **平台校验器**(平台根证书)
+# ⇒ 容器里必须有 ca-certificates，否则报 "certificate verify failed"（D-035 记的真凶）。
+# build-essential/g++：ONNX Runtime 静态库要链 libstdc++（且需 glibc≥2.38 的 C++23 ABI）。
+# libssl-dev：openssl-sys 找 openssl.pc（缺了报「OpenSSL 安装位置未知」——D-035 新坑①）。
+RUN sed -i "s|deb.debian.org|$(echo "$APT_MIRROR" | cut -d/ -f3)|g" /etc/apt/sources.list.d/debian.sources; \
+    apt-get update && apt-get install -y --no-install-recommends \
+      build-essential pkg-config libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+# 依赖层缓存：先只拷 Cargo.toml/lock 拉依赖，再拷源码（改动源码不重拉 crates）
+COPY ehr-api/Cargo.toml ehr-api/Cargo.lock ./ehr-api/
+COPY upstream-medme/Cargo.toml upstream-medme/Cargo.lock ./upstream-medme/
+COPY upstream-medme/packages /src/upstream-medme/packages
+# ehr-api/.cargo/config.toml 若存在(vendored-sources)会覆盖 source——在线路线必须先移除它
+RUN rm -f /src/ehr-api/.cargo/config.toml && cd ehr-api && cargo fetch && echo "[证据] deps fetched (network route)"
+
+COPY ehr-api /src/ehr-api
+RUN rm -f /src/ehr-api/.cargo/config.toml
+# OCR 构建：--features ocr 打开 oar-ocr/ort 链。ort-sys 会在 build 期下载 ONNX Runtime
+# 预编译静态库到 $ORT_CACHE_DIR（默认 ~/.cache/ort.pyke.io）——此处显式给一个稳定路径，
+# 便于「下载成功与否」有据可查。
+ENV ORT_CACHE_DIR=/root/.cache/ort.pyke.io
+RUN cd ehr-api && cargo build --release --locked --features ocr && \
+    echo "[证据] OCR build ok" && \
+    ls -l target/release/ehr-api && \
+    ldd target/release/ehr-api | head -20
+# dry-run 探针：OCR 版二进制在 **构建容器**（glibc 2.41）里能跑 ⇒ 能力清单必须如实说
+# ocr_available=true。若这里报 GLIBC_2.38 not found，说明基础镜像选错了。
+RUN cd ehr-api && EHR_HOME=$(mktemp -d) ./target/release/ehr-api --print-capabilities > /tmp/caps.json && \
+    grep -qE '"ocr_available"[[:space:]]*:[[:space:]]*true' /tmp/caps.json && \
+    echo "[证据] Dockerfile.ocr build: ocr_available=true (capability manifest in build container)" || \
+    { echo "[FAIL] ocr_available!=true in build container (基础镜像 glibc 不够?)"; cat /tmp/caps.json; exit 1; }
+
+########## runtime 阶段 ##########
+FROM ${DEBIAN_IMAGE}
+ARG APT_MIRROR
+ARG HTTPS_PROXY
+ARG HTTP_PROXY
+ENV https_proxy=${HTTPS_PROXY} http_proxy=${HTTP_PROXY} NO_PROXY=localhost,127.0.0.1
+RUN sed -i "s|deb.debian.org|$(echo "$APT_MIRROR" | cut -d/ -f3)|g" /etc/apt/sources.list.d/debian.sources; \
+    apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libstdc++6 && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/ehr-api/target/release/ehr-api /usr/local/bin/ehr-api
+# 运行期依赖：ONNX Runtime 是**静态**链的，但 C++ 标准库是**动态**链的（libstdc++.so.6）⇒ 必须装。
+#   坑：debian:trixie 的 libstdc++6 是 GCC 14 的，对应 GLIBC_2.38+ 的 C++23 ABI 符号。
+#
+# PP-OCRv5 模型：构建期从 ModelScope 取三个文件，**sha256 与上游 registry 硬编码核对**
+# （数值取自 oar-ocr-core 的 registry.rs）⇒ 篡改/半截文件都会被 [FAIL] 打回。
+# 烤进镜像后 OAR_HOME=/opt/oar-models ⇒ 运行期 resolve_path 命中 size+sidecar ⇒ 不联网。
+ARG OAR_REPO_URL=https://www.modelscope.cn/api/v1/models/greatv/oar-ocr/repo?Revision=master\&FilePath=
+RUN mkdir -p /opt/oar-models && cd /opt/oar-models && \
+    set -e; \
+    fetch() { name="$1"; want="$2"; \
+      curl -fsSL -o "$name" "${OAR_REPO_URL}${name}"; \
+      got=$(sha256sum "$name" | awk '{print $1}'); \
+      if [ "$got" != "$want" ]; then echo "[FAIL] sha256 mismatch $name: got=$got want=$want"; exit 1; fi; \
+      echo "$want" > ".$name.sha256"; \
+      echo "[证据] model ok: $name ($got)"; \
+    }; \
+    fetch pp-ocrv5_mobile_det.onnx 1eb7b4f7ab657ebd1c66d5f79bca7497f29768a2e3c15e52daecbba1a8e4a039; \
+    fetch pp-ocrv5_mobile_rec.onnx 243a0f06d826761323e9045e9b113ab2c191c3aa50565585e628300b8eda0224; \
+    fetch ppocrv5_dict.txt        d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b; \
+    ls -l /opt/oar-models
+# 非 root（EHR_HOME 由 boot 容器在 volume 内预建属主，见 docker-compose.yml 注释）
+RUN useradd -r -u 10001 ehr && mkdir -p /home/ehr && chown -R 10001:10001 /opt/oar-models
+USER 10001
+ENV EHR_HOME=/home/ehr EHR_ADDR=0.0.0.0:8443 RUST_LOG=info OAR_HOME=/opt/oar-models
+# [证据]行走 stderr（见 main.rs 注释，stdout 是机器数据）
+ENTRYPOINT ["/usr/local/bin/ehr-api"]

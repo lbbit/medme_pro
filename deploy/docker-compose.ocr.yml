@@ -1,0 +1,74 @@
+# medme-ehr · **OCR 编排**（本地构建；图片检查单 → PP-OCRv5 ONNX 识别）
+#
+# 用法：
+#   cd deploy && docker compose -f docker-compose.ocr.yml up -d --build
+#
+# ⚠️ **项目名隔离**：本文件用 `name: medme-ehr-ocr`（compose 项目名）⇒
+#   容器/网络/卷前缀都是 `medme-ehr-ocr-*`，与默认编排（`deploy-*`）**完全隔离**。
+#   不隔离的话 compose 会把默认编排的容器当「孤儿」提示，甚至共用同一个镜像 tag。
+name: medme-ehr-ocr
+#
+# ⚠️ 与默认编排（docker-compose.local.yml）的差异（**有意为之，不是遗漏**）：
+#   ①**镜像不同**：OCR 版用 `deploy/Dockerfile.ocr`（基础镜像 rust/debian **trixie**）——
+#     ONNX Runtime 1.28 的预编译静态库要求 **glibc ≥ 2.38**（C++23 ABI 符号），
+#     bookworm(glibc 2.36) 链不过（D-034 实测）。默认镜像**必须**保持 bookworm + 零 OCR
+#     依赖，否则宿主 e2e 门禁（起本机 release 二进制打真 HTTP）会整体报废。
+#   ②**端口**：默认 8585 已被默认编排占用 ⇒ 本编排默认 8586。
+#   ③**卷**：独立的 `ehr-home-ocr` named volume ⇒ 与默认编排的数据互不干扰。
+#
+# ⚠️ D4：up 之后必看容器 stderr 的 [证据] 行
+#   （形如 `[证据] ehr-api v0.0.1 | mode=serve | EHR_HOME=/home/ehr | ADDR=0.0.0.0:8443`），
+#   它与实际 bind 同源(D1)。dry-run 自检（**先 dry-run 再起服务**）：
+#   docker compose -f docker-compose.ocr.yml run --rm --no-deps ehr-api --print-capabilities
+#   ⇒ 应看到 "ocr_available":true 且 accepted_exts 含 png/jpg/tiff
+services:
+  # init-container(E6)：named volume 首次挂载会把镜像目录内容+属主(chown)复制过去 →
+  # serve 阶段 prepare_home_and_state 对非 root 只校验不创建会失败(P2)。
+  boot:
+    image: busybox
+    command: ["sh", "-c", "mkdir -p /home/ehr && chown -R 10001:10001 /home/ehr && ls -ld /home/ehr"]
+    volumes:
+      - ehr-home-ocr:/home/ehr
+
+  ehr-api:
+    # ⚠️ 独立 image 名：compose 默认用「项目名-服务名」= deploy-ehr-api —— 那正是**默认编排**
+    #   的镜像 tag ⇒ 两者会互相覆盖（build 一次 OCR 版就把默认版的 latest 顶掉）。
+    #   ⇒ 这里显式给独立名，两个编排各管各的。
+    image: medme-ehr/medme-ehr-ocr:latest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"         # 宿主 mihomo(allow-lan 后监听 *:7890)
+    build:
+      context: ..                                   # 仓库根（含 ehr-api + upstream-medme/packages/*）
+      dockerfile: deploy/Dockerfile.ocr
+      # D-033 新坑①：extra_hosts 只写在**服务级**时，**build 阶段解析不到**
+      # ⇒ cargo fetch 报「Could not resolve proxy: host.docker.internal」，报错面貌是
+      #   「网络抖动」，真凶是代理主机名在 build 网络里没有映射。⇒ build.extra_hosts 必须显式写。
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+      args:                                         # D1：镜像源 URL 唯一定义处，Dockerfile 只做拼装模板
+        CARGO_SPARSE_URL: ${CARGO_SPARSE_URL:-https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/}
+        CARGO_STATIC_ROOT: ${CARGO_STATIC_ROOT:-https://static.crates.io}
+        HTTPS_PROXY: ${HTTPS_PROXY:-http://host.docker.internal:7890}
+        HTTP_PROXY: ${HTTP_PROXY:-http://host.docker.internal:7890}
+        APT_MIRROR: ${APT_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/debian}
+    init: true                                      # PID1 收割 + SIGTERM→ctrl-c(优雅停机)
+    restart: unless-stopped
+    depends_on:
+      boot: { condition: service_completed_successfully }
+    ports:
+      # ⚠️ 端口变量用 **OCR 专属** 名（不读共享 .env 的 EHR_BIND_PORT）：共享 .env 里是 8585
+      #   （默认编排在用）⇒ 若复用同一变量名，OCR 编排会抢默认编排的端口 ⇒
+      #   docker 报 "Bind for 127.0.0.1:8585 failed: port is already allocated"（本轮实撞）。
+      - "${EHR_OCR_BIND_ADDR:-127.0.0.1}:${EHR_OCR_BIND_PORT:-8587}:8443"
+    environment:
+      EHR_HOME: ${EHR_HOME:-/home/ehr}
+      EHR_ADDR: ${EHR_CONTAINER_ADDR:-0.0.0.0:8443}
+      # T4 鉴权：静态 Bearer token（逗号分隔，格式 <token>[:ro|rw] 或 <name>=<token>[:ro|rw]）
+      EHR_API_TOKENS: ${EHR_API_TOKENS:-}
+      EHR_API_TOKEN: ${EHR_API_TOKEN:-}
+      RUST_LOG: info
+    volumes:
+      - ehr-home-ocr:/home/ehr
+
+volumes:
+  ehr-home-ocr:

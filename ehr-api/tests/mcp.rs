@@ -571,3 +571,46 @@ fn b64_encode(data: &[u8]) -> String {
     }
     out
 }
+/// D-034 未销账⑫：MCP 侧补 `get_capabilities` 工具 —— **与 REST `GET /api/v1/capabilities` 逐字同源**。
+///
+/// 判据形状（D-009）：**不**断言「MCP 和 REST 各自自洽」，而是断言「两面的**同一份**清单逐字相等」
+/// ⇒ 只吃 MCP 的宿主也能判断「我的文件能不能传」，且不会与 REST 面分叉。
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_capabilities_match_rest_capabilities_endpoint() {
+    let app = fixture("caps");
+
+    // MCP 面
+    let data = tool_data(&call_tool(&app, "get_capabilities", json!({})).await);
+    // REST 面
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/api/v1/capabilities").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let rest: Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(data, rest, "MCP capabilities must equal REST capabilities verbatim");
+    // 关键事实对 agent 可见：能不能吃图片、有没有被拒的类型与原因。
+    assert!(data["ocr_available"].is_boolean());
+    assert!(data["accepted_exts"].is_array());
+    assert!(data["rejected_exts"].is_array());
+    // 拒绝原因在 `routes[]` 里（按路由给，不是按扩展名重复一份）⇒ 每条**未启用**的路由都必须带原因。
+    let reasons_ok = data["routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["enabled"].as_bool() == Some(false))
+        .all(|r| r["reject_reason"].as_str().map(|s| !s.is_empty()).unwrap_or(false));
+    assert!(reasons_ok, "every disabled route must carry a reject_reason");
+    // 被拒的扩展名必须都在某条未启用路由的 exts 里（清单不是散点）
+    let rejected: Vec<&str> = data["rejected_exts"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
+    for e in rejected {
+        let covered = data["routes"].as_array().unwrap().iter().any(|r| {
+            r["enabled"].as_bool() == Some(false)
+                && r["exts"].as_array().map(|xs| xs.iter().any(|x| x.as_str() == Some(e))).unwrap_or(false)
+        });
+        assert!(covered, "rejected ext {e} must belong to a disabled route with a reason");
+    }
+}

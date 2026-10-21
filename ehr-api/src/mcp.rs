@@ -14,7 +14,7 @@
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::{audit, auth::Scope, b64, entries, vaults, ApiError, AppState, PersonNew, StatusCode};
+use crate::{audit, auth::Scope, b64, capabilities, entries, vaults, ApiError, AppState, PersonNew, StatusCode};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -84,7 +84,7 @@ pub fn handle_message_with_scope(
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "medme-ehr", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "多人电子健康档案工具集。读侧：person_id 为 UUID；先用 list_persons 拿人，再用 search_records / get_labs / get_medications / get_conditions / get_measurements / get_timeline / get_audit 查档。写侧：create_person 建档、upload_document 传原件（二进制用 base64）。所有内容来自原件 CAS+事件日志，text/extraction 透传不猜。",
+            "instructions": "多人电子健康档案工具集。读侧：person_id 为 UUID；先用 list_persons 拿人，再用 search_records / get_labs / get_medications / get_conditions / get_measurements / get_timeline / get_audit 查档；上传前先用 get_capabilities 看本构建能吃什么文件。写侧：create_person 建档、upload_document 传原件（二进制用 base64）。所有内容来自原件 CAS+事件日志，text/extraction 透传不猜。",
         })),
         "ping" => ok_obj(id.clone(), json!({})),
         "notifications/initialized" | "initialized" => ok_obj(id.clone(), json!({})),
@@ -234,6 +234,12 @@ fn call_tool(st: &Arc<AppState>, id: Value, name: &str, args: &Value) -> Value {
                 .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
             serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
         }
+        Prepared::Capabilities => {
+            // D-034 未销账⑫：**复用同一份** `capabilities::capability_manifest()`
+            // （与 REST `GET /api/v1/capabilities` 逐字同源）⇒ 只吃 MCP 的宿主
+            // 也能判断「我的文件能不能传」，不必猜、不必看日志。
+            Ok(capabilities::capability_manifest())
+        }
         Prepared::Documents { ref pid } => {
             require_person(st, pid)?;
             let vault = vaults::open_person_vault(&st.home, pid)?;
@@ -310,6 +316,8 @@ enum Prepared {
     Measurements { pid: String, q: entries::MeasurementsQuery },
     /// D-031：审计视图（与 REST 同源：同一 `audit_view()`，不得另写一份判据）
     Audit { q: audit::AuditQuery },
+    /// D-034 未销账⑫：ingest 能力清单（与 REST 同源：同一 `capabilities::capability_manifest()`）
+    Capabilities,
     Documents { pid: String },
     DocumentDetail { pid: String, sha: String },
     /// 写侧：建档（person registry append-only 真相层）
@@ -358,6 +366,8 @@ fn prepare(name: &str, args: &Value) -> Result<Prepared, ArgErr> {
             },
         },
         "list_documents" => Prepared::Documents { pid: str_arg(args, "person_id")?.to_string() },
+        // D-034 未销账⑫：能力清单工具（无参）——与 REST `GET /capabilities` 同一 `capability_manifest()`。
+        "get_capabilities" => Prepared::Capabilities,
         // D-031：审计视图——**与 REST 同一 `audit_view()`**（同一个语义只允许一处实现，D2）。
         // `person`/`op` 都是**可选**（缺省 = 全部人 / 全部动作）；空串按缺省处理。
         "get_audit" => Prepared::Audit {
@@ -501,6 +511,11 @@ fn tool_schemas() -> Vec<Value> {
                 "person": { "type": "string", "description": "只看某人（person_id）。缺省 = 全部人" },
                 "op": { "type": "string", "description": "只看某动作（大小写不敏感）：create|update|delete（registry 侧）或 导入|导出|分享|删除（vault 侧）" }
             }, "required": [] }
+        }),
+        json!({
+            "name": "get_capabilities",
+            "description": "本构建的 ingest 能力清单（**从实现派生**，非手抄）：本二进制真能吃哪些文件类型（accepted_exts）、哪些接不了及怎么开（rejected_exts[].reject_reason）、OCR 引擎有没有链进来（ocr_available）。上传前先看它，别把「不支持」当故障。",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }),
         json!({
             "name": "list_documents",

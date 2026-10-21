@@ -167,5 +167,18 @@ gate "bad_base64=-32602" "$V" "-32602"
 V=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"upload_document\",\"arguments\":{\"person_id\":\"$WPID\",\"filename\":\"s.dcm\",\"content_base64\":\"$B64\"}}}" | jq_ 'print(d["result"]["_code"])')
 gate "unsupported_type=-32003" "$V" "-32003"
 
+# 8) D-034 未销账⑫：MCP 侧能力清单工具 ⇒ **与 REST 面逐字同源**（不是「MCP 自己自洽」）
+#    硬证据：tools/call get_capabilities 的 structuredContent == GET /api/v1/capabilities 的 JSON。
+MC=$(rpc '{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"get_capabilities","arguments":{}}}')
+RC=$(curl -s "127.0.0.1:$PORT/api/v1/capabilities")
+MCJ=$(echo "$MC" | jq_ 'print(json.dumps(d["result"]["structuredContent"],sort_keys=True))')
+RCJ=$(echo "$RC" | jq_ 'print(json.dumps(d,sort_keys=True))')
+gate "mcp_capabilities == rest_capabilities (verbatim)" "$MCJ" "$RCJ"
+# 且关键事实对 agent 可见：ocr_available 是 bool、accepted/rejected 都是数组
+V=$(echo "$MC" | jq_ 'print(isinstance(d["result"]["structuredContent"]["ocr_available"],bool))')
+gate "mcp_capabilities.ocr_available_is_bool" "$V" "True"
+V=$(echo "$MC" | jq_ 'print(isinstance(d["result"]["structuredContent"]["accepted_exts"],list) and isinstance(d["result"]["structuredContent"]["rejected_exts"],list))')
+gate "mcp_capabilities.exts_are_arrays" "$V" "True"
+
 echo "[证据] mcp-e2e.sh fails=$fails"
 exit $([ "$fails" -eq 0 ] && echo 0 || echo 1)
