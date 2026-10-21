@@ -32,6 +32,7 @@ RUN_LIST=(
   doc-contract-check.sh         # T23 文档字段面
   api-doc-check.sh              # D-025 docs/API.md 漂移
   skill-contract-check.sh       # D-018 SKILL/MCP 工具契约
+  mcp-contract-check.sh         # T26 MCP 工具契约字段面（tool-contracts.md vs 真 MCP 响应）
   skill-rest-check.sh           # T3 SKILL REST 承诺
   mcp-e2e.sh                    # D-017 MCP e2e
   auth-e2e.sh                   # T4 鉴权 e2e

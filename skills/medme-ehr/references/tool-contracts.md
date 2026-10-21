@@ -14,16 +14,16 @@
 
 | 工具 | 必填参数 | structuredContent 关键字段 |
 |---|---|---|
-| `list_persons` | — | `count`, `persons[]`：`person_id`/`name`/`birthday`/`gender`/`id_note` |
-| `get_timeline` | `person_id` | `person_id`, `count`, `items[]`：`doc_date`/`doc_type`/`title`（`doc_date` 倒序，文档级） |
-| `search_records` | `person_id`, `q`；可选 `limit`(1–100, 默认 20) | `person_id`, `q`, `count`, `items[]`：`title`/`snippet`（命中片段 `[词]` 高亮） |
-| `get_labs` | `person_id` | `person_id`, `count`, `series[]`：`group_name`/`unit_canonical`/`any_abnormal`，`points[]`：`date`/`value`/`flag`(H/L)/`docref` |
-| `get_medications` | `person_id` | `person_id`, `documents_scanned`, `med_count`, `mention_count`, `medications[]`：`name`/`raw_names`/`status`(恒 `active`，上游不推断停药)/`docrefs[]`/`mentions[]`：`date`/`dose`/`raw_name`/`docref`/`origin` |
+| `list_persons` | — | `count`, `persons[]`：`id`(=person_id)/`name`/`birthday`/`gender`/`id_note`/`created_at`/`updated_at` |
+| `get_timeline` | `person_id` | `person_id`, `count`, `items[]`：`document_id`/`doc_date`/`doc_type`/`title`；可选键：`doc_date_end`（`doc_date` 倒序，文档级） |
+| `search_records` | `person_id`, `q`；可选 `limit`(1–100, 默认 20) | `person_id`, `q`, `count`, `items[]`：`document_id`/`title`/`snippet`（命中片段 `[词]` 高亮） |
+| `get_labs` | `person_id` | `person_id`, `documents_scanned`, `series_count`, `total_points`, `series[]`：`analyte_key`/`group_name`/`loinc`/`unit_canonical`/`values_converted`/`any_abnormal`/`self_measured`/`ref_high`/`ref_high_canonical`，`points[]`：`date`/`value`/`unit`/`value_canonical`/`flag`(H/L)/`unverified`/`docref` |
+| `get_medications` | `person_id` | `person_id`, `documents_scanned`, `med_count`, `mention_count`, `medications[]`：`drug_key`/`name`/`raw_names`/`atc`/`latest_dose`/`latest_raw_name`/`status`(恒 `active`，上游不推断停药)/`unverified`/`docrefs[]`/`mentions[]`：`date`/`dose`/`raw_name`/`docref`/`origin` |
 | `get_conditions` | `person_id` | `person_id`, `documents_scanned`, `condition_count`, `conditions[]`：`raw_text`(原文写法，不做术语归一)/`onset`(**缺省即无该键**：来源文档无日期时无)/`icd_code`(**仅当原件印了**才有)/`docrefs[]` |
-| `get_measurements` | `person_id`；可选 `kind`(`self_measurement`/`note`/`profile_event`)、`from`/`to`(`YYYY-MM-DD`，含端点) | `person_id`, `count`, `measurements[]`：`document_id`/`kind`/`taken_at`/`docref`/`payload_readable`/`values[]`(`analyte_key`/`value`/`unit`/`ref_low`/`ref_high`/`ref_source`/`flag`)/`text`/`event_kind`/`event_at`；**无参考区间时 `flag` 缺省**（不猜「正常」）；`payload_readable=false` 表示结构化载荷读不出来（原文仍在 `text` 里） |
+| `get_measurements` | `person_id`；可选 `kind`(`self_measurement`/`note`/`profile_event`)、`from`/`to`(`YYYY-MM-DD`，含端点) | `person_id`, `count`, `measurements[]`：`document_id`/`kind`/`taken_at`/`title`/`docref`/`payload_readable`/`values[]`(`analyte_key`/`value`/`unit`/`ref_high`/`ref_source`/`flag`)/`text`/`event_kind`/`event_package`/`event_at`；**无参考区间时 `flag` 缺省**（不猜「正常」）；**无区间下限时 `ref_low` 缺省**；`payload_readable=false` 表示结构化载荷读不出来（原文仍在 `text` 里） |
 | `get_audit` | —（全部人/全部动作）；可选 `person`(=person_id，别名 `person_id`)、`op` | `persons_scanned`, `count`, `entries[]`：`source`(`registry`=人员主数据 / `vault`=上游内核事件日志)/`op`(`create`\|`update`\|`delete` 或上游中文 `导入`\|`导出`\|`分享`\|`删除`)/`ts`/`person_id`/`detail`(可缺省)/`sha256`(**registry 侧缺省**：registry 事件无内容哈希) |
 | `get_capabilities` | —（无参） | `ocr_available`(bool：本二进制**链了** OCR 引擎)/`ocr_engine`(null 或引擎名)/`routes[]`：`id`/`name`/`exts[]`/`enabled`/`reject_reason`(`enabled=true` 时为 null)/`accepted_exts[]`(**本构建真能吃**)/`rejected_exts[]`(**接不了**，原因在 `routes[]` 的 `reject_reason` 里) |
-| `list_documents` | `person_id` | `person_id`, `count`, `items[]`：`content_hash`(=docref sha256)/`original_name`/`doc_type`/`doc_date`/`byte_size` |
+| `list_documents` | `person_id` | `person_id`, `count`, `items[]`：`document_id`/`content_hash`(=docref sha256)/`original_name`/`mime_type`/`byte_size`/`doc_type`/`doc_date`/`title`/`text_indexed`；可选键：`doc_date_end` |
 | `get_document_detail` | `person_id`, `sha256`(64 位小写 hex) | 恒在：`content_hash`/`original_name`/`mime_type`/`byte_size`/`imported_at`/`document_id`/`doc_type`/`doc_date`/`doc_date_end`/`title`/`language`/`page_count`/`encounter_id`/`text_indexed`/`text_truncated_bytes`；**可选(缺省即无该键)**：`text`(无文本层时无)、`ocr_meta`、`extraction`(`{parseable, json?, raw?}`)；解析降级时 `parseable=false` 且内容留在 raw |
 
 ## 写侧参数与返回

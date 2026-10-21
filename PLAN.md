@@ -54,8 +54,25 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
-## 当前状态（2026-10-26 · **T25「一键跑全部门禁」统一入口——漏跑一个脚本 = 那道门不存在，且「新增门禁忘了登记」由机器抓 · D-042 落地**）
+## 当前状态（2026-10-26 · **T26「MCP 工具契约字段面」纳入机器核对——`tool-contracts.md` 落后于实现 10 处已修，判据必须「逐工具」 · D-043 落地**）
+- ✅ **T26-① 接手工作树的第一件事仍是「让它编译并跑一遍」（D-039 新坑② 纪律沿用）**：`cd ehr-api && cargo test --all-targets` ⇒ **83 门全绿**（`mcp` 15 / `entries` 6 / `rest_manifest` 5 / `response_shape` 4 / `auth` 7 / `extraction` 5 / `meds` 2 / `conds` 4 / `audit` 3 / `rebuild` 3 / `capabilities` 3 / `apidoc` 3 / `lib` 21 / `contract` 1 / `sha_gate` 1）⇒ 确认**工作树可编译可跑**，再谈别的。（本轮**未改任何 Rust 代码** ⇒ `Cargo.toml`/`Cargo.lock` **未改动** ⇒ **零新依赖**。）
+- ✅ **T26-② 缺口定位（D-041 未销账①）**：T23（D-040）只把 **REST 面**（`rest-contracts.md`）纳入机器核对；**MCP 面**（`tool-contracts.md` 的「structuredContent 关键字段」列）仍是**人读文档里的手抄实现细节** ⇒ 实现改了它**不会红** ⇒ agent 照文档取字段 → 取不到 → 数据全空（D-016 家族）。`skill-contract-check.sh` 只核**工具数/路径数/工具名**，**不核字段** ⇒ 缺口真实存在。
+- ✅ **T26-③ 新门 `mcp-contract-check.sh`（+ 内层 `mcp_contract_check.py`）——把「MCP 契约文档」也纳入机器核对**：判据**三条独立方向**：①**正向（逐工具）**：文档承诺的每个字段名必须出现在**该工具自己**的真响应里；②**反向（逐工具）**：该工具真响应的键（顶层 + 数组元素一层 + 元素内对象一层）必须被文档提及；③**工具覆盖**：实现派生的 13 个工具都必须有文档行。门**自己造数**（1 人 + 3 份不同类型原件 + 3 类手动条目）⇒ `ocr_meta`/`extraction`/`values[]`/`event_package` 这类「有内容才出现」的键才存在 ⇒ 空库跑恒绿的问题被治住。
+  - **为什么判据必须「逐工具」**：若把各工具响应拼一起查，字段只要在**任意一个**工具里出现过就算过 ⇒ 「A 工具承诺 B 工具才有的字段」照样绿 ⇒ **门在测错对象**（D-037 同族）。**负向证明**：把只属 `get_medications` 的 `atc`/`docref` 注入 `get_capabilities` ⇒ 门红。
+  - **枚举值与字段名必须能区分**（D-011 家族纪律）：`status`(恒 `active`)、`source`(`registry`/`vault`) 这类**枚举值**不是字段名 ⇒ 只有当它**不是真响应的键、却等于真响应的标量值**时才排除（`INFO … 枚举值(非字段,已排除)`），**不靠正则猜**。
+- ✅ **T26-④ 门是「真门」的负向证据（本轮实撞 3 次，每次复原）**：①**退回已提交版 `tool-contracts.md`** ⇒ 门红 **fails=10**（逐条与修复一一对应）⇒ 复原 fails=0；②**错工具注入**（`atc`/`docref` 写进 `get_capabilities`）⇒ 红 `FAIL get_capabilities 文档承诺但真响应没有的字段: ['atc','docref']` ⇒ 复原绿；③（**门自身解析缺陷的修正记录**）首版漏 `xxx[]` 容器名且把枚举值当字段 ⇒ 假红 16 条 ⇒ 修正解析 ⇒ 真实剩余 10 条 ⇒ 修文档后 0 条。
+- ✅ **T26-⑤ 本轮实测修掉的真漂移 10 处**（`tool-contracts.md` 落后于实现）：`list_persons` 承诺 `person_id`（真键名 `id`）且漏 `created_at`/`updated_at`；`get_timeline` 漏 `document_id`/`doc_date_end`；`search_records` 漏 `document_id`；`get_labs` 承诺 `count`（真字段 `series_count`/`total_points`）且漏 `analyte_key`/`loinc`/`self_measured`/`ref_high`/`ref_high_canonical`/`values_converted`/`documents_scanned`；`get_medications` 漏 `atc`/`drug_key`/`latest_dose`/`latest_raw_name`/`unverified`；`get_measurements` 承诺 `ref_low`（可缺省）且漏 `title`/`event_package`；`list_documents` 漏 `document_id`/`mime_type`/`text_indexed`/`title`/`doc_date_end`。⇒ **7 个工具的字段承诺是假的/不完整的**，其中 4 处是「**漏字段**」（agent 照文档取不到 ⇒ 数据全空）——**这正是这道门要拦的失败模式，实测发生**。
+- ✅ **T26-⑥ 证据链（缺一即不算交付）**：
+  - ①**`cargo test --all-targets` 83 门全绿**（本轮**未改任何 Rust 代码**，**零新依赖**）。
+  - ②**统一入口一次跑完全部门禁：16 个脚本全绿，总 fails=0**（`run-all-gates.sh` ⇒ A1 PASS + 16 个 `[PASS] … fails=0`）；**新门已登记进 RUN 清单** ⇒ A1 完整性仍 PASS。**SKIP 2 个**：`container-smoke.sh`（运行中容器是旧镜像）、`agent-e2e.sh`（需真·第三方 agent CLI）——**均写明原因**。
+  - ③**后台卡死检查（D-010）**：**无 cargo/rustc 残留**；常驻只有两个 **10-21 的陈旧** `ehr-api` 进程（`:18999`/`:18991`）与两个 docker 容器（`:8585`/`:8587`）⇒ **非卡死**。
+  - ④**零新依赖**：本轮只新增**一个门禁脚本 + 其内层 Python 实现**（无 Rust 改动）＋ 文档与清单回写。
+- 🔄 **下一步**：①**`SKILL.md` 的字段描述面**仍未逐条核（本门核 `tool-contracts.md`）；②**把 `run-all-gates.sh` 纳入 CI**（当前仓库无 CI 配置 ⇒ 「统一入口」仍只是本地约定）；③**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；④「体检报告 PDF 列布局 labs=0」缺口：extraction 管线已就位，缺的是「把 PDF 送进 LLM」这一步的**端到端脚本**；⑤「家庭自测趋势」专用视图仍未做；⑥公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token（当前 OCR 编排 `EHR_API_TOKENS` 为空 ⇒ **放行模式**，仅本地）；⑦ghcr 包可见性仍 private（OCR 镜像也尚未推 GHCR）；⑧真·第三方 MCP 客户端互通仍未验；⑨`.dcm`/DICOM worker 未做（能力清单已如实标 `enabled=false`）；⑩**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在；⑪MCP 侧仍**无 resources/prompts**；⑫`docs/API.md` 是**生成物**，改接口须跑 `./api-doc-check.sh --write`；⑬人员域三端点仍 501 且刻意不进 OpenAPI；⑭**OCR 镜像未推 GHCR / 未纳入 CI**；⑮`container-smoke.sh` 仍**未跑**（须先重建镜像）。
+- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（编译期内嵌，无构建链）；`docs/API.md` 是**生成物**；文档覆盖 **REST 面**（`rest-contracts.md`）+ **MCP 面**（`tool-contracts.md`，本轮补齐）；**上游分类缺口**仍在；**上游审计口径缺口**已在 D-030 如实标注（**不造事件补齐**）；**OCR 镜像尚未推 GHCR、未纳入 CI**；**「手抄实现细节」残留**已治到 **stub 清单 / REST 路径 / 响应形状 / 文档字段 / 产物新鲜度 / 门禁编排完整性 / MCP 工具契约字段** 七个面——**`SKILL.md` 字段描述面**仍无门；**统一入口已存在但未接入 CI**。
 
+
+
+### 历史状态（2026-10-26 · **T25「一键跑全部门禁」统一入口——漏跑一个脚本 = 那道门不存在，且「新增门禁忘了登记」由机器抓 · D-042 落地**）
 - ✅ **T25-① 接手工作树的第一件事仍是「让它编译并跑一遍」（D-039 新坑② 纪律沿用）**：`cd ehr-api && cargo test --all-targets` ⇒ **83 门全绿**（`mcp` 15 / `entries` 6 / `rest_manifest` 5 / `response_shape` 4 / `auth` 7 / `extraction` 5 / `meds` 2 / `conds` 4 / `audit` 3 / `rebuild` 3 / `capabilities` 3 / `apidoc` 3 / `lib` 21 / `contract` 1 / `sha_gate` 1）。
 - ✅ **T25-② 缺口定位（D-041 未销账②）**：仓库根有 **16 个门禁脚本**（`artifact-freshness` / `doc-contract` / `api-doc` / `skill-contract` / `skill-rest` / `mcp` / `auth` / `entries` / `conds` / `meds` / `audit` / `ehtest` / `rebuild` / `rebuild-lock` / `web-e2e` / `container-smoke` / `agent-e2e`），**全靠人工逐个跑** ⇒ ①**一次「我跑了全部」无法证明**（⇒ 那道门这一轮可能根本不存在）；②**清单本身也会漂移**（新增一个门禁脚本却忘了加进任何清单 ⇒ 新门永远不跑，**且没人知道**）——这正是 D-037「清单/注释会骗人」在**编排层**的复发。
 - ✅ **T25-③ 新入口 `run-all-gates.sh`——把「我跑了全部」变成机器判据**：判据**三条独立方向**：①**A1 登记表完整性**（仓库根每个 `*.sh` 门禁脚本必须**要么在 RUN 清单、要么在 SKIP 清单且写明跳过原因** ⇒ 新增门禁忘了登记 ⇒ 立刻红）；②**A2 每道门真跑且真绿**（退出码为 0 **且**输出里 `fails=N` 必须为 0 ⇒ 两个都要看：有的脚本非零退出不改计数、有的脚本计数非零却仍 exit 0）；③**A3 汇总可见**（逐门 PASS/FAIL + 总 fails ⇒ 任一红整体非零）。
