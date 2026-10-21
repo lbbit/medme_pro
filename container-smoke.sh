@@ -25,12 +25,16 @@ ck "timeline.http" "$(printf '%s' "$T"|grep -o 'HTTP=[0-9]*')" "HTTP=200"
 
 echo "== 4 服务端 openapi paths =="
 N=$(curl -s -m 5 "$B/openapi.json" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["paths"]))')
-ck "openapi.paths" "$([ "$N" -ge 16 ] && echo ok)" "ok"; echo "paths=$N"
+# T16 · D-032 未销账⑩：期望路径数**从镜像自身派生**（--print-rest-manifest），不再硬编码 16。
+#   为什么：16 此前散在 5 处，真源在同一份代码里 ⇒ 同一事实五份实现。现在实现=真源。
+EXP=$(docker run --rm --user 0 -e EHR_HOME=/tmp/h --entrypoint /usr/local/bin/ehr-api deploy-ehr-api --print-rest-manifest 2>/dev/null \
+  | python3 -c 'import json,sys;print(json.load(sys.stdin)["paths"])')
+ck "openapi.paths" "$([ "$N" = "$EXP" ] && echo ok)" "ok"; echo "paths=$N expected=$EXP (derived, not hardcoded)"
 
 echo "== 5 镜像自身 dry-run(不经宿主二进制) =="
 M=$(docker run --rm --user 0 -e EHR_HOME=/tmp/h --entrypoint /usr/local/bin/ehr-api deploy-ehr-api --print-openapi 2>/dev/null \
   | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["paths"]))')
-ck "image.dry-run.paths" "$([ "$M" -ge 16 ] && echo ok)" "ok"; echo "image_paths=$M"
+ck "image.dry-run.paths" "$([ "$M" = "$EXP" ] && echo ok)" "ok"; echo "image_paths=$M expected=$EXP (derived, not hardcoded)"
 
 echo "== 6 volume 落盘真相层(append-only JSONL 末行) =="
 docker exec deploy-ehr-api-1 tail -n 1 /home/ehr/registry/persons.jsonl

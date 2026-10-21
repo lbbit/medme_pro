@@ -1,6 +1,9 @@
 # medme-ehr REST 契约（16 路径 / 18 operation · OpenAPI 自动生成）
 
 真源：`ehr-api` 运行时 `GET /openapi.json`（现合成，paths=16 / operations=18）。本文件是人类可读镜像；改动须两边同步。
+> T16：这两个数字**由门禁核对**，不靠人记——`skill-contract-check.sh` 从 `ehr-api --print-rest-manifest`（实现派生清单）取值，
+> 与本文件、`SKILL.md` 里写的数字逐项比对；漂移即红。实现侧加路由时**不必**手工同步这两处数字。
+> 另：完整路径**清单**（`METHOD path` 逐条）可用 `ehr-api --print-rest-manifest` 的 `paths_list` 直接取。
 Base：`$EHR_API_BASE/api/v1`（默认 `http://127.0.0.1:8585/api/v1`）。
 鉴权：T4 已落地。服务端配置 token 后，所有路径（除 `/healthz`、`/openapi.json`、Web 首页）都要求 `Authorization: Bearer <token>`。
 - `EHR_API_TOKEN`：单 token（等价读写权限）。

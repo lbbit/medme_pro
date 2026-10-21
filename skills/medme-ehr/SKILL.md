@@ -10,6 +10,7 @@ metadata:
 # medme-ehr 档案工具集（REST 优先 · MCP 可选）
 
 服务端是 `ehr-api` 的 REST API（OpenAPI 自动生成，16 路径 / 18 operation，base = `$EHR_API_BASE/api/v1`）。
+> 这两个数字**由 `skill-contract-check.sh` 核对**（实现派生清单 `--print-rest-manifest` 为真源），不是手抄快照。
 **本 skill 只需一个能执行 shell 的 agent**（Copilot CLI / codex / QwenPaw / 手机端脚本），零注册、零守护进程。
 
 ## 前置：先定人，再查档

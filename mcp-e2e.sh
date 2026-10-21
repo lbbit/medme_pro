@@ -122,8 +122,24 @@ V=$(rpc '{"jsonrpc":"2.0","id":13,"method":"no/such"}' | jq_ 'print(d["error"]["
 gate "unknown_method=-32601" "$V" "-32601"
 
 # 6) REST 契约未被污染
+#    T16 · D-032 未销账⑩：路径数**从实现干跑清单取值**，不再硬编码 16。
+#    为什么：16 这个数字此前散在 5 处（ehtest/mcp-e2e/container-smoke/tests/mcp.rs/两份 skill 文档），
+#    真源就在同一份代码里 ⇒ 同一事实五份实现。现在实现=真源，门禁从它取值。
+MAN=$(EHR_HOME="$H" "$BIN" --print-rest-manifest 2>/dev/null)
+EXP_PATHS=$(echo "$MAN" | jq_ 'print(d["paths"])')
+EXP_STUBS=$(echo "$MAN" | jq_ 'print(d["stubs"])')
 V=$(curl -s "127.0.0.1:$PORT/openapi.json" | jq_ 'print(len(d["paths"]))')
-if [ "$V" -ge 16 ] 2>/dev/null; then echo "  PASS openapi_paths>=16 = $V"; else echo "  FAIL openapi_paths=$V"; fails=$((fails+1)); fi
+if [ "$V" = "$EXP_PATHS" ] 2>/dev/null; then echo "  PASS openapi_paths == derived manifest ($V, not hardcoded)"; else echo "  FAIL openapi_paths=$V want=$EXP_PATHS (derived from --print-rest-manifest)"; fails=$((fails+1)); fi
+# 6b) stub 端点数也只有一个来源（CONTRACT 表 ⇒ --print-rest-manifest.stubs）
+#     判定用的标记字符串也从清单取（stub_mark）⇒ 脚本里不再手抄「stub→501」字面量。
+STUB_MARK=$(echo "$MAN" | jq_ 'print(d["stub_mark"])')
+V=$(curl -s "127.0.0.1:$PORT/openapi.json" | STUB_MARK="$STUB_MARK" python3 -c '
+import json,sys,os
+d=json.load(sys.stdin)
+mark=os.environ["STUB_MARK"]
+n=sum(1 for p,it in d["paths"].items() for m,op in it.items() if isinstance(op,dict) and mark in (op.get("summary") or ""))
+print(n)')
+if [ "$V" = "$EXP_STUBS" ] 2>/dev/null; then echo "  PASS openapi_stubs == derived manifest ($V)"; else echo "  FAIL openapi_stubs=$V want=$EXP_STUBS"; fails=$((fails+1)); fi
 V=$(curl -s "127.0.0.1:$PORT/openapi.json" | jq_ 'print("/mcp" in d["paths"])')
 gate "mcp_not_in_openapi" "$V" "False"
 

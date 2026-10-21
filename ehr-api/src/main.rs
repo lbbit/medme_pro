@@ -16,6 +16,7 @@ async fn main() -> Result<()> {
     let mut print_openapi = false;
     let mut print_api_doc = false;
     let mut print_mcp_tools = false;
+    let mut print_rest_manifest = false;
     let mut rebuild_pid: Option<String> = None;
     let mut rebuild_all_flag = false;
     let mut rebuild_dry = false;
@@ -28,6 +29,8 @@ async fn main() -> Result<()> {
             print_api_doc = true;
         } else if a == "--print-mcp-tools" {
             print_mcp_tools = true;
+        } else if a == "--print-rest-manifest" {
+            print_rest_manifest = true;
         } else if a == "--rebuild-index" {
             rebuild_all_flag = true;
         } else if a == "--rebuild-index=dry-run" {
@@ -37,7 +40,7 @@ async fn main() -> Result<()> {
             rebuild_pid = Some(v.to_string());
         } else {
             eprintln!(
-                "[ERROR] unknown argument: {a}\nusage: ehr-api [--addr=HOST:PORT] [--print-openapi] [--print-api-doc] [--print-mcp-tools] [--rebuild-index | --rebuild-index=dry-run | --rebuild-index=PID]\n(env EHR_HOME, EHR_ADDR, EHR_API_TOKENS, EHR_API_TOKEN, RUST_LOG)"
+                "[ERROR] unknown argument: {a}\nusage: ehr-api [--addr=HOST:PORT] [--print-openapi] [--print-api-doc] [--print-mcp-tools] [--print-rest-manifest] [--rebuild-index | --rebuild-index=dry-run | --rebuild-index=PID]\n(env EHR_HOME, EHR_ADDR, EHR_API_TOKENS, EHR_API_TOKEN, RUST_LOG)"
             );
             std::process::exit(2);
         }
@@ -48,7 +51,7 @@ async fn main() -> Result<()> {
     // serve 仅在其下建派生 vaults/ 子目录，registry/persons.jsonl 首写时才建)。
     // T4：鉴权表从 env 读（EHR_API_TOKENS / EHR_API_TOKEN）。格式错误 ⇒ 启动失败（D5：配置错误不静默退化）。
     let (st, token_set) =
-        ehr_api::prepare_home_and_state_auth(&home_in, !(print_openapi || print_api_doc || print_mcp_tools))?;
+        ehr_api::prepare_home_and_state_auth(&home_in, !(print_openapi || print_api_doc || print_mcp_tools || print_rest_manifest))?;
     // D1：生效地址单点计算一次，[证据]行与实际 bind 用同一个值。
     let addr = addr_arg.or_else(|| std::env::var("EHR_ADDR").ok()).unwrap_or_else(|| "127.0.0.1:8443".into());
 
@@ -58,6 +61,8 @@ async fn main() -> Result<()> {
         "dry-run(print-api-doc)"
     } else if print_mcp_tools {
         "dry-run(print-mcp-tools)"
+    } else if print_rest_manifest {
+        "dry-run(print-rest-manifest)"
     } else if rebuild_all_flag || rebuild_pid.is_some() {
         "rebuild"
     } else {
@@ -109,6 +114,20 @@ async fn main() -> Result<()> {
             env!("CARGO_PKG_VERSION"),
             st.home.display(),
             man["count"], man["read"], man["write"]
+        );
+        return Ok(());
+    }
+
+    // T16：REST 面派生清单干跑（机器可读 stdout，证据行走 stderr）。
+    // 用途：让门禁脚本与文档**从实现取值**，不再各处硬编码「16 路径 / 18 operation」。
+    if print_rest_manifest {
+        let man = ehr_api::rest_manifest();
+        println!("{}", serde_json::to_string_pretty(&man)?);
+        eprintln!(
+            "[证据] ehr-api v{} | mode=dry-run(print-rest-manifest) | EHR_HOME={} | paths={} operations={} stubs={}",
+            env!("CARGO_PKG_VERSION"),
+            st.home.display(),
+            man["paths"], man["operations"], man["stubs"]
         );
         return Ok(());
     }

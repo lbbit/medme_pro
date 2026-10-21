@@ -1,5 +1,27 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-033 2026-10-26 · **T16「REST 有多少条路径」五处硬编码→一处派生（`--print-rest-manifest`）——照抄 T15 的做法治 REST 面**
+**为什么做**：D-032 未销账⑩点名的缺口是「**REST 面的路径数（16）仍是硬编码在 `api-doc-check.sh`/`ehtest.sh` 里**——本轮只治了 MCP 工具面，REST 路径面同病未治」。本轮把它从「欠账」变成「机制」。**为什么值得单开一轮**：D-032 已经在 MCP 侧证明了这套做法成立（实现=真源 ⇒ 派生清单 ⇒ 门禁从它取值 ⇒ 文档数字由门禁核对），REST 面是**同一形状的病**，照抄即可——不必再发明新机制。
+**关键结构决策①：真源 = 实现，派生清单 = `ehr_api::rest_manifest()`**（由运行时 OpenAPI 派生，不是另抄一份表）。新增干跑开关 **`ehr-api --print-rest-manifest`**（stdout = 机器可读 JSON：paths/operations/stubs/stub_mark/paths_list/mounted_undocumented；stderr = `[证据]` 行——沿用 D1「证据行走 stderr、stdout 是机器数据」惯例；dry-run 不落任何状态）。
+**关键结构决策②：改动的改动面从「六处」降为「一处 + 文档」**。此前「16 路径 / 18 operation」硬编码在 **5 处**（`ehtest.sh` / `mcp-e2e.sh` / `container-smoke.sh` / `tests/mcp.rs` / 两份 skill 文档）——**同一事实五份实现**，加一条路由要同步改五处，漏一处就红，且红得**看不出是「漏改」还是「真坏了」**（D-009「判据形状」的老问题在数字上的变体）。现在实现=真源，脚本与测试**从它取值**；文档里的数字**保留但由门禁核对**（照抄 D-032 决策③：文档是给人读的，「16 路径」是读者要的上下文，**核对 > 消除**）。
+**关键结构决策③：stub 判定也只留一处**。`ehr_api::STUB_MARK`（原为 `apidoc.rs` 里手抄的「stub→501」字面量）成为唯一标记源；**并把标记字符串本身也公布**在清单的 `stub_mark` 字段里 ⇒ 连门禁脚本都不用再手抄它（此前 `mcp-e2e.sh` 里有一份「stub→501」字面量，是第 6 份实现）。
+**关键结构决策④：`tests/contract.rs` 的守卫从「手抄 8 条端点」改为「从运行时 OpenAPI 派生全部 operation」**。原先那份手抄表**漏掉的端点完全不被守卫**——守卫看起来是绿的，实则漏了新端点（这是**假门**，比没有门更坏）。现在：OpenAPI 里的每个 operation **逐条真打一次请求**。
+**关键结构决策⑤：区分「路由没挂（axum 404，空体）」与「业务层 404（查无此人，JSON `{"error":...}`）」靠**响应体**，不靠状态码**。这是 D-009「判据形状」的第六次应验：**状态码是快照，响应体是语义**。
+**证据链（缺一即不算交付）**：
+①**`cargo test --all-targets` 66 门全绿**（原 62 + 新 `tests/rest_manifest.rs` **4 门**）：清单 paths/operations **== 运行时 OpenAPI 实际数**；`paths_list` **逐条 == OpenAPI 的 `METHOD path` 集合**（名字与集合都对，不只数量）；`stubs` **== CONTRACT 表长度**；`mounted_undocumented` **== 共享表**。
+②**`ehtest.sh` fails=0**：**新门 A0**（`--print-rest-manifest` exit=0）+ **新门 F2**（live openapi 路径**名字序列**逐条 == 派生清单 ⇒ 「加了路由但名字写错」也能抓到）；A2/F1 由「≥16 快照」改为「== 派生值」。
+③**`mcp-e2e.sh` fails=0**（36 门）：`openapi_paths == derived manifest (16, not hardcoded)` + **新门 6b** `openapi_stubs == derived manifest (1)`。
+④**`skill-contract-check.sh` fails=0**（32 门）：**新增 3 门** `doc_rest_paths` / `doc_rest_operations` / `skill_rest_paths`——两份 skill 文档的路径数由实现派生清单核对。
+⑤**门禁是「真门」的负向证据**：把 `SKILL.md` 的「16 路径」**故意改成「17 路径」** ⇒ 首跑 **`FAIL skill_rest_paths: got=17 want=16` / fails=1** ⇒ 复原后 **fails=0**。
+⑥**旧门禁全绿未被破坏**：`ehtest.sh` / `mcp-e2e.sh`(36) / `auth-e2e.sh` / `audit-e2e.sh` / `entries-e2e.sh` / `conds-e2e.sh` / `meds-e2e.sh` / `rebuild-e2e.sh` / `rebuild-lock-e2e.sh` / `skill-rest-check.sh` / `skill-contract-check.sh`(32) / `api-doc-check.sh`(8) / `web-e2e.sh`（起真服务复验，fails=0）**全 fails=0**。
+⑦**零新依赖**：`ehr-api/Cargo.lock` 与 `Cargo.toml` **未改动**（依赖包数 **204** 不变，可验事实）。
+⑧**dry-run 优先**：先跑库级 `cargo test --all-targets`（不起服务、不落状态）与 `--print-rest-manifest` 干跑渲染（`paths=16 operations=18 stubs=1`），再起真进程跑 e2e 与旧门禁复验。
+⑨**参数/状态生效有证据**：传 `--print-rest-manifest` ⇒ stdout JSON + stderr `mode=dry-run(print-rest-manifest)`；不传 ⇒ 走 serve 模式（参数真进判据）；清单 `paths_list` 与 live `/openapi.json` **名字序列逐字相等**（F2 门）；故意让文档漂移 ⇒ 门禁红（见⑤）。
+**新坑两则（D4 同族）**：
+①**「单线程 panic 成 500」会掩盖业务 404**——本轮 `tests/contract.rs` 改用 `multi_thread` flavor 后 `tokio::task::block_in_place` 才**真正执行**（单线程 flavor 下它会 **panic** ⇒ 500），原先的 `assert_ne!(404)` 因此长期「绿」而**掩盖了「未知人 timeline」本该是业务 404**的事实。真相：业务 404（JSON `{"error":...}`）与 axum 路由未命中 404（**空体**）必须靠**响应体**区分。**教训：判据要钉住「语义」，而语义在响应体里，不在状态码里**（D-009 判据形状原则的第六次应验）。另附一条：`http::Method::from_str("put")` 得到的是**小写扩展方法**（≠ PUT）⇒ axum 匹配不上会返回 **405 而非 404**——差点被误读成「端点没实现」（同一坑族的第二个变种）。
+②**`web-e2e.sh` 的端口变量是小写 `base`（不是 `BASE`）**——本轮第三次踩同一个坑（D-030/D-032 各踩一次）⇒ 传 `BASE=...` 会被忽略 ⇒ 打默认 8585（无服务）⇒ **fails=3**，报错是「建档失败 + JSONDecodeError」，**完全看不出「地址没传对」**。**教训升级**：抄 usage 注释这条纪律**必须每次执行时都看**，不能靠「上轮学过了」（D-030 新坑②的第三次应验）。
+**未销账/下一步**：①**stub 端点仍剩 1 个**：`PUT /documents/{sha}/extraction`——**新功能**（字段级 evidence 锚点该怎么表达？上游 `deid::verify` 要求每个字符串字段是**原文逐字子串**）⇒ 需单独设计；②**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；③「家庭自测趋势」专用视图仍未做；④`EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑤ghcr 包可见性仍 private；⑥真·第三方 MCP 客户端互通仍未验；⑦`.dcm`/OCR worker 未做；⑧**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在；⑨MCP 侧仍**无 resources/prompts** 能力；⑩**REST 面的路径数/operation 数已在本轮销账**（本条即其销账）；⑪**`docs/API.md` 里的路径清单仍是生成时快照**（须跑 `./api-doc-check.sh --write` 重新生成，手改会被 A3 打回）；⑫**人员域三端点（GET/PATCH/DELETE `/persons/{pid}`）仍 501 且刻意不进 OpenAPI**（`MOUNTED_UNDOCUMENTED`）——何时实装需单独设计。
+
 ## D-032 2026-10-26 · **T15 「MCP 有多少个工具」从三处硬编码变成一处派生（--print-mcp-tools）——消掉 D-031 新坑②**
 **为什么做**：D-031 交付时自己点名的「未销账⑨」是「**MCP 工具数在门禁里硬编码三处**（`mcp-e2e.sh` / `skill-contract-check.sh` / `tests/mcp.rs`）——应改为从 `tools/list` 动态取值」。这不是「洁癖」：**硬编码数字是快照，不是判据**——加一个工具要同时改三处，漏一处就红，而红的时候**看不出是「漏改」还是「真坏了」**（D-009「判据形状」的老问题在数字上的变体）。本轮把这件事从「欠账」变成「机制」。
 **关键结构决策①：工具清单的单一事实来源 = 实现**（`mcp::tool_schemas()`），派生两个出口：

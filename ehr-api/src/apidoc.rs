@@ -82,7 +82,7 @@ pub fn render(doc: &Value) -> String {
                 continue;
             }
             let summary = op["summary"].as_str().unwrap_or("").replace('\n', " ");
-            let is_stub = summary.contains("stub→501");
+            let is_stub = summary.contains(crate::STUB_MARK);
             ops.push((m.to_uppercase(), p.clone(), summary, is_stub));
         }
     }

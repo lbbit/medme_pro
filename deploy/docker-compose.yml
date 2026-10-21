@@ -19,6 +19,13 @@ services:
     build:
       context: ..                                   # 仓库根（含 ehr-api + upstream-medme/packages/*）
       dockerfile: deploy/Dockerfile
+      # T16/D-033：build 阶段**也**要解析 host.docker.internal（代理指向宿主 mihomo）。
+      #   坑：extra_hosts 写在**服务级**只对 runtime 容器生效，**build 阶段解析不到** ⇒
+      #   cargo fetch 报 "Could not resolve proxy: host.docker.internal" ⇒ 构建失败，
+      #   报错面貌是「网络抖动」，真凶是**代理主机名在 build 网络里没有映射**（D-030/D-032 同族新坑）。
+      #   修法：build.extra_hosts 显式映射到 host-gateway。
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
       args:                                         # D1：镜像源 URL 唯一定义处，Dockerfile 只做拼装模板
         CARGO_SPARSE_URL: https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/
         CARGO_STATIC_ROOT: https://static.crates.io            # D-016: 允许联网，static 直连官方(经下方代理)

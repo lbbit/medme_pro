@@ -45,9 +45,12 @@ RUN rm -f /src/ehr-api/.cargo/config.toml
 # 用 mktemp -d 而非写死路径,避免污染层。
 RUN cd ehr-api && cargo build --release --locked && \
     EHR_HOME=$(mktemp -d) ./target/release/ehr-api --print-openapi > /tmp/oa.json && \
-    N=$(grep -oE '^[[:space:]]+"/api[^"]*":' /tmp/oa.json | wc -l) && \
-    echo "[证据] Dockerfile build: openapi_paths=$N" && \
-    { [ "$N" -ge 16 ] || { echo "[FAIL] openapi_paths=$N < 16"; exit 1; }; } && \
+    EHR_HOME=$(mktemp -d) ./target/release/ehr-api --print-rest-manifest > /tmp/rm.json && \
+    N=$(grep -oE '"paths"[[:space:]]*:[[:space:]]*[0-9]+' /tmp/rm.json | grep -oE '[0-9]+' | head -1) && \
+    M=$(grep -oE '^[[:space:]]+"/api[^"]*":' /tmp/oa.json | wc -l) && \
+    echo "[证据] Dockerfile build: manifest_paths=$N openapi_paths=$M" && \
+    { [ -n "$N" ] && [ "$N" = "$M" ] || { echo "[FAIL] manifest paths=$N != openapi paths=$M (T16: 派生清单须与 OpenAPI 同源)"; exit 1; }; } && \
+    { [ "$M" -ge 16 ] || { echo "[FAIL] openapi_paths=$M < 16"; exit 1; }; } && \
     echo "[证据] Dockerfile build: ehr-api dry-run exit=0"
 
 ########## runtime 阶段 ##########

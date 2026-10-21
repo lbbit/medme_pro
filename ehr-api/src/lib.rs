@@ -592,13 +592,25 @@ struct ApiDoc;
 /// 必须**从本表移除**，否则 OpenAPI 会把它标成 stub→501，而实际返回 200 —— 文档与现实脱节，
 /// 正是本项目最贵的漏账形态（D5：状态码不许粉饰）。反向保险见 tests/contract.rs
 /// （逐条断言本表里的端点真返回 501）。
+/// stub 端点在 OpenAPI summary 里的**唯一标记**（D-016/D-025 纪律：同一事实只留一处实现）。
+/// 改这一处 ⇒ 文档渲染、派生清单、门禁脚本的判定口径同时跟着变，不会各说各话。
+pub const STUB_MARK: &str = "stub→501";
+
 pub const CONTRACT: &[(&str, &str, &str, &str)] = &[
     ("put", "/api/v1/documents/{sha}/extraction", "entries", "AI agent 结构化发现(引用不替代，字段级 evidence 锚点)"),
 ];
 
+/// 已挂 router 但**刻意不进 OpenAPI** 的人员域端点（理由见 stub_person_* 注释）。
+/// 单一事实源：tests/contract.rs 与 rest_manifest() 都读这张表，不再各写一份（D2：一个语义只允许一处实现）。
+pub const MOUNTED_UNDOCUMENTED: &[(&str, &str)] = &[
+    ("get", "/api/v1/persons/{pid}"),
+    ("patch", "/api/v1/persons/{pid}"),
+    ("delete", "/api/v1/persons/{pid}"),
+];
+
 fn stub_item(op: &str, tag: &str, summary: &str) -> Value {
     json!({ op.to_lowercase(): {
-        "summary": format!("{summary}（stub→501）"),
+        "summary": format!("{summary}（{STUB_MARK}）"),
         "tags": [tag],
         "responses": {
             "200": { "description": "planned" },
@@ -665,7 +677,58 @@ pub fn openapi_json() -> Value {
     doc
 }
 
-// ---------- Web 管理端最小版：单文件静态页，编译期内嵌（D-016） ----------
+/// REST 面的**派生清单**（T16 · D-032 未销账⑩ 的治本）。
+///
+/// 为什么要它：此前「本服务有 16 条路径 / 18 个 operation」这个数字**硬编码在 5 处**
+/// （ehtest.sh / mcp-e2e.sh / container-smoke.sh / tests/mcp.rs / 两份 skill 文档），
+/// 而真源（运行时 OpenAPI）就在同一份代码里——**同一事实五份实现**（D-009 判据形状的老问题）。
+/// 加一条路由要同步改五处，漏一处就红，且红得看不出是「漏改」还是「真坏了」。
+///
+/// 现在：实现是唯一事实源 ⇒ 派生 `rest_manifest()`；门禁与文档**从它取值**。
+/// 数字仍在文档里（人读需要，「16 路径 / 18 operation」是读者要的上下文），
+/// 但**由门禁核对**（照抄 D-032 决策③：核对 > 消除）。
+///
+/// 字段：
+/// - `paths` / `operations`：OpenAPI 里的路径数与 operation 数；
+/// - `stubs`：stub→501 的 operation 数（照抄 T16 真源 `STUB_MARK`）；
+/// - `paths_list`：`METHOD path` 清单（**有序**，与 OpenAPI 一致）——门禁逐条比对，不只比数量；
+/// - `mounted_undocumented`：已挂路由但刻意不进 OpenAPI 的端点（人员域三个 stub）。
+pub fn rest_manifest() -> Value {
+    let doc = openapi_json();
+    let paths = doc["paths"].as_object().cloned().unwrap_or_default();
+    let mut paths_list: Vec<String> = Vec::new();
+    let mut operations = 0usize;
+    let mut stubs = 0usize;
+    for (p, item) in &paths {
+        if let Some(obj) = item.as_object() {
+            for (method, op) in obj {
+                if !op.is_object() {
+                    continue;
+                }
+                operations += 1;
+                let summary = op.get("summary").and_then(|s| s.as_str()).unwrap_or("");
+                if summary.contains(STUB_MARK) {
+                    stubs += 1;
+                }
+                paths_list.push(format!("{} {}", method.to_uppercase(), p));
+            }
+        }
+    }
+    paths_list.sort();
+    json!({
+        "paths": paths.len(),
+        "operations": operations,
+        "stubs": stubs,
+        // 把标记字符串本身也公布出去 ⇒ 门禁脚本**不用再手抄**「stub→501」这个字面量
+        // （同一事实两份实现的又一处：apidoc.rs 曾经也手抄过一份，现已改读 STUB_MARK）。
+        "stub_mark": STUB_MARK,
+        "paths_list": paths_list,
+        "mounted_undocumented": MOUNTED_UNDOCUMENTED
+            .iter()
+            .map(|(m, p)| format!("{} {}", m.to_uppercase(), p))
+            .collect::<Vec<_>>(),
+    })
+}
 // 选型理由（PLAN 阶段3 待决项「Next 服务选型」在此钉死为“不引入 Node 工具链”）：
 // 本机 node/npm 均不存在（实测 command not found），引入 Next/React 会让镜像构建依赖
 // 外网 npm registry + 宿主工具链；最小版的管理需求（建档/选人/时间线/文档上传/指标/检索）

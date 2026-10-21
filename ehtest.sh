@@ -18,11 +18,20 @@ test -x "$BIN" || { echo "GATE-FATAL-BIN $BIN"; exit 4; }
 if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/${PORT}" 2>/dev/null; then exec 3<&- 3>&-; g "G0 port ${PORT} free before run" n "another listener holds it — stale instance? pkill -x ehr-api"; exit 6; else g "G0 port ${PORT} free before run" y; fi
 
 echo "== Phase A · dry-run(先证参数真进配置,再开全量——D4教训的机制化)"
-# A1: --print-openapi exit=0 且 stdout 是可解析 JSON、paths≥16(dry分支不打 serve addr)
+# T16 · D-032 未销账⑩：路径数**不再硬编码 16**——从实现干跑清单取值。
+#   为什么：此前 16 这个数字散在 5 处（此脚本/mcp-e2e/container-smoke/tests/mcp.rs/两份 skill 文档），
+#   而真源（运行时 OpenAPI）就在同一份代码里 ⇒ 同一事实五份实现，加一条路由要同步改五处，
+#   漏一处就红，且红得看不出是「漏改」还是「真坏了」。现在：实现=真源，门禁从它取值。
+MANIFEST=$(EHR_HOME="$H" "$BIN" --print-rest-manifest </dev/null 2>"$WORK/manifest.err"); mrc=$?
+[[ $mrc -eq 0 ]] && ok=y||ok=n; g "A0 --print-rest-manifest exit=0 (derived path surface, not hardcoded 16)" "$ok" "rc=$mrc"
+EXP_PATHS=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["paths"])' <<<"$MANIFEST")
+EXP_OPS=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["operations"])' <<<"$MANIFEST")
+# A1: --print-openapi exit=0 且 stdout 是可解析 JSON(dry分支不打 serve addr)
 dryout=$(EHR_HOME="$H" "$BIN" --print-openapi </dev/null); drc=$?
 [[ $drc -eq 0 ]] && ok=y||ok=n; g "A1 dry-run exit=0" "$ok" "rc=$drc"
-python3 -c 'import json,sys; d=json.load(sys.stdin); ps=d["paths"]; sys.exit(0 if len(ps)>=16 and "/api/v1/persons/{pid}/documents/{sha}" in ps else 1)' <<<"$dryout" \
-  && ok=y||ok=n; g "A2 openapi.json ≥16 paths 含 documents/{sha} 模板" "$ok" "$(python3 -c 'import json,sys; print(len(json.load(sys.stdin)["paths"]))' <<<"$dryout")"
+# A2: openapi.json 的路径数必须**等于**派生清单的路径数（不再是 ≥16 的手抄快照）
+python3 -c 'import json,sys; d=json.load(sys.stdin); ps=d["paths"]; sys.exit(0 if len(ps)=='"$EXP_PATHS"' and "/api/v1/persons/{pid}/documents/{sha}" in ps else 1)' <<<"$dryout" \
+  && ok=y||ok=n; g "A2 openapi.json paths == derived manifest ($EXP_PATHS) 含 documents/{sha} 模板" "$ok" "$(python3 -c 'import json,sys; print(len(json.load(sys.stdin)["paths"]))' <<<"$dryout")"
 # A3: 未知参数必须即拒(D4-b 当年烧算力坑的机制守卫)
 "$BIN" --pool-workers 13 >/dev/null 2>&1; urc=$?
 [[ $urc -ne 0 ]] && ok=y||ok=n; g "A3 unknown arg rejected(ruc=$urc)" "$ok"
@@ -127,7 +136,17 @@ echo "== Phase F · serve 与 dry-run openapi 同源核验(D1:同一代码现场
 # D3修复后教训:F相dry也要EHR_HOME(main约定:dry同样要求home存在——校验不分分支,D4实测rc语义)
 live=$(EHR_HOME="$H" "$BIN" --print-openapi </dev/null | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["paths"]))' )
 liven=$(curl -fsS "$BASE/openapi.json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["paths"]))')
-[[ "$liven" == "$live" && "$liven" -ge 16 ]] && ok=y||ok=n; g "F1 dry-run paths == live serve paths ($liven, >=16) structural drift guard" "$ok" "dry=$live live=$liven"
+[[ "$liven" == "$live" && "$liven" == "$EXP_PATHS" ]] && ok=y||ok=n; g "F1 dry-run paths == live serve paths == derived manifest ($EXP_PATHS) structural drift guard" "$ok" "dry=$live live=$liven"
+# F2: 路径**名字序列**也必须逐条相等（不只数量）——「加了路由但名字写错」也能被抓到
+MAN_PATHS=$(python3 -c 'import json,sys; print("\n".join(sorted(json.load(sys.stdin)["paths_list"])))' <<<"$MANIFEST")
+LIVE_PATHS=$(curl -fsS "$BASE/openapi.json" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); out=[]
+for p,it in d["paths"].items():
+  for m in it:
+    if isinstance(it[m],dict): out.append(f"{m.upper()} {p}")
+print("\n".join(sorted(out)))')
+[[ "$LIVE_PATHS" == "$MAN_PATHS" ]] && ok=y||ok=n; g "F2 live openapi 路径清单逐条 == 派生清单（名字+集合）" "$ok" "$(diff <(echo "$MAN_PATHS") <(echo "$LIVE_PATHS") | head -3)"
 
 echo "== Phase G · labs 聚合(GET /persons/{pid}/labs = parser::aggregate() 的HTTP版，POC步骤07红线全套) =="
 # D6单一来源：本相样本与 poc/import_demo 同族(中文日期+参考区间+-H标记)。断言方向一律「下限」——

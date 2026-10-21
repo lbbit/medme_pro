@@ -403,13 +403,16 @@ async fn mcp_audit_matches_rest_audit_view() {
     assert_eq!(upper["count"], by_op["count"], "op filter must be case-insensitive: {upper}");
 }
 
-/// MCP 面不污染 REST 契约：paths 数不变（≥16），且未把 /mcp 塞进 OpenAPI。
+/// MCP 面不污染 REST 契约：paths 数与**派生清单**一致（不再硬编码 16），且未把 /mcp 塞进 OpenAPI。
+/// T16 · D-032 未销账⑩：硬编码的 16 是「快照不是判据」——加一条路由要连带改这里，漏改就红，
+/// 而红得看不出是漏改还是真坏了。改为从实现取值后，漏改根本不会发生。
 #[tokio::test(flavor = "multi_thread")]
 async fn mcp_route_does_not_disturb_rest_contract() {    let app = fixture("contract");
     let res = app.clone().oneshot(Request::builder().uri("/openapi.json").body(Body::empty()).unwrap()).await.unwrap();
     let doc: Value = serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap()).unwrap();
     let n = doc["paths"].as_object().unwrap().len();
-    assert!(n >= 16, "openapi paths regressed: {n}");
+    let expected = ehr_api::rest_manifest()["paths"].as_u64().unwrap() as usize;
+    assert_eq!(n, expected, "openapi paths must equal the derived manifest (not a hardcoded snapshot)");
     assert!(doc["paths"].as_object().unwrap().get("/mcp").is_none(), "/mcp must stay out of the REST contract doc");
 }
 

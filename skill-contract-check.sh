@@ -129,6 +129,27 @@ check_fields "audit.fields" "persons_scanned,count,entries,source,op,ts,person_i
 V=$(rpc '{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"get_audit","arguments":{"person":"00000000-0000-0000-0000-000000000000"}}}' | jq_ 'print(d["result"]["structuredContent"]["count"])')
 gate "audit.unknown_person_zero" "$V" "0"
 
+# 2c2) T16 · D-032 未销账⑩：**REST 面的路径数/operation 数**同样不许各处硬编码。
+#     实现=真源（--print-rest-manifest）⇒ 文档里写的数字由门禁核对（照抄 D-032 决策③：核对 > 消除）。
+#     文档数字此前散在 SKILL.md / rest-contracts.md / 5 个脚本里 ⇒ 同一事实多份实现。
+RMAN=$(EHR_HOME="$H" "$BIN" --print-rest-manifest 2>/dev/null)
+EXP_PATHS=$(echo "$RMAN" | jq_ 'print(d["paths"])')
+EXP_OPS=$(echo "$RMAN" | jq_ 'print(d["operations"])')
+RDOC="$ROOT/skills/medme-ehr/references/rest-contracts.md"
+if [ ! -f "$RDOC" ]; then echo "  FAIL 缺 rest-contracts.md"; fails=$((fails+1));
+else
+  DOC_PATHS=$(grep -oE '[0-9]+ *路径' "$RDOC" | head -1 | grep -oE '[0-9]+')
+  DOC_OPS=$(grep -oE '[0-9]+ *operation' "$RDOC" | head -1 | grep -oE '[0-9]+')
+  if [ -z "$DOC_PATHS" ]; then echo "  FAIL rest-contracts.md 未写「N 路径」"; fails=$((fails+1));
+  else gate "doc_rest_paths" "$DOC_PATHS" "$EXP_PATHS"; fi
+  if [ -z "$DOC_OPS" ]; then echo "  FAIL rest-contracts.md 未写「N operation」"; fails=$((fails+1));
+  else gate "doc_rest_operations" "$DOC_OPS" "$EXP_OPS"; fi
+  # SKILL.md 里的路径数也必须与实现一致（它是 agent 读到的第一手描述）
+  SK_PATHS=$(grep -oE '[0-9]+ *路径' "$SKILL" | head -1 | grep -oE '[0-9]+')
+  if [ -z "$SK_PATHS" ]; then echo "  FAIL SKILL.md 未写「N 路径」"; fails=$((fails+1));
+  else gate "skill_rest_paths" "$SK_PATHS" "$EXP_PATHS"; fi
+fi
+
 # 3) SKILL.md 与 tool-contracts.md 里写的错误码必须真的对得上
 for code in -32602 -32601 -32001 -32002 -32003; do
   grep -q -- "$code" "$SKILL" || grep -q -- "$code" "$REFS" || { echo "  FAIL 文档未载明 $code"; fails=$((fails+1)); }

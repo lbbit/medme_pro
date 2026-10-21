@@ -54,7 +54,23 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
-## 当前状态（2026-10-26 · **T15「MCP 工具数」三处硬编码→一处派生（`--print-mcp-tools`）· D-031 新坑②已销账**）
+## 当前状态（2026-10-26 · **T16「REST 路径面」五处硬编码→一处派生（`--print-rest-manifest`）· D-032 未销账⑩已销账**）
+
+- ✅ **T16 交付（消除「REST 有多少条路径」的五处硬编码漂移 · D-032 未销账⑩销账）**：①**真源 = 实现**（`ehr_api::rest_manifest()`，由运行时 OpenAPI 派生），新增干跑开关 **`ehr-api --print-rest-manifest`**（stdout = 机器可读 JSON：paths/operations/stubs/stub_mark/paths_list/mounted_undocumented；stderr = `[证据]` 行，dry-run 不落状态）⇒ 门禁与文档**从实现取值**；②**「16 路径 / 18 operation」此前硬编码在 5 处**（`ehtest.sh` / `mcp-e2e.sh` / `container-smoke.sh` / `tests/mcp.rs` / 两份 skill 文档）——**同一事实五份实现**，加一条路由要同步改五处，漏一处就红且**看不出是「漏改」还是「真坏了」**；现在**改一处**（实现），文档数字**由门禁核对**（照抄 D-032 决策③：核对 > 消除）；③**stub 判定也只留一处**（`ehr_api::STUB_MARK` 取代 `apidoc.rs` 里手抄的「stub→501」字面量），并把标记字符串本身也**公布**在清单里 ⇒ 连门禁脚本都不用再手抄它；④**已挂路由但刻意不进 OpenAPI**的人员域三端点（GET/PATCH/DELETE `/persons/{pid}`）也抽成共享表 `MOUNTED_UNDOCUMENTED`（原在 `tests/contract.rs` 手抄一份）⇒ 同一事实两份实现消除；⑤**`tests/contract.rs` 的守卫从「手抄 8 条端点」改为「从运行时 OpenAPI 派生全部 operation」**——原先那份手抄表**漏掉的端点完全不被守卫**（守卫看起来是绿的，实则漏了新端点）。
+- ✅ **证据链（缺一即不算交付）**：
+  - ①**`cargo test --all-targets` 66 门全绿**（原 62 + 新 `tests/rest_manifest.rs` **4 门**）：清单的 paths/operations **必须等于**运行时 OpenAPI 实际数（不是另一个手抄快照）；`paths_list` **逐条等于** OpenAPI 的 `METHOD path` 集合（名字与集合都对，不只数量）；`stubs` **== CONTRACT 表长度**（stub 端点数只有一个来源）；`mounted_undocumented` **== 共享表**。
+  - ②**`ehtest.sh` fails=0**（含**新门 A0**：`--print-rest-manifest` exit=0、**新门 F2**：live openapi 路径**名字序列**逐条 == 派生清单——不只数量，「加了路由但名字写错」也能抓到；A2/F1 由「≥16 快照」改为「== 派生值」）。
+  - ③**`mcp-e2e.sh` fails=0**（36 门）：`openapi_paths == derived manifest (16, not hardcoded)` + **新门 6b** `openapi_stubs == derived manifest (1)`（stub 计数也只有一个来源；标记字符串从清单取，脚本不再手抄「stub→501」）。
+  - ④**`skill-contract-check.sh` fails=0**（32 门）：**新增 3 门** `doc_rest_paths` / `doc_rest_operations` / `skill_rest_paths`——两份 skill 文档里写的路径数由**实现派生清单**核对。
+  - ⑤**门禁是「真门」的负向证据**：把 `SKILL.md` 的「16 路径」**故意改成「17 路径」** ⇒ 首跑 **`FAIL skill_rest_paths: got=17 want=16` / fails=1** ⇒ 复原后 **fails=0**（⇒ 门禁真会因漂移而红，不是「怎么都绿」）。
+  - ⑥**旧门禁全绿未被破坏**：`ehtest.sh`(34+) / `mcp-e2e.sh`(36) / `auth-e2e.sh` / `audit-e2e.sh` / `entries-e2e.sh` / `conds-e2e.sh` / `meds-e2e.sh` / `rebuild-e2e.sh` / `rebuild-lock-e2e.sh` / `skill-rest-check.sh` / `skill-contract-check.sh`(32) / `api-doc-check.sh`(8) / `web-e2e.sh`（起真服务复验，fails=0）**全 fails=0**。
+  - ⑦**零新依赖**：`ehr-api/Cargo.lock` 与 `Cargo.toml` **未改动**（依赖包数 **204** 不变，可验事实）。
+  - ⑧**dry-run 优先**：先跑库级 `cargo test --all-targets`（不起服务、不落状态）与 `--print-rest-manifest` 干跑渲染（`paths=16 operations=18 stubs=1`），再起真进程跑 e2e 与旧门禁复验。
+  - ⑨**参数/状态生效有证据**：`--print-rest-manifest` 是**新参数**⇒ ①传它 ⇒ stdout 出现 JSON 且 `[证据]` 行 `mode=dry-run(print-rest-manifest)`；②**不传它** ⇒ 走 serve 模式（参数真进判据，不是摆设）；③清单的 `paths_list` 与 live `/openapi.json` 的**名字序列逐字相等**（F2 门）；④**故意让文档漂移 ⇒ 门禁红**（见⑤）。
+- 🔄 **下一步**：①**stub 端点仍剩 1 个**：`PUT /documents/{sha}/extraction`（**新功能** ⇒ 需单独设计字段级 evidence 锚点）；②**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；③「家庭自测趋势」专用视图仍未做；④公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑤ghcr 包可见性仍 private；⑥真·第三方 MCP 客户端互通仍未验；⑦`.dcm`/OCR worker 未做；⑧**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在；⑨MCP 侧仍**无 resources/prompts** 能力；⑩**REST 面的路径数/operation 数已销账**（本轮）；⑪**`docs/API.md` 里的路径清单仍是生成时快照**（`api-doc-check.sh --write` 重新生成才更新，**手改会被 A3 打回**）；⑫**`ehr-api` 的人员域三端点（GET/PATCH/DELETE `/persons/{pid}`）仍是 501 且刻意不进 OpenAPI**——何时实装需单独设计。
+- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（`ehr-api/web/index.html` 编译期内嵌，无构建链）；目标验收②的 6 个 stub 端点已实装 5 个，**剩 `extraction` 一个**；`docs/API.md` 是**生成物**，改接口必须跑 `./api-doc-check.sh --write`，手改会被 A3 门禁打回；文档覆盖的是 **REST 面**，`/mcp` 的工具契约仍在 `skills/medme-ehr/references/tool-contracts.md`（该文档的工具数**已由门禁与实现核对**，见 T15）；**上游分类缺口**仍在（D-027 未销账⑧）；**上游审计口径缺口**（`audit_log()` 不展示手动条目的合成导入）已在 D-030 如实标注（**不造事件补齐**）。
+
+### 历史状态（2026-10-26 · **T15「MCP 工具数」三处硬编码→一处派生（`--print-mcp-tools`）· D-031 新坑②已销账**）
 
 - ✅ **T15 交付（消除「MCP 有多少个工具」的三处硬编码漂移 · D-031 未销账⑨已销账）**：①**工具清单的单一事实来源 = 实现**（`mcp::tool_schemas()`），派生两个出口：`mcp::tool_names()`（名字清单）+ `mcp::tool_manifest()`（机器可读 JSON：`count/read/write/names/read_names/write_names`）；②**新增干跑开关 `ehr-api --print-mcp-tools`**（stdout = 机器可读 JSON，stderr = `[证据]` 行，dry-run 不落状态）⇒ 门禁与测试**从实现取值**；③**写侧工具名单也只留一处**（`mcp::WRITE_TOOLS`），**鉴权分权改读它**（`Scope::Ro::allows_tool` 原先在 `auth.rs` 里另写了一份 `matches!` —— 同一事实两份实现，正是本轮要消灭的东西；且**上次加 `get_audit` 时分权表没同步，纯粹因为它恰好是读侧工具**——鉴权是安全面，不能靠「恰好」）；④**文档数字保留但由门禁核对**（`tool-contracts.md` 标题「共 12 / 读侧 10 / 写侧 2」与 `SKILL.md`「12 个工具」是人读上下文，**不删除**，改由 4 门核对：文档写「12」而实现是 13 ⇒ 门禁红）；⑤**「加一个工具」的改动面从四处降为两处**（实现 + 契约文档），漏改立刻红在「文档与实现不一致」上，而不是红在某个无关断言上。
 - ✅ **证据链（缺一即不算交付）**：
