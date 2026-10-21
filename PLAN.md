@@ -54,7 +54,24 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
-## 当前状态（2026-10-26 · **T23「文档面」也纳入机器核对——`rest-contracts.md` 的字段承诺必须与真响应一致，9 处真漂移已修 · D-040 落地**）
+## 当前状态（2026-10-26 · **T24「产物新鲜度」纳入机器核对——门禁跑的那份二进制必须不比源码旧，两份产物必须逐字一致 · D-041 落地**）
+
+- ✅ **T24-① 接手工作树的第一件事仍是「让它编译并跑一遍」**（D-039 新坑② 纪律沿用）：`cd ehr-api && cargo test --all-targets` ⇒ **83 门全绿**（`mcp` 15 / `entries` 6 / `extraction` 5 / `rest_manifest` 5 / `response_shape` 4 / `auth` 7 / `conds` 4 …）⇒ 确认**工作树可编译可跑**，再谈别的。
+- ✅ **T24-② 缺口定位（D-040 未销账②）**：`ehr-api/target/{debug,release}/ehr-api`（本地构建目录）与 `~/medme-shared-target/{debug,release}/ehr-api`（**多数 e2e 脚本实际跑的那份**：`EHR_BIN` / `CARGO_TARGET_DIR` 的默认值都指向后者）⇒ **两份产物靠人工 `cp` 同步，没有任何门** ⇒ 改完 Rust 代码忘了同步 ⇒ **门禁静默跑旧产物、门是绿的、测的却是上一轮代码**（D-035 新坑③「先问它跑的是哪一份产物」的正面处置）。
+- ✅ **T24-③ 新门 `artifact-freshness-check.sh`（+ 内层 `artifact_freshness_check.py`）——把「在跑哪一份产物」变成机器判据**：判据**两条独立方向**：①**新鲜度**：产物 mtime 必须**不早于**最新源码 mtime（源码集合 = 本仓 `ehr-api/src` + `ehr-api/tests` + `Cargo.toml` + `Cargo.lock` **以及上游只读依赖 `upstream-medme/packages` 的全部 `.rs`/`.toml`**——上游改了同样会让产物过期）；②**两份一致**：同一 profile 下 local 与 shared 产物必须 **sha256 逐字相等**（= 没忘了同步、也没只同步一半）。⇒ 门**打印产物路径 + 构建时间 + sha256 + 源码最新时间**，让人一眼看出在跑哪一份。
+  - **为什么用 mtime 而不是内容哈希**：Rust 产物里**没有嵌入源码哈希**，而 cargo 本身也用 mtime 做增量判定 ⇒ 与 cargo 语义一致（1s 容差，防文件系统时间戳精度）。
+  - **为什么 sha256 判据必须独立存在**：mtime 只能判「新旧」，判不了「**同一份**」——把 shared 产物覆盖成另一份**新**的二进制，mtime 仍是最新的 ⇒ 只有内容哈希能抓到。
+- ✅ **T24-④ 门是「真门」的负向证据（本轮实撞 2 次，每次复原）**：①`touch ehr-api/src/lib.rs`（让源码比产物新）⇒ 门 **rc=1**，逐条红 `FAIL debug/local 产物比源码旧（产物=2026-10-21 23:14:04 源码=2026-10-22 02:03:18）⇒ 门禁会静默跑旧产物`（debug/local / debug/shared / release/local / release/shared **四条全红**）⇒ 复原 mtime ⇒ **rc=0**；②往 `~/medme-shared-target/release/ehr-api` 追加 1 字节（模拟「忘了同步」）⇒ 门 **rc=1**，红 `FAIL release 两份产物 sha256 不一致 ⇒ 忘了同步（local=… shared=…）` ⇒ 复原 ⇒ **rc=0**。
+- ✅ **证据链（缺一即不算交付）**：
+  - ①**`cargo test --all-targets` 83 门全绿**（本轮**未改任何 Rust 代码**；`ehr-api/Cargo.toml` / `Cargo.lock` **未改动** ⇒ **零新依赖**）。
+  - ②**新门绿态输出可验**：`源码最新 mtime = 2026-10-21 23:14:01 (ehr-api/src/lib.rs)`；`release/shared` = `/home/lbb/medme-shared-target/release/ehr-api`，`sha256=bf2c42be…deb6d7`，与 `release/local` **逐字相等** ⇒ **本轮确实没有「跑旧产物」的隐患**（当前源码最新 10-21 23:14，产物 10-22 01:01/01:02）。
+  - ③**门禁全量复跑 15 个脚本 fails=0**：`artifact-freshness-check.sh`（**新**）/ `doc-contract-check.sh` / `api-doc-check.sh` / `skill-contract-check.sh` / `skill-rest-check.sh` / `mcp-e2e.sh` / `auth-e2e.sh` / `entries-e2e.sh` / `conds-e2e.sh` / `meds-e2e.sh` / `audit-e2e.sh` / `ehtest.sh` / `rebuild-e2e.sh` / `rebuild-lock-e2e.sh` / `web-e2e.sh`。
+  - ④**后台卡死检查（D-010）**：**无 cargo/rustc 残留**；常驻只有两个 **10-21 的陈旧** `ehr-api` 进程（`:18999` / `:18991`）与两个 docker 容器（`:8585` 默认 / `:8587` OCR）⇒ **非卡死**；本轮**无需同步产物**（门已证明两份一致且不比源码旧）。
+  - ⑤**零新依赖**：本轮只新增**一个门禁脚本**及其内层实现（+ 本文件/决策记录的回写），**未动任何 Rust 代码**。
+- 🔄 **下一步**：①**`SKILL.md` / `tool-contracts.md` 的字段面尚未纳入 D-040 那道门**（该门只核 `rest-contracts.md`）⇒ 现成思路可复用；②**新鲜度门本身也应被纳入 CI/统一入口**（当前 15 个脚本是手工逐个跑，**没有「一键跑全部门禁」的入口** ⇒ 漏跑一个脚本就等于没那道门）；③**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；④「体检报告 PDF 列布局 labs=0」缺口：extraction 管线已就位，缺的是「把 PDF 送进 LLM」这一步的**端到端脚本**；⑤「家庭自测趋势」专用视图仍未做；⑥公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token（当前 OCR 编排 `EHR_API_TOKENS` 为空 ⇒ **放行模式**，仅本地）；⑦ghcr 包可见性仍 private（OCR 镜像也尚未推 GHCR）；⑧真·第三方 MCP 客户端互通仍未验；⑨`.dcm`/DICOM worker 未做（能力清单已如实标 `enabled=false`）；⑩**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在；⑪MCP 侧仍**无 resources/prompts**；⑫`docs/API.md` 是**生成物**，改接口须跑 `./api-doc-check.sh --write`；⑬人员域三端点仍 501 且刻意不进 OpenAPI；⑭**OCR 镜像未推 GHCR / 未纳入 CI**；⑮`container-smoke.sh` 本轮**未跑**（运行中的容器是旧镜像 ⇒ 须先重建镜像才有意义）。
+- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（编译期内嵌，无构建链）；`docs/API.md` 是**生成物**；文档覆盖 **REST 面**，`/mcp` 的工具契约在 `skills/medme-ehr/references/tool-contracts.md`；**上游分类缺口**仍在；**上游审计口径缺口**已在 D-030 如实标注（**不造事件补齐**）；**OCR 镜像尚未推 GHCR、未纳入 CI**；**「手抄实现细节」残留**已治到 **stub 清单 / REST 路径 / 响应形状 / 文档字段 / 产物新鲜度** 五个面——**「MCP 工具契约字段面」仍无门**；**「一键跑全部门禁」的统一入口仍无**。
+
+### 历史状态（2026-10-26 · **T23「文档面」也纳入机器核对——`rest-contracts.md` 的字段承诺必须与真响应一致，9 处真漂移已修 · D-040 落地**）
 
 - ✅ **T23-① 接手工作树的第一件事是「让它编译并跑一遍」（D-039 新坑② 的正面执行）**：工作树里躺着**上一轮遗留的 T23 草稿**（`doc-contract-check.sh` + `doc_contract_check.py` 两个**未跟踪**文件 + `rest-contracts.md` 的**已修改**但**未提交** diff）⇒ 按纪律**先跑**：`cargo test --all-targets` ⇒ **83 门全绿**（`response_shape` 4 / `rest_manifest` 5 / `mcp` 15 / `extraction` 5 / `entries` 6 …）⇒ 确认**工作树可编译、可跑**，再谈别的（**不把上一轮的绿灯误当成本轮现状**）。
 - ✅ **T23-② 新门 `doc-contract-check.sh`（+ 内层 `doc_contract_check.py`）——把「文档面」从「人读文档里的手抄实现细节」变成机器判据**：①**它自己起真进程**（临时 `EHR_HOME` + `trap cleanup`）、**真造数据**（建档 / 上传 3 份不同类型原件：检验·处方·诊断 / 写 3 类手动条目：自测·笔记·动作事件 / PUT 一次 extraction）⇒ **不是解析源码、不是手抄端点清单**；②判据**三条独立方向**：**正向**（文档承诺的字段名必须真出现在真响应任意层级）＋**反向**（真响应的键必须被文档提及）＋**端点覆盖**（OpenAPI 每个 operation 都有一行）；③**枚举值 vs 子字段名不靠猜**——括号里的名字**只有在 OpenAPI 属性表里出现**才按子字段名必查，否则按枚举值跳过（**D-011 家族纪律：门不能有自己的隐含猜测**）；④**自由 JSON 载荷内部跳过**（`payload`/`text`/`raw`/`json`/`snippet`/`detail` ⇒ 用户数据不是服务端契约）。
