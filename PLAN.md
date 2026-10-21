@@ -271,3 +271,34 @@
 - 用途:T3 SKILL 验收 = Copilot CLI 拿真实检查单走"建档→上传→OCR/结构化→化验趋势→AI解读"全链路;
   PDF 文本层可直接测 ingest;图片样本检验 OCR feature 决策(开/关的实测依据)。
 - ⚠️ 红线:testres 含个人健康隐私+key,任何日志/报告引用须脱敏;绝不出现在 git/容器镜像/公开渠道。
+
+## 真实场景测试报告(2026-10-21,用户要求"贴近真实使用场景"后首轮)
+
+### A. 真实体检PDF全链路(testres/lbb/2021_0907.pdf, 21页,1.9MB)
+| 门 | 结果 |
+|---|---|
+| multipart上传→ingest | ✅ doc_type=surgery(分类不理想→见缺口①), text_indexed=true |
+| 文本层抽取 | ✅ 11370字进库,search「总胆红素」FTS命中带高亮;「脂肪肝」等临床词命中 |
+| CAS完整性 | ✅ 上传1,923,826B 回读sha256逐字节一致;kill -9 容器重启后再次回读仍一致 |
+| labs聚合 | ❌ **series=0** —— PDF竖排「名称/缩写/值/区间/单位」列布局,上游extract_labs不识别(缺口①) |
+| timeline日期 | ✅ 2021-09-07 从文件名解析;doc_type=surgery 而非体检报告(分类缺口②) |
+
+### B. 图片检查单(zmf/血常规.jpg) 
+- ❌ 501 "needs dicom/ocr worker (stage-3+)" —— 已知边界,如实拒绝而非假成功 ✅;OCR worker立项依据补实
+
+### C. 容器韧性
+- ✅ kill -9 → compose up 自愈 → persons/timeline/CAS 全部完好(事件溯源+CAS设计兑现)
+
+### D. 全部既有门禁回归(容器+本机双跑)
+- ✅ ehtest(A~I) / auth / entries / audit / rebuild-lock / web / mcp 全部 fails=0
+
+### E. agent-e2e(Copilot CLI 真 agent 查档)
+- ⚠️ exit=124 超时300s —— LiteLLM:4001 对长prompt间歇500/超时(Strata引擎忙,非skill/服务问题;
+  直接curl LiteLLM 同样超时)。skill 本身语法/契约已由 contract-check 守卫;真agent验收待引擎空闲重跑
+
+### 缺口登记(按影响排序)
+1. **体检报告PDF列布局的labs抽取为0** —— 真实体检报告是核心输入之一;上游extract_labs面向化验单
+   (横排「项目 值 范围 单位」),竖排列布局不识别。方案:a)LLM结构化抽取(extraction管线,testres
+   网关可用)→作为extraction_added路径的真实用例; b)上游提PR支持列布局。倾向a。
+2. doc_type分类:体检报告→surgery(上游classify词典缺「健康体检」类目)→随1的extraction修正或上游PR
+3. OCR worker缺位使图片单501(如实拒绝✅但功能缺):若用户常用手机拍照上传,优先级应提前——请用户定
