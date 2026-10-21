@@ -359,3 +359,12 @@
 - **labs 聚合闭环兑现**: 23→40 序列/41 点(含 flag H/L)；**跨年趋势首次成线**——总胆固醇 2025-08-05 5.9(H) → 2025-09-22 1.23(N)、低密度 3.9、甘油三酯 1.43，全部带 docref 溯源
 - ehtest A~I 容器内复跑 fails=0（OCR 不破坏既有门禁）
 - 缺口收窄：原「缺口① PDF列布局 labs=0」仍待 LLM extraction；「缺口③ OCR worker」**已销账**
+
+## 真实场景测试第三轮(2026-10-26 · LLM extraction 端点实装+真网关全链路)——图片单→结构化→趋势 闭环 ✅
+
+- **`PUT /persons/{pid}/documents/{sha}/extraction` 从 stub→501 毕业**(D-023 设计落地:deid schema v1 校验 + 字段级 evidence 闸 + append-only ExtractionAdded 事件 + result_json→CAS)
+- **真网关(space-bunny,直出content)抽取真 OCR 文本**: labs=23 条全部进库,doc_date 原样保留 `2025/09/22`
+- **evidence 闸真实工作**: 首跑 doc_date 写成 `2025-09-22`(LLM 规范化了)→unverified=7 精确点名;改 prompt 要求逐字复制后→unverified_fields=[] 且值正确
+- **mode 语义实测**: image 模式验不过→unverified 标记(6个,charting-safety 设计内);text 模式→rejected=1(白细胞值 4.35 vs 原文不符则清字段)——两档行为都符合上游红线
+- **labs 聚合吃上 extraction**: 白细胞 4.35(N) 从 extraction 进聚合,unverified:false
+- 待销账: ①unverified_fields 列表为空但 unverified=6 的计数粒度(上游只有 top_field 进列表,内部字段只计数——如实记录);②体检 PDF 列布局同样可用此管线(labs=0 缺口对齐);③extraction 提示词进 SKILL.md

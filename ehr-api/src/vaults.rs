@@ -827,3 +827,76 @@ mod tests {
         assert!(a.to_string_lossy().contains("deadbeef"), "内容哈希应留在名字里（便于定位）");
     }
 }
+
+// ---- 写侧：LLM 结构化抽取回写（D-023；API-DESIGN「PUT /documents/{sha}/extraction」落地）----
+/// 请求体：result_json = LLM 输出的 deid schema v1 JSON（labs/meds/diagnoses，字段须为**原文逐字子串**——
+/// 上游 deid::verify 红线）。backend/model_version/mode 由调用方如实申报，服务端不猜(D4)。
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct ExtractionNew {
+    pub result_json: String,
+    pub backend: String,        // 如 "llm-http"
+    pub model_version: String,  // 如 "1p_deepseek-v4.1-flash"
+    #[serde(default = "default_mode")]
+    pub mode: String,           // "text"|"image"（deid schema 的 Mode）
+}
+fn default_mode() -> String { "text".into() }
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct ExtractionReply {
+    pub content_hash: String,     // = docref（= 文档 source_file sha256）
+    pub document_id: i64,
+    pub result_hash: String,      // result_json 在 CAS 的内容哈希（重跑=再 append，覆盖式引用不替代）
+    pub schema: i32,
+    /// 上游 deid::parse_extraction+verify 结果：verified=true ⇒ 字段级证据闸全过
+    pub verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify_detail: Option<serde_json::Value>,
+    pub labs_count: usize,
+    pub meds_count: usize,
+    pub diagnoses_count: usize,
+}
+
+/// 校验并落库一条 LLM 抽取结果。**两道闸都过才写**：
+/// ① `deid::parse_extraction`（schema 形状 + 字段级 evidence 逐字子串校验）；
+/// ② result_json 非空解析体（空 labs/meds/diagnoses 允许——阴性文档也是有效抽取）。
+/// verified=false 时也落库(事件层 append-only 哲学：先留痕再修)——但 **unverified 项在
+/// aggregate 图表侧已带 `unverified:true` 标记**（上游 charting-safety 设计），消费端可辨。
+pub fn add_extraction(vault: &Vault, sha: &str, e: ExtractionNew) -> Result<ExtractionReply> {
+    use deid::{parse_extraction, verify as deid_verify, Mode};
+    anyhow::ensure!(is_sha(sha), "malformed sha256");
+    // document 必须存在且 source_file_hash==sha —— 防「给 A 文档写 B 文档的抽取」错挂
+    let (doc, sf) = resolve_doc_ref(vault, sha)?
+        .ok_or_else(|| anyhow::anyhow!("no document for sha {sha}"))?;
+    let parsed = parse_extraction(&e.result_json)
+        .map_err(|err| anyhow::anyhow!("result_json fails deid schema v1: {err}"))?;
+    // 字段级 evidence 闸(上游红线)：每个字符串字段必须是原文逐字子串。source_text = 文本层全文。
+    let mode = match e.mode.as_str() { "image" => Mode::Image, _ => Mode::Text };
+    let src_text = vault.ocr_text(doc.id).unwrap_or_default();
+    let v = deid_verify(parsed, &src_text, mode);
+    let verified = v.rejected == 0 && v.unverified == 0;
+    let verify_detail = serde_json::json!({
+        "rejected": v.rejected, "unverified": v.unverified,
+        "unverified_fields": v.unverified_fields,
+    });
+    let schema = 1i32; // deid schema v1 = labs/meds/diagnoses（facts 属 v2，暂不发）
+    let result_hash = core_model::cas::sha256_hex(e.result_json.as_bytes());
+    vault.add_extraction(core_model::NewExtraction {
+        document_id: doc.id,
+        backend: e.backend,
+        model_version: e.model_version,
+        mode: e.mode,
+        schema,
+        result_json: e.result_json,
+    }).map_err(|err| anyhow::anyhow!("add_extraction: {err}"))?;
+    Ok(ExtractionReply {
+        content_hash: sf.content_hash,
+        document_id: doc.id,
+        result_hash,
+        schema,
+        verified,
+        verify_detail: Some(verify_detail),
+        labs_count: v.extraction.labs.len(),
+        meds_count: v.extraction.meds.len(),
+        diagnoses_count: v.extraction.diagnoses.len(),
+    })
+}

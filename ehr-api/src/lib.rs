@@ -566,7 +566,44 @@ macro_rules! not_implemented {
         }
     };
 }
-not_implemented!(stub_extraction, "extraction write: pending agent flow");
+/// D-023 实装（此前 stub→501 毕业）：LLM 结构化抽取回写。
+/// result_json 必须是 deid schema v1（字段级 evidence = 原文逐字子串，上游 deid::verify 红线）。
+/// verified=false 仍落库（append-only，消费端带 unverified 标记可辨），但回执如实报告。
+#[derive(utoipa::IntoParams)]
+#[into_params(parameter_in = Path)]
+pub struct ShaPath { pub sha: String }
+
+#[utoipa::path(
+    put, path = "/api/v1/persons/{pid}/documents/{sha}/extraction",
+    tag = "ehr", request_body = vaults::ExtractionNew, responses(
+        (status = 200, description = "extraction stored", body = vaults::ExtractionReply),
+        (status = 400, description = "malformed sha or result_json fails deid schema"),
+        (status = 404, description = "no document for sha"),
+    )
+)]
+async fn put_document_extraction(
+    State(st): State<Arc<AppState>>,
+    AxPath((pid, sha)): AxPath<(String, String)>,
+    body: String,
+) -> Result<Json<vaults::ExtractionReply>, ApiError> {
+    // 手动反序列化(与 mcp_endpoint 同理：泛型 Json extractor 与本路由组合 Handler bound 冲突)
+    let body: vaults::ExtractionNew = serde_json::from_str(&body)
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("bad json body: {e}")))?;
+    if body.result_json.trim().is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "result_json must not be empty".into()));
+    }
+    let _serial = vaults::LockToken::acquire(&pid); // 写侧：与上传同一把「每人串行」锁
+    tokio::task::block_in_place(|| {
+        require_person(&st, &pid)?;
+        let vault = vaults::open_person_vault(&st.home, &pid).map_err(ApiError::from)?;
+        let reply = vaults::add_extraction(&vault, &sha, body).map_err(|e| match e.to_string().contains("no document") {
+            true => ApiError(StatusCode::NOT_FOUND, e.to_string()),
+            false => ApiError(StatusCode::BAD_REQUEST, e.to_string()),
+        })?;
+        tracing::info!(person = %pid, sha = %sha, verified = reply.verified, "extraction stored");
+        Ok(Json(reply))
+    })
+}
 // 人员域三 stub：路由即契约(tests MOUNTED 表守卫)。刻意不进 CONTRACT/openapi——{pid} 模板与已文档化的
 // /persons(get+post)同 path 不同 op，utoipa derive 无法拆分挂载；待 GET/PATCH/DELETE 实装时一并入文档。
 not_implemented!(stub_person_detail, "person detail+profile summary: pending profile::materialize wiring");
@@ -588,7 +625,7 @@ not_implemented!(stub_person_delete, "archive person(tombstone): pending registr
         (name = "entries", description = "写侧：append-only 条目与文档上传（未实现端点先挂契约，现返回501）")
     ),
     paths(healthz, get_capabilities, list_persons, create_person, get_timeline, get_search, get_labs, get_medications, get_conditions, upload_document, list_documents,
-          get_document_detail, get_document_original,
+          get_document_detail, get_document_original, put_document_extraction,
           get_measurements, post_self_measurement, post_note, post_profile_event,
           get_audit),
     components(schemas(Person, PersonNew, vaults::TimelineItem, vaults::SearchItem, vaults::UploadReply,
@@ -910,7 +947,7 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/persons/{pid}/entries/self-measurement", post(post_self_measurement)) // D-028 实装毕业(此前 stub→501)
         .route("/persons/{pid}/entries/note", post(post_note)) // D-028 实装毕业(此前 stub→501)
         .route("/persons/{pid}/entries/profile-event", post(post_profile_event)) // D-028 实装毕业(此前 stub→501)
-        .route("/documents/{sha}/extraction", put(stub_extraction))
+        .route("/persons/{pid}/documents/{sha}/extraction", put(put_document_extraction)) // D-023 实装毕业(API-DESIGN 全路径含 pid)
         .route("/audit", get(get_audit)) // D-030 实装毕业(此前 stub→501；vault 侧复用上游 audit_log()，registry 侧读原始事件)
         .with_state(st.clone());
 

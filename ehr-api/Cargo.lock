@@ -1060,6 +1060,7 @@ dependencies = [
  "axum",
  "chrono",
  "core-model",
+ "deid",
  "http-body-util",
  "ocr",
  "parser",

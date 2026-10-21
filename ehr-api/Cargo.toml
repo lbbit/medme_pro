@@ -37,6 +37,7 @@ ocr = ["dep:pipeline", "dep:ocr"]
 [dependencies]
 core-model = { path = "../upstream-medme/packages/core-model" }
 parser     = { path = "../upstream-medme/packages/parser" }
+deid       = { path = "../upstream-medme/packages/deid" }
 # T-OCR(D-034): 图片检查单 OCR 落地 —— pipeline 带 ocr 的 ingest 全功能版(PP-OCRv5 ONNX)。
 # ocr 的 `engine` feature 链 oar-ocr(ONNX Runtime 静态链,build 期取二进制);模型文件运行期
 # 自动下载到 OAR_HOME(~/.oar)。镜像体积/首启下载是已知代价(BUILD-NOTES 坑表跟踪)。
