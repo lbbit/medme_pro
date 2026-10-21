@@ -186,7 +186,10 @@ fn call_tool(st: &Arc<AppState>, id: Value, name: &str, args: &Value) -> Value {
                 .into_iter()
                 .map(vaults::TimelineItem::from)
                 .collect();
-            Ok(json!({ "person_id": pid, "count": items.len(), "items": items }))
+            // D-038：**复用 REST 面的同一个信封 struct**（不再手写一份 `json!` 拼装）
+            // ⇒ REST 与 MCP 两侧的形状**不可能分叉**（D2：一个语义只允许一处实现）。
+            serde_json::to_value(vaults::TimelineReply { count: items.len(), items, person_id: pid.clone() })
+                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
         }
         Prepared::Search { ref pid, ref q, limit } => {
             require_person(st, pid)?;
@@ -197,7 +200,10 @@ fn call_tool(st: &Arc<AppState>, id: Value, name: &str, args: &Value) -> Value {
                 .into_iter()
                 .map(vaults::SearchItem::from)
                 .collect();
-            Ok(json!({ "person_id": pid, "q": q, "count": items.len(), "items": items }))
+            serde_json::to_value(vaults::SearchReply {
+                count: items.len(), items, person_id: pid.clone(), q: q.clone(),
+            })
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
         }
         Prepared::Labs { ref pid } => {
             require_person(st, pid)?;
@@ -238,14 +244,16 @@ fn call_tool(st: &Arc<AppState>, id: Value, name: &str, args: &Value) -> Value {
             // D-034 未销账⑫：**复用同一份** `capabilities::capability_manifest()`
             // （与 REST `GET /api/v1/capabilities` 逐字同源）⇒ 只吃 MCP 的宿主
             // 也能判断「我的文件能不能传」，不必猜、不必看日志。
-            Ok(capabilities::capability_manifest())
+            serde_json::to_value(capabilities::capability_manifest())
+                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
         }
         Prepared::Documents { ref pid } => {
             require_person(st, pid)?;
             let vault = vaults::open_person_vault(&st.home, pid)?;
             let items: Vec<vaults::DocumentListItem> = vaults::list_document_items(&vault)
                 .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            Ok(json!({ "person_id": pid, "count": items.len(), "items": items }))
+            serde_json::to_value(vaults::DocumentListReply { count: items.len(), items, person_id: pid.clone() })
+                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
         }
         Prepared::DocumentDetail { ref pid, ref sha } => {
             require_person(st, pid)?;

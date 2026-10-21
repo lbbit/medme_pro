@@ -47,11 +47,10 @@ fn capability_manifest_agrees_with_actual_ingest_behavior() {
     for ext in ["png", "jpg", "jpeg", "tiff", "tif", "dcm", "exe"] {
         let name = format!("probe.{ext}");
         let r = ehr_api::vaults::ingest_upload(&vault, &name, fake_png);
-        let accepted = man["accepted_exts"]
-            .as_array()
-            .unwrap()
+        let accepted = man
+            .accepted_exts
             .iter()
-            .any(|x| x.as_str() == Some(ext));
+            .any(|x| x == ext);
         match r {
             Ok(_) => assert!(accepted, "ext {ext} 被接受，但清单说它不在 accepted 里"),
             Err(e) => {
@@ -103,7 +102,11 @@ async fn capabilities_endpoint_matches_library_manifest() {
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(v, ehr_api::capabilities::capability_manifest());
+    // D-038：清单已是**显式建模的 struct**（不再是 `json!` 拼的 `Value`）
+    // ⇒ 比较方式改为「两者都序列化成 Value 再比」——仍是**逐字相等**的判据，
+    //    但不再依赖「Value 能和 struct 比」这种不存在的 trait 实现。
+    let man = serde_json::to_value(ehr_api::capabilities::capability_manifest()).unwrap();
+    assert_eq!(v, man);
     // 关键事实对调用方可见：ocr 引擎有没有、哪些类型被拒。
     assert!(v["ocr_available"].is_boolean());
     assert!(v["accepted_exts"].is_array());

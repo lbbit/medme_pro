@@ -31,7 +31,7 @@ Base：`$EHR_API_BASE/api/v1`（默认 `http://127.0.0.1:8585/api/v1`）。
 | `POST /persons/{pid}/entries/self-measurement` | 写一条自测记录（body: `values[]`=`analyte_key`/`value`/`unit`；`taken_at` 可选） | 201 + `document_id`/`content_hash`/`doc_type`/`title`/`taken_at`/`deduped`；不可能的值 ⇒ **400**（带原因） |
 | `POST /persons/{pid}/entries/note` | 写一条纯文本笔记（body: `text`；`taken_at` 可选） | 201 + 同上回执 |
 | `POST /persons/{pid}/entries/profile-event` | 写一条病程动作日志（body: `kind`/`package`/`at`(YYYY-MM-DD 事件日)/`payload` 对象） | 201 + 同上回执 |
-| `PUT /documents/{sha}/extraction` | 尚未实装 | **501** |
+| `PUT /persons/{pid}/documents/{sha}/extraction` | **写侧**：回写 LLM 结构化抽取结果（body: `result_json`(deid schema v1 JSON)/`backend`/`model_version`/`mode`(`text`\|`image`)/`schema`(默认 1)）。**字段级 evidence 闸**：每条字段须是原文逐字子串，判假的字段被清空/标 `unverified`；**落库的是校验后的 extraction**（未经核验的模型输出进不了真相层） | 200 + `content_hash`/`document_id`/`result_hash`/`schema`/`verified`/`verify_detail`(`rejected`/`unverified`/`unverified_fields`)/`labs_count`/`meds_count`/`diagnoses_count` |
 | `GET /audit` | 审计视图（**两层真相层**，口径分层不假装只有一层）：`source=registry`（人员主数据：建档/改档/归档，**不折叠**）+ `source=vault`（上游内核事件日志：导入/导出/分享/删除，**复用上游 `audit_log()` 判据**）。可 `?person=&op=` 过滤 | `persons_scanned`/`count`/`entries[]`：`source`/`op`/`ts`/`person_id`/`detail`/`sha256`（registry 侧无 sha256；vault 侧为原件内容哈希） |
 | `GET /` | Web 管理端最小版（同源单文件 HTML） | HTML |
 | `GET /openapi.json` | OpenAPI 文档 | paths=17 / operations=19 |
@@ -44,7 +44,7 @@ Base：`$EHR_API_BASE/api/v1`（默认 `http://127.0.0.1:8585/api/v1`）。
 | 400 | 参数非法（缺 `q`、坏 `limit`、坏 sha、空上传、未知扩展名之外的多文件、**不可能的自测值**、坏 `kind`/日期） | 改参数后重试 |
 | 401 | 缺/错 token | 换 `EHR_API_TOKEN`（别重试打转） |
 | 404 | 查无此人 / 无该文档 | 换人或向用户确认 |
-| 501 | 该扩展名本构建接不了（图片需 OCR 引擎、`.dcm` 需 dicom worker——**先查 `GET /capabilities` 的 `rejected_exts`**，里面有 `reject_reason` 写明怎么开），或该路径尚未实装（现仅 `extraction`） | 换 `accepted_exts` 里的类型，或按 `reject_reason` 指示开启对应能力 |
+| 501 | 该扩展名本构建接不了（图片需 OCR 引擎、`.dcm` 需 dicom worker——**先查 `GET /capabilities` 的 `rejected_exts`**，里面有 `reject_reason` 写明怎么开） | 换 `accepted_exts` 里的类型，或按 `reject_reason` 指示开启对应能力 |
 | 500 | 内部错误（含 CAS 完整性不符 = 投毒告警） | 告知用户稍后再试 |
 
 ## 不变量（读数据时必须遵守）

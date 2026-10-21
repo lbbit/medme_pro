@@ -81,13 +81,17 @@ PY
 [ $? -eq 0 ] && ok "A4 文档覆盖 OpenAPI 全部端点" || bad "A4 文档漏端点"
 
 # A5 文档必须显式标注 stub 端点（D5：状态码不许粉饰）
-python3 - "$HOME_TMP/openapi.json" "$HOME_TMP/gen.md" <<'PY'
+# D-021：「stub→501」字面量**不再手抄**——从实现派生清单取 `stub_mark`
+# （同一事实两份实现的又一处：改标记串时不必同步改本脚本）。
+STUB_MARK=$("$BIN" --print-rest-manifest 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["stub_mark"])')
+python3 - "$HOME_TMP/openapi.json" "$HOME_TMP/gen.md" "$STUB_MARK" <<'PY'
 import json,sys
 doc=json.load(open(sys.argv[1])); md=open(sys.argv[2],encoding='utf-8').read()
+mark=sys.argv[3]
 stubs=[]
 for p,item in doc["paths"].items():
     for m,op in item.items():
-        if isinstance(op,dict) and "stub→501" in (op.get("summary") or ""): stubs.append(f"{m.upper()} {p}")
+        if isinstance(op,dict) and mark in (op.get("summary") or ""): stubs.append(f"{m.upper()} {p}")
 print("stub endpoints=%d" % len(stubs))
 bad=[s for s in stubs if f"`{s}`" not in md or "stub" not in md]
 for b in bad: print("UNMARKED",b)

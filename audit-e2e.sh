@@ -108,11 +108,15 @@ echo "counts: all=$ca person_a=$cb op_create=$cc op_导入=$cd_ unknown_person=$
 
 echo "== 6) 契约一致：OpenAPI 里是**真 operation**（非 stub→501）+ typed schema =="
 curl -fsS "$BASE/openapi.json" -o "$HOME_DIR/openapi.json"
-OC="$HOME_DIR/openapi.json" python3 <<'PY' && ok=y || ok=n
+# D-021：「stub→501」这个字面量**不再手抄**——从实现派生清单取 `stub_mark`
+# （同一事实两份实现的又一处：改标记串时不必同步改 4 个脚本）。
+STUB_MARK=$(EHR_HOME="$HOME_DIR" "$BIN" --print-rest-manifest 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["stub_mark"])')
+OC="$HOME_DIR/openapi.json" STUB_MARK="$STUB_MARK" python3 <<'PY' && ok=y || ok=n
 import json,os
 d=json.load(open(os.environ["OC"]))
+mark=os.environ["STUB_MARK"]
 op=d["paths"]["/api/v1/audit"]["get"]
-assert "stub→501" not in (op.get("summary") or ""), ("端点仍被标成 stub", op.get("summary"))
+assert mark not in (op.get("summary") or ""), ("端点仍被标成 stub", op.get("summary"))
 assert "200" in op.get("responses",{}), op
 s=d["components"]["schemas"]
 for k in ("AuditReply","AuditEntryOut"):
@@ -124,27 +128,53 @@ assert {"source","op","ts","person_id"} <= set(ep), list(ep)
 PY
 [ "${ok:-n}" = y ] && pass "M3 openapi: audit 是真 operation + typed schema（含 source 口径字段）" || fail "M3 openapi 契约"
 
-echo "== 7) audit 不在 CONTRACT 表（实装端点不得再被宣称 501） =="
-python3 - <<'PY'
-import re,sys
-s=open("/home/lbb/medme-ehr/ehr-api/src/lib.rs",encoding="utf-8").read()
-m=re.search(r"pub const CONTRACT[^=]*=\s*&\[(.*?)\n\];", s, re.S)
-body=m.group(1)
-bad=[l for l in body.splitlines() if '"/api/v1/audit"' in l]
-sys.exit(1 if bad else 0)
-PY
-[ $? -eq 0 ] && pass "M4 audit 不在 CONTRACT 表" || fail "M4 audit 仍在 CONTRACT 表里"
+echo "== 7) audit 不在 stub 清单（实装端点不得再被宣称 501） =="
+# D-037：判据从「手写正则解析 lib.rs 源码」换成**实现派生清单**（`--print-rest-manifest`）。
+# 旧实现：python 正则 `pub const CONTRACT[^=]*=\s*&\[(.*?)\n\];` 解析源码 —— ①同一事实两种实现；
+#   ②**CONTRACT 变空后该正则会跨表匹配到 MOUNTED_UNDOCUMENTED** ⇒ 这道门实际在查错的表（假门）。
+MAN=$(EHR_HOME="$HOME_DIR" "$BIN" --print-rest-manifest 2>/dev/null)
+STUB_PATHS=$(echo "$MAN" | python3 -c 'import json,sys;print("\n".join(json.load(sys.stdin)["stub_paths"]))')
+if ! echo "$STUB_PATHS" | grep -qx "GET /api/v1/audit"; then
+  pass "M4 audit 不在 stub 清单（derived manifest，非源码正则）"
+else
+  fail "M4 audit 仍在 stub 清单里"; echo "$STUB_PATHS" | sed 's/^/    /'
+fi
 
-echo "== 8) stub 端点计数：应剩 1 个（extraction） =="
-python3 - <<'PY'
-import re,sys
-s=open("/home/lbb/medme-ehr/ehr-api/src/lib.rs",encoding="utf-8").read()
-m=re.search(r"pub const CONTRACT[^=]*=\s*&\[(.*?)\n\];", s, re.S)
-n=len([l for l in m.group(1).splitlines() if l.strip().startswith('("')])
-print("CONTRACT stub count=%d" % n)
-sys.exit(0 if n==1 else 1)
+echo "== 8) stub 端点计数：与**实现派生清单**一致（不写死数字） =="
+# ⚠️ 本门原先写死 `n==1`（硬编码快照 = 数字不是判据，D-032/T15 的老教训）：
+#   实装最后一个 stub（extraction）后它立刻红，而红的原因**不是**「代码坏了」，
+#   只是「快照过期了」——红得看不出是漏改还是真坏（同 D-009 判据形状的老问题）。
+# 现在：期望值来自**实现派生清单**（`--print-rest-manifest`），门禁只做**对账**。
+#
+# D-021：上一版这里还留着**半截正则**去解析 lib.rs 源码数 CONTRACT 表
+#   （D-037 当时刻意保留，作为「Rust 表 ↔ 派生清单」两源对账）。
+#   现在**删掉它**——派生清单已公布两份**来源不同**的清单：
+#     ①`contract_paths` = Rust 常量 CONTRACT 的 operation（源码真源）；
+#     ②`stub_paths`     = **渲染后 OpenAPI** 里带 stub 标记的 operation（渲染真源）。
+#   门禁断言两者**逐条相等**（集合判据，不是计数判据）。
+#   ⚠️ 为什么不能用「两个计数相等」：两者都从同一张 CONTRACT 表派生 ⇒ 永远相等 ⇒ 永远绿
+#     （本轮负向实验实撞：往 CONTRACT 加一条合法条目 ⇒ 两计数同步 +1 ⇒ 断言照样绿）。
+#     ⇒ **计数不是判据，集合才是**（D-009 判据形状原则）。
+#   （D-037 新坑②的正面处置：正则依赖「表里有内容」这个隐含前提，表可能变空 ⇒ 正则失效。）
+DUP=$(BIN="$BIN" EHR_HOME="$HOME_DIR" python3 - <<'PY'
+import json,subprocess,sys,os
+# ⚠️ EHR_HOME 必须传进去：dry-run 也会校验 home 可达（不创建）⇒ 缺它 ⇒ 退出码 1。
+#   （D-010「参数生效要有证据」的门面纪律：连调用方式本身都要被核对。）
+man=json.loads(subprocess.check_output(
+    [os.environ["BIN"],"--print-rest-manifest"],stderr=subprocess.DEVNULL))
+c=sorted(man["contract_paths"]); s=sorted(man["stub_paths"])
+print("SAME" if c==s else "DIFF")
+if c!=s:
+    print("  contract_paths (Rust 常量):",c,file=sys.stderr)
+    print("  stub_paths     (OpenAPI 渲染):",s,file=sys.stderr)
 PY
-[ $? -eq 0 ] && pass "M5 CONTRACT 表里剩 1 个 stub（extraction）" || fail "M5 stub 计数不是 1"
+)
+echo "CONTRACT(源码真源) vs stub_paths(OpenAPI渲染真源): $DUP"
+if [ "$DUP" = "SAME" ]; then
+  pass "M5 CONTRACT 清单 == 派生清单 stub 清单（逐条相等，derived not hardcoded）"
+else
+  fail "M5 CONTRACT 清单 != 派生清单 stub 清单（两份真源分叉了）"
+fi
 
 echo "fails=$fails"
 exit $([ "$fails" -eq 0 ] && echo 0 || echo 1)

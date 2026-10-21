@@ -173,16 +173,19 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' "$API/persons/$pid/measurements?f
 
 echo "== 10) M6 契约一致：OpenAPI 里是**真 operation**（非 stub→501）+ typed schema =="
 curl -fsS "$BASE/openapi.json" -o "$HOME_DIR/openapi.json"
-OC="$HOME_DIR/openapi.json" python3 <<'PY' && ok=y || ok=n
+# D-021：「stub→501」字面量从实现派生清单取（`stub_mark`），不再手抄。
+STUB_MARK=$(EHR_HOME="$HOME_DIR" "$BIN" --print-rest-manifest 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["stub_mark"])')
+OC="$HOME_DIR/openapi.json" STUB_MARK="$STUB_MARK" python3 <<'PY' && ok=y || ok=n
 import json,os
 d=json.load(open(os.environ["OC"]))
+mark=os.environ["STUB_MARK"]
 s=d["components"]["schemas"]
 for p,m in [("/api/v1/persons/{pid}/measurements","get"),
             ("/api/v1/persons/{pid}/entries/self-measurement","post"),
             ("/api/v1/persons/{pid}/entries/note","post"),
             ("/api/v1/persons/{pid}/entries/profile-event","post")]:
     op=d["paths"][p][m]
-    assert "stub→501" not in (op.get("summary") or ""), ("端点仍被标成 stub",p,op.get("summary"))
+    assert mark not in (op.get("summary") or ""), ("端点仍被标成 stub",p,op.get("summary"))
     assert "200" in op.get("responses",{}) or "201" in op.get("responses",{}), (p,op)
 for k in ("MeasurementsReply","MeasurementOut","MeasurementValueOut","EntryReply",
           "SelfMeasurementIn","NoteIn","ProfileEventIn","SelfMeasuredValueIn"):
@@ -218,17 +221,18 @@ echo "== 12) 错误语义：未知人 → 404 =="
 code=$(curl -sS -o /dev/null -w '%{http_code}' "$API/persons/00000000-0000-4000-8000-000000000000/measurements")
 [ "$code" = 404 ] && pass "unknown person measurements → 404" || fail "unknown person measurements → $code (期望 404)"
 
-echo "== 13) 门禁真的会红：四个端点不得留在 CONTRACT 表 =="
-python3 - <<'PY'
-import re,sys
-s=open("/home/lbb/medme-ehr/ehr-api/src/lib.rs",encoding="utf-8").read()
-m=re.search(r"pub const CONTRACT[^=]*=\s*&\[(.*?)\n\];", s, re.S)
-body=m.group(1)
-bad=[l for l in body.splitlines() if "measurements" in l or "entries/" in l]
-for b in bad: print("STILL_IN_CONTRACT",b)
-sys.exit(1 if bad else 0)
-PY
-[ $? -eq 0 ] && pass "M8 四个端点都不在 CONTRACT 表（实装端点不得再被宣称 501）" || fail "M8 仍有端点留在 CONTRACT 表里"
+echo "== 13) 门禁真的会红：四个端点不得留在 stub 清单 =="
+# D-037：判据从「手写正则解析 lib.rs 源码」换成**实现派生清单**（`--print-rest-manifest`）。
+# 旧实现的正则 `pub const CONTRACT[^=]*=\s*&\[(.*?)\n\];` 在 CONTRACT 变空后会
+# **跨表匹配到 MOUNTED_UNDOCUMENTED** ⇒ 这道门实际在查错的表（假门）。
+MAN=$(EHR_HOME="$HOME_DIR" "$BIN" --print-rest-manifest 2>/dev/null)
+STUB_PATHS=$(echo "$MAN" | python3 -c 'import json,sys;print("\n".join(json.load(sys.stdin)["stub_paths"]))')
+BAD=$(echo "$STUB_PATHS" | grep -E "measurements|entries/" || true)
+if [ -z "$BAD" ]; then
+  pass "M8 四个端点都不在 stub 清单（实装端点不得再被宣称 501）"
+else
+  fail "M8 仍有端点留在 stub 清单里"; echo "$BAD" | sed 's/^/    /'
+fi
 
 echo "fails=$fails"
 exit $([ "$fails" -eq 0 ] && echo 0 || echo 1)

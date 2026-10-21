@@ -9,6 +9,7 @@ use axum::{
     routing::{delete, get, patch, post, put},
     Router,
 };
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use utoipa::OpenApi;
@@ -72,17 +73,30 @@ impl From<anyhow::Error> for ApiError {
 }
 
 // ---------- handlers（已实现域）----------
+// ---------- healthz / capabilities 的响应体（补齐 OpenAPI 的 body 声明）----------
+//
+// ⚠️ D-038：此前这两个端点的 200 响应在 OpenAPI 里**没有 body 声明**
+// （`responses((status = 200, description = "…"))`）⇒ 生成的客户端**拿不到类型**，
+// 只能自己猜「里面有什么」⇒ 「文档在骗人」的第四种形态（不是形状错，是**根本没形状**）。
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct HealthzReply {
+    /// `ok` = EHR_HOME 可达；`no-home` = 不可达（服务活着但**不能干活**）
+    pub status: String,
+    /// EHR_HOME 的绝对路径
+    pub home: String,
+}
+
 /// 健康检查
 #[utoipa::path(get, path = "/api/v1/healthz", tag = "system",
-    responses((status = 200, description = "ok")))]
-async fn healthz(State(st): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    responses((status = 200, description = "ok", body = HealthzReply)))]
+async fn healthz(State(st): State<Arc<AppState>>) -> Result<Json<HealthzReply>, ApiError> {
     let ok = tokio::fs::try_exists(&st.home)
         .await
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "ehr-home not accessible".into()))?;
-    Ok(Json(json!({
-        "status": if ok { "ok" } else { "no-home" },
-        "home": st.home.display().to_string(),
-    })))
+    Ok(Json(HealthzReply {
+        status: if ok { "ok".into() } else { "no-home".into() },
+        home: st.home.display().to_string(),
+    }))
 }
 
 /// **ingest 能力清单**（D-034）：本构建**能吃哪些文件类型**、哪种类型走哪条路、
@@ -97,8 +111,8 @@ async fn healthz(State(st): State<Arc<AppState>>) -> Result<Json<Value>, ApiErro
 /// （PP-OCRv5 权重是运行期下载到 `$OAR_HOME` 的）⇒ 真失败时回执会如实带
 /// `stored_raw_only=true` + messages，不假装识别成功。
 #[utoipa::path(get, path = "/api/v1/capabilities", tag = "meta",
-    responses((status = 200, description = "ingest capability manifest (accepted/rejected file types, ocr engine availability)")))]
-async fn get_capabilities() -> Result<Json<Value>, ApiError> {
+    responses((status = 200, description = "ingest capability manifest (accepted/rejected file types, ocr engine availability)", body = capabilities::CapabilityManifest)))]
+async fn get_capabilities() -> Result<Json<capabilities::CapabilityManifest>, ApiError> {
     Ok(Json(capabilities::capability_manifest()))
 }
 
@@ -144,12 +158,12 @@ fn require_person(st: &AppState, pid: &str) -> Result<(), ApiError> {
 
 /// 健康事件时间线 —— Vault::timeline 直出；按 doc_date DESC、无日期件排在最后(内核 ORDER BY 语义)。
 #[utoipa::path(get, path = "/api/v1/persons/{pid}/timeline", tag = "records", params(("pid" = String, Path, description = "person uuid")),
-    responses((status = 200, description = "timeline entries", body = Vec<vaults::TimelineItem>),
+    responses((status = 200, description = "timeline entries", body = vaults::TimelineReply),
                (status = 404, description = "person not found")))]
 async fn get_timeline(
     State(st): State<Arc<AppState>>,
     AxPath(pid): AxPath<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<vaults::TimelineReply>, ApiError> {
     tokio::task::block_in_place(|| {
         require_person(&st, &pid)?; // rusqlite/Vault 非 Send，整段住 block_in_place（同 list/create 模式）
         let vault = vaults::open_person_vault(&st.home, &pid).map_err(ApiError::from)?;
@@ -157,7 +171,7 @@ async fn get_timeline(
         let tl = vault.timeline().map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let items: Vec<vaults::TimelineItem> =
             tl.into_iter().map(vaults::TimelineItem::from).collect();
-        Ok(Json(json!({ "person_id": pid, "count": items.len(), "items": items })))
+        Ok(Json(vaults::TimelineReply { count: items.len(), items, person_id: pid }))
     })
 }
 
@@ -166,14 +180,14 @@ async fn get_timeline(
     params(("pid" = String, Path, description = "person uuid"),
            ("q" = String, Query, description = "检索词"),
            ("limit" = Option<u32>, Query, description = "命中上限(默认20)")),
-    responses((status = 200, description = "search hits with [highlighted] snippets", body = Vec<vaults::SearchItem>),
+    responses((status = 200, description = "search hits with [highlighted] snippets", body = vaults::SearchReply),
                (status = 400, description = "missing/blank q"),
                (status = 404, description = "person not found")))]
 async fn get_search(
     State(st): State<Arc<AppState>>,
     AxPath(pid): AxPath<String>,
     Query(qp): Query<std::collections::HashMap<String, String>>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<vaults::SearchReply>, ApiError> {
     let q = qp.get("q").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let Some(q) = q else {
         return Err(ApiError(StatusCode::BAD_REQUEST, "query parameter q is required".into()));
@@ -191,7 +205,7 @@ async fn get_search(
         let items: Vec<vaults::SearchItem> =
             vault.search(&q, limit).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
                 .into_iter().map(vaults::SearchItem::from).collect();
-        Ok(Json(json!({ "person_id": pid, "q": q, "count": items.len(), "items": items })))
+        Ok(Json(vaults::SearchReply { count: items.len(), items, person_id: pid, q }))
     })
 }
 
@@ -314,18 +328,18 @@ async fn upload_document(
 
 /// 文档列表（documents.json 折叠视图，docref=sha256）。timeline 的扩展列版。
 #[utoipa::path(get, path = "/api/v1/persons/{pid}/documents", tag = "records", params(("pid" = String, Path, description = "person uuid")),
-    responses((status = 200, description = "documents with CAS sha256 refs", body = Vec<vaults::DocumentListItem>),
+    responses((status = 200, description = "documents with CAS sha256 refs", body = vaults::DocumentListReply),
                (status = 404, description = "person not found")))]
 async fn list_documents(
     State(st): State<Arc<AppState>>,
     AxPath(pid): AxPath<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<vaults::DocumentListReply>, ApiError> {
     tokio::task::block_in_place(|| {
         require_person(&st, &pid)?; // 读走 WAL：无需持写锁
         let vault = vaults::open_person_vault(&st.home, &pid).map_err(ApiError::from)?;
         let items: Vec<vaults::DocumentListItem> =
             vaults::list_document_items(&vault).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        Ok(Json(json!({ "person_id": pid, "count": items.len(), "items": items })))
+        Ok(Json(vaults::DocumentListReply { count: items.len(), items, person_id: pid }))
     })
 }
 
@@ -360,7 +374,14 @@ async fn get_document_detail(
 #[utoipa::path(get, path = "/api/v1/persons/{pid}/documents/{sha}/original", tag = "records",
     params(("pid" = String, Path, description = "person uuid"),
            ("sha" = String, Path, description = "sha256 content hash")),
-    responses((status = 200, description = "raw bytes (integrity-verified)", content_type = "application/octet-stream"),
+    // ⚠️ D-039：content-type 声明为 **`*/*`（通配）**，不是 `application/octet-stream`。
+    //   为什么：真响应的 Content-Type 是**动态的**——取自原件入库时嗅探/存储的 mime
+    //   （`text/plain` / `application/pdf` / …），只有「索引行缺失」时才回落
+    //   `application/octet-stream` ⇒ 此前把 OpenAPI 写死成 `application/octet-stream`
+    //   是一句**对大多数文件都不成立的假话**（上传 .txt 后真回 `text/plain`）。
+    //   OpenAPI 3.1 的 content map 允许 `*/*` 通配键 ⇒ 如实表达「任意二进制流，
+    //   具体类型由原件的 mime 决定」；客户端按 `*/*` 处理（存字节）总是安全的。
+    responses((status = 200, description = "raw bytes (integrity-verified); Content-Type = 原件存储的 mime（缺索引行时为 application/octet-stream）", content_type = "*/*"),
                (status = 400, description = "malformed sha256"),
                (status = 404, description = "person or CAS object not found"),
                (status = 500, description = "CAS integrity mismatch — poisoned object (D5 red flag)")))]
@@ -568,17 +589,17 @@ macro_rules! not_implemented {
 }
 /// D-023 实装（此前 stub→501 毕业）：LLM 结构化抽取回写。
 /// result_json 必须是 deid schema v1（字段级 evidence = 原文逐字子串，上游 deid::verify 红线）。
-/// verified=false 仍落库（append-only，消费端带 unverified 标记可辨），但回执如实报告。
+/// 落库的是**校验后**的 extraction（判假字段已被上游清空/标 unverified），不是原样交来的 JSON。
 #[derive(utoipa::IntoParams)]
 #[into_params(parameter_in = Path)]
 pub struct ShaPath { pub sha: String }
 
 #[utoipa::path(
     put, path = "/api/v1/persons/{pid}/documents/{sha}/extraction",
-    tag = "ehr", request_body = vaults::ExtractionNew, responses(
-        (status = 200, description = "extraction stored", body = vaults::ExtractionReply),
-        (status = 400, description = "malformed sha or result_json fails deid schema"),
-        (status = 404, description = "no document for sha"),
+    tag = "records", request_body = vaults::ExtractionNew, responses(
+        (status = 200, description = "extraction stored (verified=字段级逐字闸全过)", body = vaults::ExtractionReply),
+        (status = 400, description = "malformed sha / bad mode / result_json fails deid schema / document has no text layer"),
+        (status = 404, description = "no person or no document for sha"),
     )
 )]
 async fn put_document_extraction(
@@ -596,9 +617,10 @@ async fn put_document_extraction(
     tokio::task::block_in_place(|| {
         require_person(&st, &pid)?;
         let vault = vaults::open_person_vault(&st.home, &pid).map_err(ApiError::from)?;
-        let reply = vaults::add_extraction(&vault, &sha, body).map_err(|e| match e.to_string().contains("no document") {
-            true => ApiError(StatusCode::NOT_FOUND, e.to_string()),
-            false => ApiError(StatusCode::BAD_REQUEST, e.to_string()),
+        // 领域错误 → HTTP 状态码的映射**只此一处**（靠错误**类型**，不靠错误字符串内容）。
+        let reply = vaults::add_extraction(&vault, &sha, body).map_err(|e| match e {
+            vaults::ExtractionError::NoDocument(_) => ApiError(StatusCode::NOT_FOUND, e.to_string()),
+            other => ApiError(StatusCode::BAD_REQUEST, other.to_string()),
         })?;
         tracing::info!(person = %pid, sha = %sha, verified = reply.verified, "extraction stored");
         Ok(Json(reply))
@@ -628,8 +650,13 @@ not_implemented!(stub_person_delete, "archive person(tombstone): pending registr
           get_document_detail, get_document_original, put_document_extraction,
           get_measurements, post_self_measurement, post_note, post_profile_event,
           get_audit),
-    components(schemas(Person, PersonNew, vaults::TimelineItem, vaults::SearchItem, vaults::UploadReply,
-                       vaults::DocumentListItem, vaults::DocumentDetail, vaults::TextLayerMeta, vaults::ExtractionPass,
+    components(schemas(Person, PersonNew, HealthzReply, capabilities::CapabilityManifest, capabilities::CapabilityRouteOut,
+                       vaults::TimelineItem, vaults::TimelineReply,
+                       vaults::SearchItem, vaults::SearchReply,
+                       vaults::DocumentListItem, vaults::DocumentListReply,
+                       vaults::UploadReply,
+                       vaults::DocumentDetail, vaults::TextLayerMeta, vaults::ExtractionPass,
+                       vaults::ExtractionNew, vaults::ExtractionReply,
                        vaults::LabPointOut, vaults::LabSeriesOut, vaults::LabsReply,
                        vaults::MedMentionOut, vaults::MedSpanOut, vaults::MedicationsReply,
                        vaults::ConditionOut, vaults::ConditionsReply,
@@ -651,9 +678,12 @@ struct ApiDoc;
 /// 改这一处 ⇒ 文档渲染、派生清单、门禁脚本的判定口径同时跟着变，不会各说各话。
 pub const STUB_MARK: &str = "stub→501";
 
-pub const CONTRACT: &[(&str, &str, &str, &str)] = &[
-    ("put", "/api/v1/documents/{sha}/extraction", "entries", "AI agent 结构化发现(引用不替代，字段级 evidence 锚点)"),
-];
+/// ⚠️ **当前为空**：D-023 实装了最后一个 stub 端点（`PUT /persons/{pid}/documents/{sha}/extraction`）
+/// ⇒ 它已从本表移除（入表即宣称 501，而它真返回 200/400/404）。
+/// **表空不是「没人管」**：反向保险是 tests/contract.rs + tests/apidoc.rs 两条门禁
+/// （「CONTRACT 里的端点必须真返回 501」+「OpenAPI 每个 operation 必须真挂路由」）——
+/// 端点实装后忘删表 ⇒ 那两条门禁立刻红（不是「怎么都绿」）。
+pub const CONTRACT: &[(&str, &str, &str, &str)] = &[];
 
 /// 已挂 router 但**刻意不进 OpenAPI** 的人员域端点（理由见 stub_person_* 注释）。
 /// 单一事实源：tests/contract.rs 与 rest_manifest() 都读这张表，不再各写一份（D2：一个语义只允许一处实现）。
@@ -754,6 +784,13 @@ pub fn rest_manifest() -> Value {
     let mut paths_list: Vec<String> = Vec::new();
     let mut operations = 0usize;
     let mut stubs = 0usize;
+    // D-037：哪些 operation **仍被宣称 501**（逐条列出，不只是个数）——
+    // 此前这个事实只能由门禁脚本**手写正则解析本文件源码**去猜
+    // （`pub const CONTRACT[^=]*=\s*&\[(.*?)\n\];`）⇒ 同一事实两种实现，
+    // 且那份正则**在 CONTRACT 变空后会跨表匹配到 MOUNTED_UNDOCUMENTED** ⇒
+    // 「某端点不在 CONTRACT 表」这类门实际在查**错误的表**（假门）。
+    // 现在：判据由实现派生并**公布具体清单**，门禁读清单即可（一份事实、一个来源）。
+    let mut stub_paths: Vec<String> = Vec::new();
     for (p, item) in &paths {
         if let Some(obj) = item.as_object() {
             for (method, op) in obj {
@@ -764,16 +801,42 @@ pub fn rest_manifest() -> Value {
                 let summary = op.get("summary").and_then(|s| s.as_str()).unwrap_or("");
                 if summary.contains(STUB_MARK) {
                     stubs += 1;
+                    stub_paths.push(format!("{} {}", method.to_uppercase(), p));
                 }
                 paths_list.push(format!("{} {}", method.to_uppercase(), p));
             }
         }
     }
     paths_list.sort();
+    stub_paths.sort();
+    // D-021：CONTRACT 常量的**逐条清单**（源码真源），与上面的 `stub_paths`
+    // （**渲染后 OpenAPI** 真源）逐条对账。集合判据，不是计数判据（理由见字段注释）。
+    let mut contract_paths: Vec<String> = CONTRACT
+        .iter()
+        .map(|(m, p, _t, _s)| format!("{} {}", m.to_uppercase(), p))
+        .collect();
+    contract_paths.sort();
     json!({
         "paths": paths.len(),
         "operations": operations,
         "stubs": stubs,
+        // 逐条列出「仍被宣称 501」的 operation ⇒ 门禁不必再手写正则解析源码（D-037）
+        "stub_paths": stub_paths,
+        // D-021：CONTRACT 表的**逐条清单**也公布出来 ⇒ 门禁不必再**手写正则解析 lib.rs 源码**
+        // 去数这张表（D-037 当时保留了那半截正则做「两源对账」；现在两源在实现侧汇成一处：
+        //   ①`contract_paths` = Rust 常量 CONTRACT 的 operation 清单（**源码真源**）；
+        //   ②`stub_paths`     = 运行时 OpenAPI 里带 STUB_MARK 的 operation 清单（**渲染真源**）。
+        // 这两个清单**来源不同**（一个是常量，一个是 OpenAPI 合成后的产物）⇒ 逐条相等是
+        // **真判据**：若 CONTRACT 里登记了某端点但 merge_path 没把它合进 OpenAPI
+        // （或合进去了却没带 STUB_MARK），两份清单立刻分叉 ⇒ 门禁红。
+        //
+        // ⚠️ 反面教材（本轮实撞的坑）：先写的是 `contract_len`（= CONTRACT.len()）与
+        //   `stubs`（= OpenAPI 里数 STUB_MARK）两个**计数**并断言相等——**那是同义反复**
+        //   （两者都从同一张 CONTRACT 表派生 ⇒ 永远相等 ⇒ 永远绿）。
+        //   负向实验：往 CONTRACT 里加一条**合法**条目 ⇒ 两个计数**同步 +1** ⇒ 断言照样绿
+        //   ⇒ 证明它测不出任何东西（D-037「绿但测错对象」的最隐蔽形态）。
+        //   ⇒ **计数不是判据，集合才是**（D-009 判据形状原则的又一次应验）。
+        "contract_paths": contract_paths,
         // 把标记字符串本身也公布出去 ⇒ 门禁脚本**不用再手抄**「stub→501」这个字面量
         // （同一事实两份实现的又一处：apidoc.rs 曾经也手抄过一份，现已改读 STUB_MARK）。
         "stub_mark": STUB_MARK,

@@ -143,11 +143,14 @@ PY
 
 echo "== 7) 契约一致：OpenAPI 里是**真 operation**（非 stub→501）+ typed schema =="
 curl -fsS "$BASE/openapi.json" -o "$HOME_DIR/openapi.json"
-OC="$HOME_DIR/openapi.json" python3 <<'PY' && ok=y || ok=n
+# D-021：「stub→501」字面量从实现派生清单取（`stub_mark`），不再手抄。
+STUB_MARK=$(EHR_HOME="$HOME_DIR" "$BIN" --print-rest-manifest 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["stub_mark"])')
+OC="$HOME_DIR/openapi.json" STUB_MARK="$STUB_MARK" python3 <<'PY' && ok=y || ok=n
 import json,os
 d=json.load(open(os.environ["OC"]))
+mark=os.environ["STUB_MARK"]
 op=d["paths"]["/api/v1/persons/{pid}/medications"]["get"]
-assert "stub→501" not in (op.get("summary") or ""), ("端点仍被标成 stub",op.get("summary"))
+assert mark not in (op.get("summary") or ""), ("端点仍被标成 stub",op.get("summary"))
 assert "200" in op.get("responses",{}), op
 s=d["components"]["schemas"]
 for k in ("MedicationsReply","MedSpanOut","MedMentionOut"):
@@ -165,17 +168,18 @@ echo "== 8) 错误语义：未知人 → 404 =="
 code=$(curl -sS -o /dev/null -w '%{http_code}' "$API/persons/00000000-0000-4000-8000-000000000000/medications")
 [ "$code" = 404 ] && pass "unknown person medications → 404" || fail "unknown person medications → $code (期望 404)"
 
-echo "== 9) 门禁真的会红（参数/状态生效有证据）：把端点挂回 CONTRACT 表 ⇒ 该表断言必须红 =="
-# 直接断言：medications 不得出现在 CONTRACT 表（入表即宣称 stub→501，D-025 纪律）
-python3 - <<'PY'
-import re,sys
-s=open("/home/lbb/medme-ehr/ehr-api/src/lib.rs",encoding="utf-8").read()
-m=re.search(r"pub const CONTRACT[^=]*=\s*&\[(.*?)\n\];", s, re.S)
-body=m.group(1)
-bad=[l for l in body.splitlines() if "medications" in l and "persons/{pid}/medications" in l]
-sys.exit(1 if bad else 0)
-PY
-[ $? -eq 0 ] && pass "M5 medications 不在 CONTRACT 表（实装端点不得再被宣称 501）" || fail "M5 medications 仍在 CONTRACT 表里"
+echo "== 9) 门禁真的会红（参数/状态生效有证据）：把端点挂回 stub 清单 ⇒ 该表断言必须红 =="
+# 直接断言：medications 不得出现在 stub 清单（入表即宣称 stub→501，D-025 纪律）
+# D-037：判据从「手写正则解析 lib.rs 源码」换成**实现派生清单**（`--print-rest-manifest`）。
+# 旧实现的正则 `pub const CONTRACT[^=]*=\s*&\[(.*?)\n\];` 在 CONTRACT 变空后会
+# **跨表匹配到 MOUNTED_UNDOCUMENTED** ⇒ 这道门实际在查错的表（假门）。
+MAN=$(EHR_HOME="$HOME_DIR" "$BIN" --print-rest-manifest 2>/dev/null)
+STUB_PATHS=$(echo "$MAN" | python3 -c 'import json,sys;print("\n".join(json.load(sys.stdin)["stub_paths"]))')
+if ! echo "$STUB_PATHS" | grep -q "persons/{pid}/medications"; then
+  pass "M5 medications 不在 stub 清单（实装端点不得再被宣称 501）"
+else
+  fail "M5 medications 仍在 stub 清单里"
+fi
 
 echo "fails=$fails"
 exit $([ "$fails" -eq 0 ] && echo 0 || echo 1)

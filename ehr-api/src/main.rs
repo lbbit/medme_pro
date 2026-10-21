@@ -142,14 +142,13 @@ async fn main() -> Result<()> {
     // ingest_upload 里的 if/ensure + OpenAPI 文案 + 门禁手写文案**三份实现**。
     if print_capabilities {
         let man = ehr_api::capabilities::capability_manifest();
-        println!("{}", serde_json::to_string_pretty(&man)?);
-        eprintln!(
+        println!("{}", serde_json::to_string_pretty(&man)?);        eprintln!(
             "[证据] ehr-api v{} | mode=dry-run(print-capabilities) | EHR_HOME={} | ocr_available={} | accepted={} | rejected={}",
             env!("CARGO_PKG_VERSION"),
             st.home.display(),
-            man["ocr_available"],
-            man["accepted_exts"].as_array().map(|a| a.len()).unwrap_or(0),
-            man["rejected_exts"].as_array().map(|a| a.len()).unwrap_or(0),
+            man.ocr_available,
+            man.accepted_exts.len(),
+            man.rejected_exts.len(),
         );
         return Ok(());
     }

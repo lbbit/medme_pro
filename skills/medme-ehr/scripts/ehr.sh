@@ -36,6 +36,9 @@ usage() {
   profile-event PID --kind K --package P --at YYYY-MM-DD [--payload JSON]
                             写入一条病程动作日志
   detail PID SHA              文档详情（含 OCR 文本层 / extraction）
+  extraction PID SHA FILE     回写 LLM 结构化抽取结果（FILE=deid schema v1 JSON）
+                            --backend B --model-version M [--mode text|image] [--schema N]
+                            字段级 evidence 闸：每条字段须是原文逐字子串；判假的字段被清空/标 unverified
   original PID SHA            下载原件字节（CAS 按 hash 寻址，每次核 sha256）
   upload PID FILE             上传原件（multipart，仅 .txt/.pdf）
   audit [--person PID] [--op OP]
@@ -188,6 +191,32 @@ print(json.dumps(b,ensure_ascii=False))
   detail)
     PID="${1:-}"; SHA="${2:-}"; [ -n "$PID" ] && [ -n "$SHA" ] || die "detail 需要 person_id 与 sha256"
     _c "$BASE/persons/$PID/documents/$SHA" | _pp ;;
+  extraction)
+    PID="${1:-}"; SHA="${2:-}"; FILE="${3:-}"
+    [ -n "$PID" ] && [ -n "$SHA" ] && [ -n "$FILE" ] || die "extraction 需要 person_id、sha256 与 JSON 文件路径"
+    [ -f "$FILE" ] || die "文件不存在: $FILE"
+    shift 3 || true
+    BACKEND="llm-http"; MODEL="unknown"; MODE="text"; SCHEMA=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --backend) BACKEND="$2"; shift 2;;
+        --model-version) MODEL="$2"; shift 2;;
+        --mode) MODE="$2"; shift 2;;
+        --schema) SCHEMA="$2"; shift 2;;
+        *) die "未知参数 $1";;
+      esac
+    done
+    # result_json 是一段 JSON **字符串**（不是嵌套对象）：服务端按 deid schema 原文解析。
+    # ⚠️ mode 必填且只认 text|image：拼错服务端会 400（不静默换校验口径）。
+    BODY=$(python3 -c '
+import json,sys
+raw=open(sys.argv[1],encoding="utf-8").read()
+json.loads(raw)  # 本地先校一次形状：非法 JSON 别浪费一次往返
+b={"result_json":raw,"backend":sys.argv[2],"model_version":sys.argv[3],"mode":sys.argv[4]}
+if sys.argv[5]: b["schema"]=int(sys.argv[5])
+print(json.dumps(b,ensure_ascii=False))
+' "$FILE" "$BACKEND" "$MODEL" "$MODE" "$SCHEMA")
+    _c -X PUT "$BASE/persons/$PID/documents/$SHA/extraction" -H 'content-type: application/json' -d "$BODY" | _pp ;;
   original)
     PID="${1:-}"; SHA="${2:-}"; [ -n "$PID" ] && [ -n "$SHA" ] || die "original 需要 person_id 与 sha256"
     _c "$BASE/persons/$PID/documents/$SHA/original" ;;

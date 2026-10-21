@@ -320,6 +320,42 @@ pub struct TextLayerMeta {
     pub min_confidence: Option<f32>, // 内核取各页最小值(最保守)；native 文本层恒 None
 }
 
+// ---- 读侧信封（envelope）----
+//
+// ⚠️ 为什么这三个要**显式建模**（D-038）：
+//   此前这三个端点的 200 响应在 OpenAPI 里被声明成**裸数组**
+//   （`body = Vec<TimelineItem>`），而**运行时真回的是对象**
+//   `{"person_id":…,"count":…,"items":[…]}` ⇒ **文档在骗人**：
+//   照 OpenAPI 生成的客户端会把响应当数组解，拿到对象 ⇒ 直接解不出。
+//   而 utoipa 的 `body = Vec<T>` **没法**表达「对象里套一个数组」⇒ 只能自己建模信封。
+//
+//   **同时也是 D2（一个语义只允许一处实现）的兑现**：信封结构**只写一次**，
+//   REST handler 与 MCP 工具**共用同一批 struct**（此前两边各写一份 `json!` 拼装
+//   ⇒ 同一形状两份实现，改一处漏一处就分叉）。
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct TimelineReply {
+    pub person_id: String,
+    /// 命中条目数（= items.len()）
+    pub count: usize,
+    pub items: Vec<TimelineItem>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct SearchReply {
+    pub person_id: String,
+    /// 回显的检索词（trim 后）
+    pub q: String,
+    pub count: usize,
+    pub items: Vec<SearchItem>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct DocumentListReply {
+    pub person_id: String,
+    pub count: usize,
+    pub items: Vec<DocumentListItem>,
+}
+
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct DocumentDetail {
     // source file(CAS 真相锚点)
@@ -830,22 +866,67 @@ mod tests {
 
 // ---- 写侧：LLM 结构化抽取回写（D-023；API-DESIGN「PUT /documents/{sha}/extraction」落地）----
 /// 请求体：result_json = LLM 输出的 deid schema v1 JSON（labs/meds/diagnoses，字段须为**原文逐字子串**——
-/// 上游 deid::verify 红线）。backend/model_version/mode 由调用方如实申报，服务端不猜(D4)。
+/// 上游 deid::verify 红线）。backend/model_version/mode/schema 由调用方如实申报，服务端不猜(D4)。
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct ExtractionNew {
     pub result_json: String,
     pub backend: String,        // 如 "llm-http"
     pub model_version: String,  // 如 "1p_deepseek-v4.1-flash"
-    #[serde(default = "default_mode")]
-    pub mode: String,           // "text"|"image"（deid schema 的 Mode）
+    pub mode: String,           // "text"|"image"（deid schema 的 Mode）——**必填**：缺省就猜，猜错=校验口径悄悄变松/变严
+    /// 抽取输出 schema 版本（1 = labs/meds/diagnoses；2 = 再加族级 facts）。
+    /// **由调用方给**（照抄上游 `core_model::NewExtraction::schema` 的文档理由）：
+    /// 服务端写死会让 schema 2 的结果在库里伪装成 schema 1，消费方按 1 读就永远看不到 facts。
+    #[serde(default = "default_schema")]
+    pub schema: i32,
 }
-fn default_mode() -> String { "text".into() }
+fn default_schema() -> i32 { 1 }
 
-#[derive(Serialize, utoipa::ToSchema)]
+/// 领域层错误：**带类型**（不让上层去猜错误字符串里有没有某个词）。
+///
+/// 为什么必须类型化（D-005/D5 纪律）：上一版实装把 anyhow 错误**按字符串内容**分类
+/// （`e.to_string().contains("no document")` ⇒ 404，否则 400）——错误文案一改，
+/// 状态码就悄悄变，属于「同一个语义两份实现」的漂移。⇒ 这里用 enum，映射只在 handler 一处。
+///
+/// ⚠️ **手写 Display/Error 而不引 thiserror**：本项目的依赖面纪律是「零新依赖」
+/// （D-017：鉴权面手写常量时间比较而不引 subtle）——为 5 个错误变体引一个新依赖不划算。
+#[derive(Debug)]
+pub enum ExtractionError {
+    MalformedSha(String),
+    NoDocument(String),
+    Schema(String),
+    BadMode(String),
+    NoTextLayer,
+    Store(String),
+}
+
+impl std::fmt::Display for ExtractionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MalformedSha(s) => write!(f, "malformed sha256: {s}"),
+            Self::NoDocument(s) => write!(f, "no document for sha {s}"),
+            Self::Schema(s) => write!(f, "result_json fails deid schema: {s}"),
+            Self::BadMode(s) => write!(f, "unsupported mode {s:?} (expected text|image)"),
+            Self::NoTextLayer => write!(f, "document has no text layer (nothing to verify against)"),
+            Self::Store(s) => write!(f, "add_extraction: {s}"),
+        }
+    }
+}
+
+impl std::error::Error for ExtractionError {}
+
+impl From<anyhow::Error> for ExtractionError {
+    /// 内核侧（resolve_doc_ref / materialize 等）的 anyhow 错误 ⇒ **内部错误**。
+    /// 注意：它**不是**「查无此档」——那一条走 `NoDocument`（在 anyhow 之前就判掉了）。
+    fn from(e: anyhow::Error) -> Self {
+        Self::Store(format!("{e:#}"))
+    }
+}
+
+#[derive(Serialize, utoipa::ToSchema, Debug)]
 pub struct ExtractionReply {
     pub content_hash: String,     // = docref（= 文档 source_file sha256）
     pub document_id: i64,
-    pub result_hash: String,      // result_json 在 CAS 的内容哈希（重跑=再 append，覆盖式引用不替代）
+    pub result_hash: String,      // **落库内容**在 CAS 的内容哈希（= 校验后 result_json 的哈希）
     pub schema: i32,
     /// 上游 deid::parse_extraction+verify 结果：verified=true ⇒ 字段级证据闸全过
     pub verified: bool,
@@ -856,38 +937,64 @@ pub struct ExtractionReply {
     pub diagnoses_count: usize,
 }
 
-/// 校验并落库一条 LLM 抽取结果。**两道闸都过才写**：
-/// ① `deid::parse_extraction`（schema 形状 + 字段级 evidence 逐字子串校验）；
-/// ② result_json 非空解析体（空 labs/meds/diagnoses 允许——阴性文档也是有效抽取）。
-/// verified=false 时也落库(事件层 append-only 哲学：先留痕再修)——但 **unverified 项在
+/// 校验并落库一条 LLM 抽取结果。**三道闸**（顺序有讲究）：
+/// ① `deid::parse_extraction`（schema 形状闸）：result_json 必须是合法的 deid schema JSON；
+/// ② **文本层存在闸**：文档没有文本层 ⇒ 无法逐字核验 ⇒ 拒（否则「核验」是空对空、恒过）；
+/// ③ `deid::verify`（字段级 evidence 闸，上游红线）：每个字符串字段必须是原文逐字子串。
+///
+/// ⚠️ **落库的是「校验后的」extraction，不是调用方交来的原样 result_json**（本轮修掉的真缺陷）：
+/// 上一版把**原样** result_json 存进 CAS，而 `verify` 的产物 `v.extraction` 只是用来算个
+/// `verified` 布尔就丢了——于是**模型编造的字段照样进了真相层**（`labs` 聚合会把它当结构化
+/// point 画进趋势图）。现在落库的是 `v.extraction` 的序列化结果：**verify 判假的字段已被上游
+/// 清空/标 unverified**，落库的每一条都过了逐字闸。
+///
+/// verified=false 时也落库（事件层 append-only 哲学：先留痕再修）——但 **unverified 项在
 /// aggregate 图表侧已带 `unverified:true` 标记**（上游 charting-safety 设计），消费端可辨。
-pub fn add_extraction(vault: &Vault, sha: &str, e: ExtractionNew) -> Result<ExtractionReply> {
+pub fn add_extraction(vault: &Vault, sha: &str, e: ExtractionNew) -> Result<ExtractionReply, ExtractionError> {
     use deid::{parse_extraction, verify as deid_verify, Mode};
-    anyhow::ensure!(is_sha(sha), "malformed sha256");
+    if !is_sha(sha) {
+        return Err(ExtractionError::MalformedSha(sha.to_string()));
+    }
     // document 必须存在且 source_file_hash==sha —— 防「给 A 文档写 B 文档的抽取」错挂
     let (doc, sf) = resolve_doc_ref(vault, sha)?
-        .ok_or_else(|| anyhow::anyhow!("no document for sha {sha}"))?;
+        .ok_or_else(|| ExtractionError::NoDocument(sha.to_string()))?;
+    // mode **只认两个值**，不猜（上一版把任何非 "image" 的值静默当 text ⇒ 拼错成 "imgae"
+    // 会悄悄把校验口径从「图片档容错」切成「文本档严格」，结论可能完全不同且无人察觉）。
+    let mode = match e.mode.as_str() {
+        "text" => Mode::Text,
+        "image" => Mode::Image,
+        other => return Err(ExtractionError::BadMode(other.to_string())),
+    };
     let parsed = parse_extraction(&e.result_json)
-        .map_err(|err| anyhow::anyhow!("result_json fails deid schema v1: {err}"))?;
+        .map_err(|err| ExtractionError::Schema(err.to_string()))?;
     // 字段级 evidence 闸(上游红线)：每个字符串字段必须是原文逐字子串。source_text = 文本层全文。
-    let mode = match e.mode.as_str() { "image" => Mode::Image, _ => Mode::Text };
     let src_text = vault.ocr_text(doc.id).unwrap_or_default();
+    // 文本层缺失 ⇒ 没法逐字核验 ⇒ **拒**（照抄上游 mobile 端 `vault_cloud_prepare_extraction` 的同一道闸：
+    // 「该文档没有 OCR 文字,无法云抽取」——发一个空 payload 出去没有意义)。空对空会让 verify 恒过
+    // ⇒ 等于「不设防」。
+    if src_text.trim().is_empty() {
+        return Err(ExtractionError::NoTextLayer);
+    }
     let v = deid_verify(parsed, &src_text, mode);
     let verified = v.rejected == 0 && v.unverified == 0;
     let verify_detail = serde_json::json!({
         "rejected": v.rejected, "unverified": v.unverified,
         "unverified_fields": v.unverified_fields,
     });
-    let schema = 1i32; // deid schema v1 = labs/meds/diagnoses（facts 属 v2，暂不发）
-    let result_hash = core_model::cas::sha256_hex(e.result_json.as_bytes());
+    let schema = e.schema;
+    // ⚠️ 落库内容 = **verify 之后**的 extraction（不是调用方交来的原样 JSON）——
+    //   逐字闸判假的字段已被上游清空/标 unverified ⇒ 真相层里没有「未经核验的模型输出」。
+    let stored_json = serde_json::to_string(&v.extraction)
+        .map_err(|err| ExtractionError::Schema(err.to_string()))?;
+    let result_hash = core_model::cas::sha256_hex(stored_json.as_bytes());
     vault.add_extraction(core_model::NewExtraction {
         document_id: doc.id,
         backend: e.backend,
         model_version: e.model_version,
         mode: e.mode,
         schema,
-        result_json: e.result_json,
-    }).map_err(|err| anyhow::anyhow!("add_extraction: {err}"))?;
+        result_json: stored_json,
+    }).map_err(|err| ExtractionError::Store(err.to_string()))?;
     Ok(ExtractionReply {
         content_hash: sf.content_hash,
         document_id: doc.id,

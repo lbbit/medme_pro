@@ -38,6 +38,7 @@ metadata:
 | 「记一次病程发作」 | `ehr.sh profile-event PID --kind flare --package sle --at 2026-10-22` | `--at` 是**事件发生那天**（不是记录那天）；`--payload` 可带 JSON |
 | 「把这次自测血压存进去」 | `ehr.sh self-measure PID --value bp_systolic=128 --value bp_diastolic=82 --unit mmHg` | 血压给两个 `--value`；生理学不可能的值 ⇒ 服务端 400 |
 | 「把这份报告原文给我看」 | `ehr.sh detail PID SHA` | 含 OCR 文本层 / extraction |
+| 「把这份报告的结构化结论写进档案」 | `ehr.sh extraction PID SHA result.json --mode text\|image` | **字段级 evidence 闸**：每条字段须是**原文逐字子串**（抄原文，别规范化日期/单位）；判假的字段被清空并标 `unverified`；**未经核验的模型输出进不了真相层** |
 | 「下载原件」 | `ehr.sh original PID SHA` | CAS 按 hash 寻址，服务端每次核 sha256 |
 | 「给某人建个档」 | `ehr.sh person-create "张三" --gender male --birthday 1990-01-02` | 返回 `id`；建档前先 `persons` 核对同名者 |
 | 「把这张化验单存进档案」 | `ehr.sh upload PID 文件.txt` | 仅 .txt/.pdf；重传同字节 `deduped=true` |
@@ -59,8 +60,29 @@ metadata:
 2. **可溯源**：给结论时带上证据来源（`docref` / 文档日期），否则用户无法复核。
 3. **检索零结果 ≠ 没病**：`search` 命中 0 时先换短词再试（`白细胞` 而非 `白细胞计数`），再下「查无此记录」结论。
 4. **不是医疗器械**：本服务只做资料整理与检索，不给诊断结论、不建议用药。
-5. **错误即指引**：400 参数非法（改参数重试）/ 401 缺或错 token（换 `EHR_API_TOKEN`）/ 403 只读 token 想写（换读写 token）/ 404 查无此人（换人或问用户）/ 501 该类型或该路径未实装（换 .txt/.pdf，或改用已实装路径）/ 500 内部错误（告知用户稍后再试）。别重试打转。
+5. **错误即指引**：400 参数非法（改参数重试）/ 401 缺或错 token（换 `EHR_API_TOKEN`）/ 403 只读 token 想写（换读写 token）/ 404 查无此人（换人或问用户）/ 501 该文件类型本构建接不了（换 .txt/.pdf，或查 `capabilities` 看怎么开）/ 500 内部错误（告知用户稍后再试）。别重试打转。
 6. **写侧边界**：`upload` 能吃什么类型**由服务端能力清单决定**（`ehr.sh capabilities`）——默认构建真能吃的是 `.txt`/`.pdf`；图片类型（.jpg/.png/...）与 .dcm 被**如实拒**（不是故障，错误信息里写了怎么开）。原件永远进 CAS 永不丢，但 PDF 解析失败时只能存原件、建不了检索文本层（返回 `stored_raw_only=true`）。
+7. **抽取结果必须逐字抄原文**：`extraction` 的每个字符串字段都要是**原文逐字子串**——把 `2025/09/22` 抄成 `2025-09-22`、把 `10^9/L` 抄成 `10^9 / L`，都会被 evidence 闸判假（字段被清空 / 标 `unverified`）。要「抄」不要「规范化」。
+
+## 结构化抽取（LLM 回写）的调用要点
+
+`extraction` 的输入是一段 **deid schema v1 JSON**（顶层字段 `labs`/`meds`/`diagnoses`，可带 `doc_date`/`impression`/`notes`）：
+
+```json
+{
+  "labs": [
+    { "name": "白细胞计数", "value": "6.2", "unit": "10^9/L", "ref_low": "3.5", "ref_high": "9.5", "flag": "" }
+  ],
+  "meds": [ { "name": "苯磺酸氨氯地平片", "dose": "5mg", "freq": "每日一次", "route": "口服" } ],
+  "diagnoses": [ { "text": "高血压 2 级", "icd": "" } ]
+}
+```
+
+- **逐字原则**：`name`/`value`/`unit`/`ref_low`/`ref_high`/`dose`/`freq`/`route`/`text`/`icd` 全部照抄原文（连标点与大小写）。
+- **`mode` 必填**：`text`（文本档，严格：验不过就丢字段）/ `image`（图片档，容错：验不过标 `unverified` 保留）。
+- **空值就是空**：抽不出来的字段**留空字符串**，不要猜、不要填「正常」。
+- 回执看 `verified` 与 `verify_detail.rejected`/`unverified`：`verified=false` 说明有字段没通过逐字闸（多半是抄写了原文没有的内容），照 `unverified_fields` 改一版重交。
+- 服务端**只存校验后的结果** ⇒ 你的伪造字段进不了真相层；`labs` 聚合会优先吃这份 extraction。
 
 ## 零维护要点（升级不改配置）
 

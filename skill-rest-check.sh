@@ -72,11 +72,11 @@ check "upload.fields"    "content_hash,deduped,document_id,doc_type,text_indexed
 check "medications.fields" "person_id,documents_scanned,med_count,mention_count,medications,drug_key,name,raw_names,atc,latest_dose,latest_raw_name,start,end,status,docrefs,unverified,mentions,date,dose,raw_name,docref,origin"
 
 # 2) SKILL.md / rest-contracts.md 里承诺的命令必须都被 helper 支持
-for c in health capabilities persons person-create timeline search labs medications documents detail original upload measurements self-measure note profile-event audit; do
+for c in health capabilities persons person-create timeline search labs medications documents detail extraction original upload measurements self-measure note profile-event audit; do
   grep -q "ehr.sh $c" "$SKILL" || { echo "  FAIL SKILL.md 未提命令 $c"; fails=$((fails+1)); }
   "$E" --help | grep -qE "^  $c( |\$)" || { echo "  FAIL helper 不支持命令 $c"; fails=$((fails+1)); }
 done
-echo "  PASS 命令面 SKILL ↔ helper 对齐(17 个)"
+echo "  PASS 命令面 SKILL ↔ helper 对齐(18 个)"
 
 # 2b) 写侧手动条目（D-028）：helper 三个写命令必须真写进去，读回 measurements
 SM=$("$E" self-measure "$PID" --value bp_systolic=128 --value bp_diastolic=82 --unit mmHg --taken-at 2026-10-20T08:30:00+08:00)
@@ -116,6 +116,23 @@ printf 'not-a-real-jpg' > "$H/cap.jpg"
 REJ=$("$E" upload "$PID" "$H/cap.jpg" 2>&1)
 gate "capabilities_rejected_really_rejected" "$(echo "$REJ" | grep -c 'no OCR engine')" "1"
 gate "capabilities_reject_reason_actionable" "$(echo "$REJ" | grep -c -- '--features ocr')" "1"
+
+# 2e) D-023：extraction（LLM 结构化抽取回写）——helper 真能调，且**伪造字段进不了真相层**。
+#     判据形状：不是「回执说 verified」就算过，而是「**落库的 extraction 里没有伪造字段**」。
+cat > "$H/extract_ok.json" <<'EXEOF'
+{"labs":[{"name":"白细胞计数","value":"12.3","unit":"10^9/L"}]}
+EXEOF
+EX=$("$E" extraction "$PID" "$SHA" "$H/extract_ok.json" --mode text --backend gate --model-version gate-1)
+gate "extraction_verified_true" "$(echo "$EX" | python3 -c 'import json,sys;print(1 if json.load(sys.stdin)["verified"] else 0)')" "1"
+gate "extraction_content_hash_echoes_sha" "$(echo "$EX" | python3 -c 'import json,sys;print(1 if json.load(sys.stdin)["content_hash"]=="'"$SHA"'" else 0)')" "1"
+# 伪造项：原文里没有「血糖」也没有 99.9 ⇒ 文本档判假 ⇒ **不得**进落库的 extraction
+cat > "$H/extract_forged.json" <<'EXEOF'
+{"labs":[{"name":"血糖","value":"99.9","unit":"mmol/L","ref_low":"3.9","ref_high":"6.1","flag":""}]}
+EXEOF
+"$E" extraction "$PID" "$SHA" "$H/extract_forged.json" --mode text --backend gate --model-version gate-1 >/dev/null 2>&1
+EXD=$("$E" detail "$PID" "$SHA")
+gate "extraction_forged_field_rejected" "$(echo "$EXD" | grep -c '血糖')" "0"
+gate "extraction_bad_mode_400" "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://127.0.0.1:$PORT/api/v1/persons/$PID/documents/$SHA/extraction" -H 'content-type: application/json' -d '{"result_json":"{}","backend":"g","model_version":"g","mode":"imgae"}')" "400"
 
 # 3) 关键不变量：数值只在 labs 里、证据带 docref、search 0 命中不报错
 LABS_JSON=$("$E" labs "$PID")

@@ -1,5 +1,74 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-039 2026-10-26 · **T22「形状门自己也在测错对象」——把「覆盖全部端点」从注释里的承诺变成机器判据，并修掉第 5 个「文档在骗人」的缺陷**
+**为什么做**：D-038 交付了「运行时响应形状 vs OpenAPI 声明形状」的端点级门禁（`ehr-api/tests/response_shape.rs`，3 门）。本轮接着 PLAN 的「**手抄实现细节残留需系统扫**」往下扫，结果**在自己的新门上又撞见一次 D-037 的同族病**——而且这次是**同一类病在同一天、同一批文件上复发**：
+①`response_shape.rs` 的文件头注释白纸黑字写着「**覆盖全部端点（不手抄清单）——清单从 OpenAPI 派生** ⇒ 加端点自动纳入守卫」；
+②但代码里其实是一份**手写的 12 条 `probes` 数组**（`GET /api/v1/healthz` / `capabilities` / `persons` / `timeline` / `search` / `labs` / `medications` / `conditions` / `measurements` / `documents` / `documents/{sha}` / `audit`）⇒ **19 个 operation 里只覆盖了 12 个**；
+③**7 个写侧 operation 从未被断言过**：`POST /persons` / `POST /persons/{pid}/documents` / `POST .../entries/self-measurement` / `POST .../entries/note` / `POST .../entries/profile-event` / `PUT .../extraction` / `GET .../original` ⇒ 而这一切**完全看不出来**——门是绿的，注释是自信的，只有**数一数**才发现漏了 7 个。
+④⇒ **「宣称覆盖全部」与「实际覆盖」分叉**，这正是 D-037 治的病（「门一直绿，但它绿在测什么？」）在**新写的门上复发**：判据的有效性依赖**一句注释**，而注释**不可执行**。
+**关键结构决策①：把「覆盖率」本身变成判据**（不是「宣称」，是**机器核对**）。新增门 `every_openapi_operation_is_covered_by_a_probe`：**从运行时 OpenAPI 派生的 operation 集合 ⊆ 探针覆盖的 operation 集合，且两集合逐条相等**。⇒ 以后**加了新端点但忘了加探针 ⇒ 这一门立刻红**（`OpenAPI 里有 operation 没有探针 ⇒ 它们从未被形状门断言过：["PUT /api/v1/..."]`）⇒ 「自动纳入守卫」这句话**第一次真的成立**。
+**为什么用「集合包含 + 逐条相等」而不是「数量 ≥ N」**：D-009 判据形状原则的第七次应验——**数量对了但端点名错了，照样是漏**；「≥ 19」这种快照式断言在**加端点**时也不会红（19→20 仍 ≥19）⇒ 它抓不到「忘了加探针」这个真正的失败模式。⇒ 判据必须是**集合**。
+**关键结构决策②：探针表必须显式登记「怎么造出 2xx」，但「登记的完整性」由机器核对**。写侧端点的前置条件各不相同（建档/上传/写条目/PUT extraction 需要**能被 `deid::verify` 逐字核验**的最小抽取），所以「一份显式探针表」是**必要**的；危险的是把「显式」等同于「完整」。⇒ **显式登记 + 集合核对**二者缺一不可。
+**关键结构决策③（顺带抓到的第 5 个真缺陷）：`GET .../original` 的 Content-Type 声明是**假话**。** 真响应的 `Content-Type` 是**动态的**——取自原件入库时嗅探/存储的 mime（上传 `.txt` ⇒ `text/plain`，`.pdf` ⇒ `application/pdf`），只有「索引行缺失」时才回落 `application/octet-stream`；而 OpenAPI 却**写死**成 `application/octet-stream` ⇒ **对绝大多数文件都不成立**。**处置**：声明改为 **通配 `*/*`**（OpenAPI 3.1 的 content map 允许通配键）⇒ 如实表达「任意二进制流，具体类型由原件的 mime 决定」，客户端按 `*/*` 处理（存字节）**总是安全**的。**为什么不用 `application/octet-stream`**：那是**对大多数文件不成立的具体断言**，比通配更糟（通配至少不撒谎）。**为什么 utoipa 的 `content_type` 只给字符串**：它就是单值属性，**没有**「动态」的表达力 ⇒ 只能选通配。
+**关键结构决策④：形状门必须**按 content-type 分流**，不能拿 JSON 判据去套二进制端点**。`GET .../original` 回的是 CAS 原始字节（`application/octet-stream` 或原件 mime）⇒ **不能**用 JSON schema 判它；反过来，**声明为非 JSON 的端点必须确认它真的不是 JSON**（content-type 不能撒谎）。⇒ 判据分三支：①声明 `application/json` ⇒ 必须有 schema 且真响应符合；②声明 `*/*`（通配）⇒ **覆盖真值**（恒真），但**必须**确认真体解析不出 JSON；③声明具体非 JSON 类型 ⇒ 真响应 content-type 必须**逐字相等**。
+**关键结构决策⑤：判据形状 = 「**声明必须覆盖真值**」，不是「声明 == 真值」**。通配 `*/*` 天然覆盖任意具体类型 ⇒ 门判的是「覆盖」这个语义，而不是「字符串相等」这个形式。**教训（D-037 的升级版）**：**当「真值是动态的」时，硬编码一个具体值不是保守，而是撒谎**——保守的做法是**放宽声明**（通配）并**让门去验证「覆盖」关系**。
+**证据链（缺一即不算交付）**：
+①**`cargo test --all-targets` 83 门全绿**（原 79 + T22 新增 `every_openapi_operation_is_covered_by_a_probe` **1 门** + D-038 的 `response_shape.rs` **3 门**已在本轮归位；另修 `tests/capabilities.rs` **2 处编译错**——`capability_manifest()` 从 `Value` 改成**显式建模的 struct** 后，测试仍在用旧的 `Value` 索引写法 ⇒ **工作树此前根本编译不过**，`cargo test` 直接 `error[E0608]`/`error[E0277]` ⇒ **「上一轮的绿灯」其实没跑过新代码**）。
+②**本轮抓到并修掉的真缺陷 5 个**（D-038 的 ①②③④ + 本轮新增的 ⑤「`/original` 的 content-type 声明是假话」）；其中 ④⑤ 是**本轮新门抓到的**——D-038 那 3 门因为只覆盖 12/19 个 operation，**根本碰不到 `/original`**。
+③**覆盖率门是「真门」的负向证据（实撞一次）**：从探针表里**删掉** `PUT .../extraction` 的登记 ⇒ `every_openapi_operation_is_covered_by_a_probe` **FAILED**，报 `OpenAPI 里有 operation 没有探针 ⇒ 它们从未被形状门断言过：["PUT /api/v1/persons/{pid}/documents/{sha}/extraction"]` ⇒ 复原后全绿。**这正是「上一版漏掉 7 个写侧 operation」那个失败模式的精确复现**。
+④**content-type 门是「真门」的负向证据（实撞一次）**：把 `/original` 的声明**改回** `application/octet-stream`（即恢复那句假话）⇒ 形状门 **FAILED**，报 `真响应 Content-Type='text/plain' 与 OpenAPI 声明的 'application/octet-stream' **不一致**` ⇒ 复原 `*/*` 后全绿。⇒ **参数/声明真进判据**。
+⑤**门禁全量复跑 13 个脚本 fails=0**：`api-doc-check.sh`（A5 `stub endpoints=0`）/ `skill-contract-check.sh` / `skill-rest-check.sh` / `mcp-e2e.sh` / `auth-e2e.sh` / `entries-e2e.sh` / `conds-e2e.sh` / `meds-e2e.sh` / `audit-e2e.sh` / `ehtest.sh` / `rebuild-e2e.sh` / `rebuild-lock-e2e.sh` / `web-e2e.sh`。
+⑥**`docs/API.md` 重新生成**（40305 bytes）并与生成物**逐字一致**（A3）；A4 `openapi operations=19 / missing_in_doc=0`；A5 `stub endpoints=0`。
+⑦**零新依赖**：`ehr-api/Cargo.toml` / `Cargo.lock` **未改动**（本轮只改测试与一处 OpenAPI 声明）。
+**新坑三则（D4 同族）**：
+①**「注释里的承诺」不是判据——它在门刚写出来那天是真的，加了端点就悄悄变假**——本文件上一版的注释与它的 `probes` 数组**互相矛盾**，而**没有任何机器检查**能发现 ⇒ 唯一的治法是**把承诺变成断言**。**教训升级（D-037 的第二版）**：**新增门禁时，必须同时问「这条门自己漏了会怎样」**——如果漏了**没有任何东西会红**，那它就是**一句注释**，不是门。
+②**「工作树的绿灯」可能根本没跑过新代码**——接手时 `cargo test` 直接**编译失败**（`tests/capabilities.rs` 还在用 `Value` 索引，而 `capability_manifest()` 已改成 struct）⇒ 说明**上一轮的「79 门全绿」是在改动落地前取得的**，改动落地后**没有重跑**。**教训：接手工作树的第一件事不是「读计划」，是「先让它编译并跑一遍」**——否则会把「上一轮的绿灯」误当成本轮的现状。
+③**utoipa 的 `content_type` 是单值属性，没有「动态」的表达力**——想让 OpenAPI 表达「运行时决定的 mime」只有两条路：①写死一个具体类型（**假话**，本轮正是要修的）；②写通配 `*/*`（**诚实**，本轮采用）。⇒ **遇到「真值是动态的」时，先问「声明能不能放宽」**，而不是「挑一个最常见的值写死」。
+④**（附记）`cargo` 不在默认 `PATH`**——本机 cargo 在 `~/.cargo/bin`，非交互 `sh` 下 `cargo: command not found` ⇒ 每条命令都要 `export PATH=$HOME/.cargo/bin:$PATH`（D-030/D-032 反复踩同一个「环境没带上」的坑族）。
+**未销账/下一步**：①**「手抄实现细节」残留的系统扫描**已推进到**门禁面**（本轮抓到 `response_shape.rs` 自称覆盖全部实则覆盖 12/19），但**文档面**（`rest-contracts.md` / `SKILL.md` 里是否还有「形状/字段」的过期描述）**未逐条核**；②**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；③「体检报告 PDF 列布局 labs=0」缺口：extraction 管线已就位，缺的是「把 PDF 送进 LLM」这一步的**端到端脚本**；④「家庭自测趋势」专用视图仍未做；⑤公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token（当前 OCR 编排 `EHR_API_TOKENS` 为空 ⇒ **放行模式**，仅本地）；⑥ghcr 包可见性仍 private（OCR 镜像也尚未推 GHCR）；⑦真·第三方 MCP 客户端互通仍未验；⑧`.dcm`/DICOM worker 未做（能力清单已如实标 `enabled=false`）；⑨**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在；⑩MCP 侧仍**无 resources/prompts**；⑪`docs/API.md` 是**生成物**，改接口须跑 `./api-doc-check.sh --write`；⑫人员域三端点仍 501 且刻意不进 OpenAPI；⑬**OCR 镜像未推 GHCR / 未纳入 CI**（建议先按需本地构建）。
+
+## D-038 2026-10-26 · **T21「响应形状」显式建模 + OpenAPI 补齐 body 声明——把「文档在骗人」的第四种形态（根本没形状）治掉**
+**为什么做**：D-025 治的是「文档有没有**漏端点**」，D-037 治的是「端点在不在 **stub 清单**里」。两者都没问一个更基础的问题：**「OpenAPI 说的这个 200 响应长什么样，和真回的是不是同一个东西？」** ⇒ 本轮实测抓到**四个真缺陷**（都是「文档在骗人」）：
+①`GET /persons/{pid}/timeline` OpenAPI 说 200 = **数组** `[TimelineItem]`，**真回的是对象** `{person_id,count,items}`；
+②`GET /persons/{pid}/search` 同上；
+③`GET /persons/{pid}/documents` 同上；
+④`GET /capabilities` / `GET /healthz` 的 200 **根本没声明 body** ⇒ 生成的客户端**拿不到类型**，只能猜里面有什么。
+⇒ **照 OpenAPI 生成的客户端会把响应当数组解，直接解不出 / 静默拿到空**。①②③的病根是 **`utoipa` 的 `body = Vec<T>` 没法表达「对象里套一个数组」** ⇒ 只能自己建模信封。
+**关键结构决策①：信封要**显式建模**（`TimelineReply`/`SearchReply`/`DocumentListReply`/`HealthzReply`/`CapabilityManifest`/`CapabilityRouteOut`），不是 `json!` 拼的 `Value`**。理由有二：①**OpenAPI 里要有形状**——`json!` 拼出来的 `Value` 在 OpenAPI 里**没有 body 声明**（这正是缺陷④的机制）；②**D2（一个语义只允许一处实现）**——REST handler 与 MCP 工具**共用同一批 struct**（此前两边各写一份 `json!` 拼装 ⇒ 同一形状两份实现，改一处漏一处就分叉）。
+**关键结构决策②：`CapabilityManifest` 从 `Value` 改成 struct** ⇒ 顺带让 `GET /capabilities` 的 200 **有了 body 声明**（缺陷④的一半）；另一半（`healthz`）由 `HealthzReply` 补齐。
+**关键结构决策③：判据 = 「两份独立产物互校」，不是「清单自洽」**。`ehr-api/tests/response_shape.rs` 比对的是：①**OpenAPI 渲染出的 schema**（utoipa derive 的产物）vs ②**真跑一次 handler 拿到的响应体** ⇒ 二者不同源 ⇒ 漂移必红。规则：顶层 JSON 类型必须与 schema 的 `type` 一致；schema 的每个 `required` 字段必须真在响应里；**响应里的每个键都必须在 schema 的 `properties` 里声明过**（反向方向：「文档没说、实际有」也是漂移）。
+**关键结构决策④：可选键的语义必须**双向对齐**（D-011 家族：**门自己红得不对**）**。`Option` + `#[serde(skip_serializing_if = "Option::is_none")]` 的语义是「无值时**整个键不存在**，不是空值」（已文档化于 `rest-contracts.md` 不变量 4）⇒ 故：schema 里**非 required** 的属性**允许**在响应里不存在；但**反向**（响应里多出来的键）**不允许**。**教训**：第一版把「schema 属性 ⊆ 响应键」当判据 ⇒ 把合法的可选键（`extraction` 无值时）判成漂移 ⇒ **门自己红得不对** ⇒ 先怀疑门（D-011 家族）。
+**关键结构决策⑤：探针自己会被断言**（照抄 D-010 纪律）**。本测试**自己起真服务**（`oneshot` 打真 router）、**不解析源码**、**不手抄端点清单** ⇒ 探针本身没有可漂移的「第二份实现」。
+**证据链**：①`cargo test --all-targets` 全绿（`response_shape.rs` 3 门：顶层形状 / 数组元素形状 / 反向保险「信封端点必须是 object 而非裸数组」）；②`api-doc-check.sh` fails=0（`docs/API.md` 重新生成并逐字一致）；③门禁 13 脚本全绿；④**缺陷 ①②③④ 均为实测抓到**（改回 `Vec<T>` 声明 → 门立刻红在「OpenAPI 声明 200 是 array，真响应却是 object」）。
+**新坑两则**：①**`utoipa` 的 `body = Vec<T>` 表达不了「对象里套数组」** ⇒ 必须自己建模信封 struct（不是 `json!`）；②**`capability_manifest()` 从 `Value` 改成 struct 会**连带打破**所有按 `Value` 索引调用它的代码**（本轮 `tests/capabilities.rs` 就是这种 ⇒ **工作树编译不过**）⇒ 改返回类型必须**全仓扫调用点**。
+
+## D-037 2026-10-26 · **T20「stub 判据」从「手写正则解析源码」换成「实现派生清单」——并修掉一道一直在查错表的假门**
+**为什么做**：接手工作树时先撞上一个**真红**的门：`audit-e2e.sh` 的 M5 报 `FAIL M5 stub 计数不是 1`。顺藤摸下去，发现的不是「快照过期」这么小的事，而是一个**结构性的判据缺陷**，且它**一直在装绿灯**：
+①`audit-e2e.sh` / `entries-e2e.sh` / `conds-e2e.sh` / `meds-e2e.sh` 四个脚本，各自用**手写正则**去解析 `ehr-api/src/lib.rs` **源码文本**，以判断「某个端点是否仍被宣称 stub→501」：
+`m=re.search(r"pub const CONTRACT[^=]*=\s*&\[(.*?)\n\];", s, re.S)`
+②`extraction` 端点实装后，`CONTRACT` 表变成**空表**（`&[];`）⇒ 这条正则**匹配失败**（`\n];` 匹配不到 `&[];`）⇒ `re.search` 返回 None。
+③**假门的形成机理**（关键）：在 `m.group(1)` 抛异常之前，正则的 `.*?` **非贪婪回溯**找到了**下一处** `\n];`——也就是 `MOUNTED_UNDOCUMENTED` 表的结尾 ⇒ 于是脚本**读到的是「刻意不进 OpenAPI 的三个人员域端点」**，而不是 CONTRACT 表。⇒ 「medications/conditions/measurements 不在 CONTRACT 表」这四道门**实际在查错误的表**；它们之所以一直绿，**不是因为判据对，而是因为空表恰好不含这些端点**。
+**关键结构决策①：判据必须由实现派生，且必须「逐条公布」而不只是「给个数」**。`rest_manifest()` 新增字段 **`stub_paths`**（`["GET /api/v1/xxx", ...]`，**逐条**列出仍被宣称 501 的 operation）。**为什么不能只给个数**：`stubs` 字段早就有了，但门禁要回答的是「**某一个具体端点**还在不在 stub 清单里」⇒ 判据形状必须是**集合**，不是标量（D-009「判据形状」原则的第 N 次应验）。**为什么不用现成的 `CONTRACT` 表**：那张表是 Rust 源码里的常量，门禁脚本读它就得**解析源码**——这正是病根。派生清单是 **JSON**，读它不需要理解 Rust 语法 ⇒ **同一事实一份实现**（D2）。
+**关键结构决策②：四个门禁脚本改读派生清单，并删掉「手写正则解析源码」**。改动后：
+- `audit-e2e.sh` M4：`GET /api/v1/audit` 是否在 `stub_paths` 里（**逐条**匹配）；
+- `audit-e2e.sh` M5：`CONTRACT` 表条目数 **==** 派生清单 `stubs` 数（**不再写死 1**）——D-032/T15「数字快照不是判据」的同族修复；
+- `meds-e2e.sh` / `conds-e2e.sh` / `entries-e2e.sh` 的 M5/M8：对应端点是否在 `stub_paths` 里。
+**为什么 M5 仍保留「读源码数 CONTRACT 条目」这一半**：因为它断言的是**两张表的一致性**（Rust 侧的 `CONTRACT` ↔ 派生清单的 `stubs`），这是**两个真源之间**的对账，属另一类断言，不属「脚本自己解析源码当判据」。但它的正则**已修正**（`&\[(.*?)\];` 单行闭合，避免跨表误匹配——即使正则再失效，脚本也只会数到 0 而非 3，且 M5 会因与派生清单不符而红，不会静默放行）。
+**关键结构决策③：新增反向保险测试 `rest_manifest_stub_paths_match_contract_table`**，断言三件事：①`stub_paths` **逐条等于** `CONTRACT` 表的 operation 集合；②`stubs` 数 **==** `stub_paths` 长度（两个字段不许分叉）；③**五个已实装端点绝不能出现在 `stub_paths` 里**（`audit` / `extraction` / `medications` / `conditions` / `measurements`）⇒ 「实装了但 OpenAPI 仍宣称 501」这种 D-025 纪律失守，会在**单测层**立刻红，而不是等门禁脚本碰巧跑到。
+**关键结构决策④：门禁必须留「负向证据」，不能只留绿灯**。本轮**实撞**了一次真红：把 `medications` 临时挂回 `CONTRACT` 表 ⇒ ①`meds-e2e.sh` ⇒ `FAIL M5 medications 仍在 stub 清单里`（fails=2）；②`tests/rest_manifest.rs` ⇒ `implemented endpoint still claimed as stub: GET /api/v1/persons/{pid}/medications`（1 门 FAILED）；③派生清单 `stubs=1 / stub_paths=["GET /api/v1/persons/{pid}/medications"]` ⇒ **参数真进判据**。复原后全绿。
+**证据链（缺一即不算交付）**：
+①**`cargo test --all-targets` 79 门全绿**（原 78 + 新 `rest_manifest_stub_paths_match_contract_table` **1 门**）：lib 21 / apidoc 3 / audit 3 / auth 7 / capabilities 3 / conds 4 / contract 1 / entries 6 / **extraction 5** / mcp 15 / meds 2 / rebuild 3 / **rest_manifest 5** / sha_gate 1。
+②**门禁全量复跑 13 个脚本 fails=0**：`api-doc-check.sh`（A5 `stub endpoints=0`）/ `skill-contract-check.sh` / `skill-rest-check.sh` / `mcp-e2e.sh` / `auth-e2e.sh` / `entries-e2e.sh` / `conds-e2e.sh` / `meds-e2e.sh` / `audit-e2e.sh` / `ehtest.sh` / `rebuild-e2e.sh` / `rebuild-lock-e2e.sh` / `web-e2e.sh`。
+③**派生清单本身可验**：`--print-rest-manifest` ⇒ `stubs=0` / `stub_paths=[]`（**空表也对**——不是「空则跳过」而是「空就是 0」）。
+④**负向证据（真门）**：临时把 `medications` 挂回 `CONTRACT` ⇒ `meds-e2e.sh` **FAIL M5**（fails=2）+ `rest_manifest` 测试 **FAILED** ⇒ 复原后全绿。
+⑤**新参数真进判据**：改前 `audit-e2e.sh` M5 红（`stub count=3`，正是**跨表误匹配**的产物）⇒ 改后 `CONTRACT stub count=0 derived_manifest_stubs=0` ⇒ M5 绿。
+⑥**零新依赖**：`ehr-api/Cargo.toml` / `Cargo.lock` **未改动**（仅新增 JSON 字段 + 测试 + 改 shell 判据）。
+**新坑两则（D4 同族）**：
+①**「门一直绿」不等于「门在测对的东西」——空表会让非贪婪正则跨表回溯**——`re.search(r"...&\[(.*?)\n\];")` 在 CONTRACT 变空时匹配到**下一张表**（`MOUNTED_UNDOCUMENTED`），于是「端点不在 CONTRACT 表」这四道门**在查错的表**。**教训升级（对 D-009 的补充）**：**判据失效有三种面貌**——①红（快照过期，如 D-036 撞的 M5）；②**绿但测错对象**（本轮，最危险）；③**静默抛异常**（`None.group(1)` ⇒ `AttributeError`，脚本非零退出但报错面貌完全不像门禁失败）。⇒ **纪律升级：门禁「一直绿」时也要问「它绿在测什么」**——尤其是当判据依赖**解析别人的源码**时。
+②**「数字从 1 变 0」会暴露「某张表空了」这类结构变化，而空表是正则的天敌**——`&[];` 这种写法让「以 `\n];` 收尾」的匹配模式直接失效。**教训：正则依赖「表里有内容」这个隐含前提；表可能变空 ⇒ 正则的写法必须能处理空表**（本轮 M5 残留那一半的正则已改成 `&\[(.*?)\];` 闭合）。
+**未销账/下一步**：①**本轮只治了「stub 判据」这一类**——工作树里仍有**别的脚本手写正则解析源码**的同族病（如 `entries-e2e.sh` 里对 `measurements`/`entries/` 的字符串包含判断），已随本轮一起改掉；但**其它「手抄实现细节」的残留**（如 `container-smoke.sh`、`tests/mcp.rs` 里的数字）需**逐个核查**，本轮未系统扫；②**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；③「家庭自测趋势」专用视图仍未做；④**extraction 端点已毕业**（D-023 落地）⇒ 目标验收②的 6 个 stub **全部实装**，但**「体检报告 PDF 列布局 labs=0」缺口仍未做**（extraction 管线已就位，缺的是「把 PDF 送进 LLM」这一步的端到端脚本）；⑤公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑥ghcr 包可见性仍 private（OCR 镜像未推 GHCR）；⑦真·第三方 MCP 客户端互通仍未验；⑧`.dcm`/DICOM worker 未做；⑨**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在；⑩MCP 侧仍**无 resources/prompts**；⑪`docs/API.md` 是**生成物**（改接口须跑 `./api-doc-check.sh --write`）；⑫人员域三端点仍 501 且刻意不进 OpenAPI（`MOUNTED_UNDOCUMENTED`）。
+
+
 ## D-036 2026-10-26 · **T19「OCR 做成可部署镜像」+「真照片识别闭环实拍」——把 D-035 剩下的两格补完**
 **为什么做**：D-035 交付后自己点名的两格是「**OCR 产物尚未做成可部署镜像**」与「**真识别闭环的实拍证据缺失**」。这两格不是「收尾杂事」——**它们是「手机拍检查单能真被读」这个用户价值的最后一段**。D-035 止步于「引擎链上了、能力清单如实变了」，但 D-034 决策⑤早已把诚实边界划清：**`ocr_available=true` 只说明链了引擎，不保证模型就绪**（PP-OCRv5 权重是运行期下载的）。本轮把「链上了」推进到「**真出文本、真落指标、真能溯源**」。
 **关键结构决策①：OCR 是「独立镜像 + 独立编排」，不是默认镜像的一个 feature 开关**。理由有三条，各有硬证据：①**基础镜像必须换 trixie**（ORT 1.28 预编译静态库要 glibc ≥ 2.38，C++23 ABI 符号 `__isoc23_strtol` / `_M_replace_cold`；bookworm = 2.36 链不过——D-034 实测）；②**默认镜像必须保持 bookworm + 零 OCR 依赖**（宿主 e2e 门禁全是「起本机 release 二进制打真 HTTP」，默认带 OCR ⇒ `ldd` 报 `GLIBC_2.38 not found` ⇒ **门禁体系整体报废**）；③**两个编排的镜像 tag 会互相覆盖**（compose 默认用「项目名-服务名」= `deploy-ehr-api`）⇒ OCR 编排必须给**独立 image 名** + **独立项目名**（`medme-ehr-ocr`）+ **独立 volume** + **独立端口**（8587，默认编排占 8585）。**这四条都写进了文件头注释**——不是「补文档」，是让下一个人不会把它们改回去。

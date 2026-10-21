@@ -72,7 +72,34 @@ async fn contract_paths_are_routed_and_documented() {
             checked += 1;
         }
     }
-    assert!(checked >= 18, "expected the full REST surface, checked only {checked}");
+    // D-021：`checked >= 18` 是**快照不是判据**——它对「少了一条路由」完全不敏感
+    // （少检查也会绿），只能抓「OpenAPI 里有我没数到的 operation」。
+    //
+    // ⚠️ 关键：**不能**写成 `checked == rest_manifest()["operations"]`——那是**同义反复**
+    //   （checked 就是在遍历 openapi_json()，两者同源 ⇒ 永远相等 ⇒ 永远绿；
+    //    这正是 D-037「绿但测错对象」的最隐蔽形态）。
+    //   真判据必须**跨产物**：`checked`（**实测**：每个 operation 真打了一次请求，
+    //   并确认它命中了路由——不是 404 空体、不是 405）必须等于
+    //   **文档里公布的端点数**（apidoc 渲染产物）⇒ 少挂一条路由 / 文档漏一条，都红。
+    //   （这正是本测试存在的意义：「文档里有、router 里没有」是 D1 反向保险。）
+    let doc_md = ehr_api::apidoc::render(&ehr_api::openapi_json());
+    // ⚠️ 探针自身的坑：文档里 `### ` 小节有**两类**——端点小节（`### \`GET /api/v1/audit\``）
+    //   与 schema 小节（`### \`AuditReply\``）⇒ 只按前缀数会把 schema 也数进去。
+    //   判别式 = 「METHOD 是 HTTP 动词」。
+    const HTTP_METHODS: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
+    let doc_ops = doc_md
+        .lines()
+        .filter_map(|l| l.strip_prefix("### `"))
+        .filter(|rest| {
+            rest.split_once(' ')
+                .map(|(m, _)| HTTP_METHODS.contains(&m.to_uppercase().as_str()))
+                .unwrap_or(false)
+        })
+        .count();
+    assert_eq!(
+        checked, doc_ops,
+        "必须逐条实测 OpenAPI 里的每一个 operation，且实测数 == 文档公布的端点数（跨产物判据）"
+    );
 
     // 3) CONTRACT 表（唯一事实源 = ehr_api::CONTRACT）：登记为 stub 的必须真返回 501
     //    （反之：实装后忘了从表里移除 ⇒ OpenAPI 仍宣称 501 而实际 200 = 文档粉饰状态码，D5）

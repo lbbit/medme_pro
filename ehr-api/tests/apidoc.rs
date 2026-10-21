@@ -60,7 +60,54 @@ async fn generated_doc_covers_every_openapi_operation_and_vice_versa() {
             }
         }
     }
-    assert!(n_ops >= 16, "openapi 端点数异常：{n_ops}");
+    // D-021：端点数**不许写死快照**（此前是 `>= 16`）⇒ 判据改为「两份独立产物**逐条相等**」。
+    // 为什么：`>= 16` 是**快照不是判据**——加一条路由它不会红（少一条端点也不会红），
+    // 真正能抓漂移的是「文档里的小节数 == OpenAPI 里的 operation 数」。
+    //
+    // ⚠️ 关键：**不能**写成 `n_ops == rest_manifest()["operations"]`——那是**同义反复**
+    //   （两者都从 openapi_json() 派生 ⇒ 永远相等 ⇒ 永远绿；这正是 D-037「绿但测错对象」
+    //   的最隐蔽形态：一个看起来很严谨、实则测不出任何东西的断言）。
+    //   真判据必须**跨产物**：**渲染出来的 Markdown 小节**（apidoc::render 的产物）
+    //   vs **OpenAPI 原文**（两份独立产物）⇒ 一边漏小节/多小节/重复小节都会红。
+    // ⚠️ 探针自身的坑（本轮实撞）：生成文档里 `### ` 小节有**两类**——端点小节
+    //   （`### \`GET /api/v1/audit\``）与**schema 小节**（`### \`AuditReply\``）。
+    //   只按 `### ` 前缀数 ⇒ 50（19 端点 + 31 schema）⇒ 断言立刻红。
+    //   ⇒ 判别式 = 「小节内容是 `METHOD path` 形状且 METHOD 是 HTTP 动词」。
+    //   （D-011「红门先查门禁自身」的同族：门禁探针出错时，报错面貌会伪装成产品 bug。）
+    const HTTP_METHODS: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
+    let md_sections = md
+        .lines()
+        .filter_map(|l| l.strip_prefix("### `"))
+        .filter_map(|rest| {
+            let (m, p) = rest.split_once(' ')?;
+            let m = m.to_uppercase();
+            if !HTTP_METHODS.contains(&m.as_str()) {
+                return None; // schema 小节（无空格或非 HTTP 动词）
+            }
+            Some(format!("{} {}", m, p.trim_end_matches('`')))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        md_sections.len(),
+        n_ops,
+        "生成文档的端点小节数必须等于 OpenAPI 的 operation 数（跨产物判据，不是同源比较）"
+    );
+    // 逐条相等（不只是个数）：文档小节集合 == OpenAPI operation 集合
+    let mut openapi_ops: Vec<String> = Vec::new();
+    for (p, item) in paths {
+        for (m, op) in item.as_object().unwrap() {
+            if op.is_object() {
+                openapi_ops.push(format!("{} {}", m.to_uppercase(), p));
+            }
+        }
+    }
+    openapi_ops.sort();
+    let mut md_sorted = md_sections.clone();
+    md_sorted.sort();
+    assert_eq!(
+        md_sorted, openapi_ops,
+        "生成文档的端点小节集合必须逐条等于 OpenAPI 的 operation 集合"
+    );
 
     // 反向：文档小节里的每个端点都必须真实存在于 OpenAPI（无幽灵端点）
     for line in md.lines() {

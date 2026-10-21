@@ -46,7 +46,6 @@
 |---|---|---|---|
 | `GET` | `/api/v1/audit` | 审计视图：两层真相层合并（**口径分层**，不假装只有一层）。 - `source="registry"`：person registry 的 append-only 原始事件（create/update/delete，**不折叠**）。 - `source="vault"`：上游 `Vault::audit_log()` 的投影（导入/导出/分享/删除）——**复用上游判据，不另写一份**。 参数 `person`/`op` 是**真过滤**（真进判据，不是摆设）。 | ✅ 已实装 |
 | `GET` | `/api/v1/capabilities` | **ingest 能力清单**（D-034）：本构建**能吃哪些文件类型**、哪种类型走哪条路、 哪种能力**没链接进来**（默认构建没开 OCR ⇒ 图片被如实拒）。 | ✅ 已实装 |
-| `PUT` | `/api/v1/documents/{sha}/extraction` | AI agent 结构化发现(引用不替代，字段级 evidence 锚点)（stub→501） | ⚠️ stub（501） |
 | `GET` | `/api/v1/healthz` | 健康检查 | ✅ 已实装 |
 | `GET` | `/api/v1/persons` | 人员列表（读 registry/persons.jsonl 全量折叠；MVP 规模足够，规模化后换派生索引——真相层不变） | ✅ 已实装 |
 | `POST` | `/api/v1/persons` | 建档 —— person registry 是本项目唯一新增真相层（append-only JSONL，与内核事件日志同哲学） | ✅ 已实装 |
@@ -54,6 +53,7 @@
 | `GET` | `/api/v1/persons/{pid}/documents` | 文档列表（documents.json 折叠视图，docref=sha256）。timeline 的扩展列版。 | ✅ 已实装 |
 | `POST` | `/api/v1/persons/{pid}/documents` | MVP 直传同步入库(锁=每人串行占位)；OCR/DICOM worker 化后置。见 vaults::ingest_upload。 | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/documents/{sha}` | GET /persons/{pid}/documents/{sha} —— document + OCR文本层 + extraction JSON(API-DESIGN)。 | ✅ 已实装 |
+| `PUT` | `/api/v1/persons/{pid}/documents/{sha}/extraction` |  | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/documents/{sha}/original` | GET .../documents/{sha}/original —— CAS read_object **每次核 sha256**(内核内建防投毒)后流字节。 dedup/raw-only 件都能取到（CAS 按 hash 寻址，不经索引）——这是「原件永不丢」的兑现端点。 | ✅ 已实装 |
 | `POST` | `/api/v1/persons/{pid}/entries/note` | 写一条纯文本笔记。原文即内容（不解析、不关联用药/诊断）。 | ✅ 已实装 |
 | `POST` | `/api/v1/persons/{pid}/entries/profile-event` | 写一条病程动作日志（如「开启病程档案」「停药」）。`at` 是**事件发生的那天** （YYYY-MM-DD，用户说的那天），`payload` 必须是 JSON 对象。 | ✅ 已实装 |
@@ -111,29 +111,6 @@ curl -X GET \
 curl -X GET \
   -H 'Authorization: Bearer $EHR_API_TOKEN' \
   'http://127.0.0.1:8443/api/v1/capabilities'
-```
-
-### `PUT /api/v1/documents/{sha}/extraction`
-
-AI agent 结构化发现(引用不替代，字段级 evidence 锚点)（stub→501）
-
-> ⚠️ **本端点当前返回 501（尚未实装）**——下方是已固定的契约形状，实现后语义不再变。
-
-- 鉴权：需要 Bearer token
-**响应**
-
-| 码 | 说明 |
-|---|---|
-| `200` | planned |
-| `501` | not implemented yet (stage-2 in progress) |
-
-
-**示例**
-
-```bash
-curl -X PUT \
-  -H 'Authorization: Bearer $EHR_API_TOKEN' \
-  'http://127.0.0.1:8443/api/v1/documents/<sha256>/extraction'
 ```
 
 ### `GET /api/v1/healthz`
@@ -325,6 +302,37 @@ curl -X GET \
   'http://127.0.0.1:8443/api/v1/persons/<person_id>/documents/<sha256>'
 ```
 
+### `PUT /api/v1/persons/{pid}/documents/{sha}/extraction`
+
+
+
+- 鉴权：需要 Bearer token
+
+**请求体**（content-type: application/json）
+
+```json
+ExtractionNew
+```
+
+**响应**
+
+| 码 | 说明 |
+|---|---|
+| `200` | extraction stored (verified=字段级逐字闸全过) |
+| `400` | malformed sha / bad mode / result_json fails deid schema / document has no text layer |
+| `404` | no person or no document for sha |
+
+
+**示例**
+
+```bash
+curl -X PUT \
+  -H 'Authorization: Bearer $EHR_API_TOKEN' \
+  'http://127.0.0.1:8443/api/v1/persons/<person_id>/documents/<sha256>/extraction' \
+  -H 'content-type: application/json' \
+  -d '<JSON body>'
+```
+
 ### `GET /api/v1/persons/{pid}/documents/{sha}/original`
 
 GET .../documents/{sha}/original —— CAS read_object **每次核 sha256**(内核内建防投毒)后流字节。 dedup/raw-only 件都能取到（CAS 按 hash 寻址，不经索引）——这是「原件永不丢」的兑现端点。
@@ -341,7 +349,7 @@ GET .../documents/{sha}/original —— CAS read_object **每次核 sha256**(内
 
 | 码 | 说明 |
 |---|---|
-| `200` | raw bytes (integrity-verified) |
+| `200` | raw bytes (integrity-verified); Content-Type = 原件存储的 mime（缺索引行时为 application/octet-stream） |
 | `400` | malformed sha256 |
 | `404` | person or CAS object not found |
 | `500` | CAS integrity mismatch — poisoned object (D5 red flag) |
@@ -642,6 +650,41 @@ curl -X GET \
 | `entries` | array<AuditEntryOut> | 是 | 命中的审计条目（**新est first**，与上游 `audit_log()` 的展示口径一致）。 |
 | `persons_scanned` | integer | 是 | 参与审计的人数（registry 侧有 vault 的人 ∪ registry 里出现过的人）。 |
 
+### `CapabilityManifest`
+
+ingest 能力清单（**从 `route_for_ext` 派生**，不是手抄表）。
+
+字段说明：
+- `ocr_available`：本二进制是否链接了 OCR 引擎（feature 派生）。
+- `ocr_engine`：引擎名（没链上时为 null）。
+- `routes[]`：每条路由的 `exts`（由判据反查得到）/`enabled`（能力是否就绪）。
+- `accepted_exts`：**本构建真的能吃**的扩展名（路由已知 ∧ 路由 enabled）。
+- `rejected_exts`：**已知但本构建接不了**的扩展名（含原因，供调用方与文档引用）。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `accepted_exts` | array<string> | 是 | **本构建真能吃**的扩展名 |
+| `ocr_available` | boolean | 是 | 本二进制是否**链接了** OCR 引擎（feature `ocr` 派生）。 ⚠️ 只说明「链了」，**不保证模型权重已就绪**（诚实边界见模块头注释）。 |
+| `ocr_engine` | object | 否 | OCR 引擎名（没链接时为 null） |
+| `rejected_exts` | array<string> | 是 | **已知但本构建接不了**的扩展名（原因在 `routes[].reject_reason` 里） |
+| `routes` | array<CapabilityRouteOut> | 是 |  |
+
+### `CapabilityRouteOut`
+
+一条 ingest 路由在能力清单里的对外形状（**显式建模**，D-038）。
+
+为什么要有这个 struct：此前整份清单是 `json!` 拼出来的 `Value`
+⇒ **OpenAPI 里根本没有它的形状**（`GET /capabilities` 的 200 无 body 声明）
+⇒ 生成的客户端拿不到类型，只能猜里面有什么。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `enabled` | boolean | 是 | 本构建**是否启用**这条路由 |
+| `exts` | array<string> | 是 | 走这条路由的扩展名 |
+| `id` | string | 是 | 路由 id（`text-layer`/`ocr-image`/`dicom`） |
+| `name` | string | 是 | 人类可读名 |
+| `reject_reason` | object | 否 | 接不了的原因（**可执行**：写明怎么开）；enabled=true 时为 null |
+
 ### `ConditionOut`
 
 一条诊断（跨文档合并后仍保留全部出处）。
@@ -700,6 +743,14 @@ curl -X GET \
 | `text_indexed` | boolean | 是 |  |
 | `title` | object | 否 |  |
 
+### `DocumentListReply`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `count` | integer | 是 |  |
+| `items` | array<DocumentListItem> | 是 |  |
+| `person_id` | string | 是 |  |
+
 ### `EntryReply`
 
 写侧统一回执（三类条目同形，便于 agent 一套代码处理）。
@@ -713,6 +764,19 @@ curl -X GET \
 | `taken_at` | string | 是 | 事件/记录时刻（RFC3339 UTC）。 |
 | `title` | object | 否 | 标题（时间线展示用）。 |
 
+### `ExtractionNew`
+
+请求体：result_json = LLM 输出的 deid schema v1 JSON（labs/meds/diagnoses，字段须为**原文逐字子串**——
+上游 deid::verify 红线）。backend/model_version/mode/schema 由调用方如实申报，服务端不猜(D4)。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `backend` | string | 是 |  |
+| `mode` | string | 是 |  |
+| `model_version` | string | 是 |  |
+| `result_json` | string | 是 |  |
+| `schema` | integer(int32) | 否 | 抽取输出 schema 版本（1 = labs/meds/diagnoses；2 = 再加族级 facts）。 **由调用方给**（照抄上游 `core_model::NewExtraction::schema` 的文档理由）： 服务端写死会让 schema 2 的结果在库里伪装成 schema 1，消费方按 1 读就永远看不到 facts。 |
+
 ### `ExtractionPass`
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -720,6 +784,27 @@ curl -X GET \
 | `json` | any | 否 |  |
 | `parseable` | boolean | 是 |  |
 | `raw` | object | 否 |  |
+
+### `ExtractionReply`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `content_hash` | string | 是 |  |
+| `diagnoses_count` | integer | 是 |  |
+| `document_id` | integer(int64) | 是 |  |
+| `labs_count` | integer | 是 |  |
+| `meds_count` | integer | 是 |  |
+| `result_hash` | string | 是 |  |
+| `schema` | integer(int32) | 是 |  |
+| `verified` | boolean | 是 | 上游 deid::parse_extraction+verify 结果：verified=true ⇒ 字段级证据闸全过 |
+| `verify_detail` | any | 否 |  |
+
+### `HealthzReply`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `home` | string | 是 | EHR_HOME 的绝对路径 |
+| `status` | string | 是 | `ok` = EHR_HOME 可达；`no-home` = 不可达（服务活着但**不能干活**） |
 
 ### `LabPointOut`
 
@@ -908,6 +993,15 @@ measurements 投影的整个回执。
 | `snippet` | string | 是 | FTS5 snippet：[高亮]标记为内核原生产出(jieba预分词+unicode61 中文路径 POC步骤06实证) |
 | `title` | object | 否 |  |
 
+### `SearchReply`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `count` | integer | 是 |  |
+| `items` | array<SearchItem> | 是 |  |
+| `person_id` | string | 是 |  |
+| `q` | string | 是 | 回显的检索词（trim 后） |
+
 ### `SelfMeasuredValueIn`
 
 一个自测值（上游 `parser::SelfMeasuredValue` 的 HTTP 形态）。
@@ -947,6 +1041,14 @@ measurements 投影的整个回执。
 | `document_id` | integer(int64) | 是 |  |
 | `title` | object | 否 |  |
 
+### `TimelineReply`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `count` | integer | 是 | 命中条目数（= items.len()） |
+| `items` | array<TimelineItem> | 是 |  |
+| `person_id` | string | 是 |  |
+
 ### `UploadReply`
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -959,10 +1061,3 @@ measurements 投影的整个回执。
 | `stored_raw_only` | boolean | 否 |  |
 | `text_indexed` | boolean | 否 |  |
 
-## 7. 尚未实装（501）的端点
-
-| 方法 | 路径 | 计划语义 |
-|---|---|---|
-| `PUT` | `/api/v1/documents/{sha}/extraction` | AI agent 结构化发现(引用不替代，字段级 evidence 锚点)（stub→501） |
-
-> 端点形状**已固定**（路由已挂、已进 OpenAPI），实现后语义不变；调用它们现在只会得到 501。

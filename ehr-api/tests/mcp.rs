@@ -69,7 +69,73 @@ async fn mcp_initialize_and_tools_list_are_wellformed() {
 
     let tools = result(&rpc(&app, json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await)["tools"]
         .as_array().expect("tools array").clone();
-    assert!(tools.len() >= 6, "expected the 6 read-side tools, got {}", tools.len());
+    // D-021：原先是 `tools.len() >= 6`（注释写「6 read-side tools」）——**快照不是判据**：
+    // ①它对「tools/list 少公布了工具」不敏感（少公布也绿）；
+    // ②注释里的「6」与断言的口径本身就对不上（断言比的是**总数**，不是读侧数）⇒
+    //   这正是「手抄实现细节」的典型：数字过期了没人发现，因为它既不是判据也不影响绿/红。
+    //
+    // ⚠️ 关键：判据**不能**写成 `tools.len() == tool_manifest()["count"]`——那是**同义反复**
+    //   （tools/list 与 tool_manifest 都从 tool_schemas() 派生 ⇒ 永远相等 ⇒ 永远绿，
+    //    这正是 D-037「绿但测错对象」的最隐蔽形态）。
+    //   真判据必须**跨面**：MCP 工具面 ↔ REST 面（两份独立实现）必须对得上。
+    //
+    // 跨面不变量（本项目的架构承诺，mcp.rs 文件头②③）：**不存在「MCP 里能查、REST 里查不到」的分叉**
+    //   ——每个 MCP 工具都必须对应一个**真实存在的 REST operation**。
+    //   映射规则（不手抄表，靠命名派生）：去掉 get_/list_/create_/upload_ 前缀后取首词，
+    //   要求存在某个 REST 路径的**最后一段**包含该词（大小写不敏感）。
+    //   例：get_labs→"labs"∈"labs"；get_document_detail→"document"∈"documents/{sha}"；
+    //       search_records→"search"∈"search"；create_person→"person"∈"persons"。
+    //   ⇒ 若有人加了一个「REST 侧并不存在」的 MCP 工具，本门立刻红（这在旧断言下永远绿）。
+    let doc = ehr_api::openapi_json();
+    let rest_last_segments: Vec<String> = doc["paths"]
+        .as_object()
+        .expect("openapi paths")
+        .keys()
+        .map(|p| {
+            p.rsplit('/')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+        })
+        .collect();
+    for t in &tools {
+        let name = t["name"].as_str().unwrap();
+        let rest = name
+            .trim_start_matches("get_")
+            .trim_start_matches("list_")
+            .trim_start_matches("create_")
+            .trim_start_matches("upload_")
+            .split('_')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        assert!(
+            rest_last_segments.iter().any(|seg| seg.contains(&rest)),
+            "MCP tool `{name}` has no corresponding REST endpoint (no path segment contains \"{rest}\") \
+             —— MCP 面与 REST 面已分叉（D-009 跨面判据）"
+        );
+    }
+    // 读侧工具数必须与实现派生的 read 数一致（**方向性**判据：少公布工具会红）。
+    // 注意：这一条只保证「不多不少于派生清单」；它的价值在与上面的**跨面**判据互补
+    // （派生清单本身是同源，跨面判据才是真正能抓漂移的那一条）。
+    let man = ehr_api::mcp::tool_manifest();
+    assert_eq!(
+        tools.len(),
+        man["count"].as_u64().unwrap() as usize,
+        "tools/list 公布的工具数必须等于实现派生清单（不是手抄快照）"
+    );
+    let published_read = tools
+        .iter()
+        .filter(|t| {
+            let n = t["name"].as_str().unwrap_or("");
+            !ehr_api::mcp::WRITE_TOOLS.contains(&n)
+        })
+        .count();
+    assert_eq!(
+        published_read,
+        man["read"].as_u64().unwrap() as usize,
+        "tools/list 的读侧工具数必须等于实现派生清单的 read 数（不是手抄快照）"
+    );
     for t in &tools {
         let name = t["name"].as_str().expect("tool name string");
         assert!(!t["description"].as_str().unwrap_or("").is_empty(), "{name} needs a description for agents");
