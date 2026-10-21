@@ -54,7 +54,21 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
-## 当前状态（2026-10-26 · **T17「ingest 能力面」三处硬编码→一处派生（`--print-capabilities`）· D-034 落地：OCR 走可选 feature，默认构建如实拒图片**）
+## 当前状态（2026-10-26 · **T18「MCP 侧补 capabilities 工具」+「OCR 容器产物首次跑通」· D-035 落地**）
+
+- ✅ **T18-① MCP 侧补 `get_capabilities` 工具（D-034 未销账⑫销账）**：①**复用同一份** `capabilities::capability_manifest()`（**不另写判据**）⇒ MCP 与 REST 两面清单**逐字相同**；②工具**读侧**、无参；MCP 工具数 **12 → 13**（读侧 10 → **11**），由 `--print-mcp-tools` 派生、门禁核对；③skill 层同步：`SKILL.md` 命令表加 `capabilities ↔ get_capabilities` 一行、工具数改 13、`references/tool-contracts.md` 加契约行 + 标题数字改「共 13 / 读侧 11」。
+- ✅ **T18-② OCR 容器产物首次跑通（D-034 未销账②推进）**：①**构建路线** = 「`debian:trixie`(glibc 2.41) 容器内构建 + `CARGO_TARGET_DIR=target-ocr/` 独立目录 + `--offline` 复用宿主 `~/.cache/ort.pyke.io` 预编译 ORT 缓存」⇒ **默认构建目录零污染**（默认构建仍「无 ort/oar/onnx」，D-034 的门禁前提未被自己破坏）；②**产物存在**：`ehr-api/target-ocr/release/ehr-api` = **55,883,352 字节**（含静态链入的 ONNX Runtime）；③**能力清单如实变化**（容器内 `--print-capabilities`）：`ocr_available=true`、`ocr_engine="ppocr-v5(onnx) via pipeline::ingest"`、`accepted_exts` = txt/pdf/**png/jpg/jpeg/tiff/tif**、`rejected_exts` = **仅 dcm** ⇒ 「链接进引擎」与「清单随之变化」两件事都被证；④**宿主跑不了是预期行为**（`ldd` ⇒ `version 'GLIBC_2.38' not found`）⇒ D-034「**链接成功 ≠ 二进制能在宿主跑**」再次实测成立 ⇒ 该产物**只能**在 glibc ≥ 2.38 容器内运行。
+- ✅ **证据链（缺一即不算交付）**：
+  - ①**`cargo test --all-targets` 73 门全绿**（原 72 + 新 `tests/mcp.rs::mcp_capabilities_match_rest_capabilities_endpoint` **1 门**）：MCP 清单 == REST 清单（**逐字**）；`ocr_available` 是 bool；每条**未启用**路由都带 `reject_reason`；每个 `rejected_exts` 元素都归属某条带原因的未启用路由。
+  - ②**`skill-contract-check.sh` fails=0**：`doc_tool_count`=13 / `doc_read_count`=11 / `doc_write_count`=2 / `skill_tool_count`=13 ⇒ T15/T16 的「**文档数字由实现派生清单核对**」机制在新增工具时**自动生效**（文档不更新就红）。
+  - ③**`mcp-e2e.sh` fails=0**（**新增 3 门**：`mcp_capabilities == rest_capabilities (verbatim)` / `ocr_available_is_bool` / `exts_are_arrays`）。
+  - ④**旧门禁全绿未被破坏**：`ehtest.sh` / `skill-rest-check.sh` / `api-doc-check.sh` / `auth-e2e.sh` / `entries-e2e.sh` / `conds-e2e.sh` / `meds-e2e.sh` / `audit-e2e.sh` / `rebuild-e2e.sh` / `rebuild-lock-e2e.sh` / `web-e2e.sh` **全 fails=0**。
+  - ⑤**新参数/新工具真进判据**：`--print-mcp-tools` 干跑 ⇒ `count=13 / read=11 / write=2`，`get_capabilities` 在 `names[]` 里；live `tools/call get_capabilities` 的 `structuredContent` 与 `GET /api/v1/capabilities` **逐字相等**（e2e 门证）。
+  - ⑥**零新依赖**（默认构建面）：本轮**未改** `Cargo.toml`/`Cargo.lock`；`Cargo.lock` 含 `ort` 等 optional 依赖是 D-034 已登记的事实（**锁文件含全部 feature 的解析结果**，非本轮新增）。
+- 🔄 **下一步**：①**OCR 产物的「真识别闭环」还差最后一格**——容器内上传真检查单 jpg ⇒ 回执 `text_indexed=true`（非 `stored_raw_only`）的实拍证据（模型权重需 `$OAR_HOME`，运行期从 ModelScope 下载，容器内尚未验证）；②**OCR 产物尚未做成可部署镜像**（`deploy/Dockerfile` build 段仍是默认 feature ⇒ 需加 `--features ocr` 变体 + 基础镜像换 `debian:trixie`）；③**stub 端点仍剩 1 个**：`PUT /documents/{sha}/extraction`（**新功能** ⇒ 需单独设计字段级 evidence 锚点）；④**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；⑤「家庭自测趋势」专用视图仍未做；⑥公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑦ghcr 包可见性仍 private；⑧真·第三方 MCP 客户端互通仍未验；⑨`.dcm`/DICOM worker 未做（能力清单已如实标 `enabled=false`）；⑩**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在；⑪MCP 侧仍**无 resources/prompts** 能力；⑫**`docs/API.md` 是生成物**，改接口须跑 `./api-doc-check.sh --write`；⑬人员域三端点仍 501 且刻意不进 OpenAPI；⑭**体检报告 PDF 列布局 labs 抽取为 0**（真实场景报告缺口①）仍未做——倾向走 LLM 结构化抽取（extraction 管线），与 stub 端点 `extraction` 可合并设计。
+- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（编译期内嵌，无构建链）；目标验收②的 6 个 stub 端点已实装 5 个，**剩 `extraction` 一个**；**OCR 已产出二进制但未做成镜像、真识别闭环未实拍**；`docs/API.md` 是**生成物**；文档覆盖 **REST 面**，`/mcp` 的工具契约在 `skills/medme-ehr/references/tool-contracts.md`；**上游分类缺口**仍在；**上游审计口径缺口**已在 D-030 如实标注（**不造事件补齐**）。
+
+### 历史状态（2026-10-26 · **T17「ingest 能力面」三处硬编码→一处派生（`--print-capabilities`）· D-034 落地：OCR 走可选 feature，默认构建如实拒图片**）
 
 - ✅ **T17 交付（消除「本构建能吃哪些文件类型」的三份实现 · D-034 落地）**：①**真源 = 实现**（`ehr_api::capabilities::route_for_ext()` —— 扩展名→路由的判据只此一处），**能力清单从它派生**（`capability_manifest()`，不是手抄表）；新增干跑开关 **`ehr-api --print-capabilities`**（stdout = 机器可读 JSON：`ocr_available`/`ocr_engine`/`routes[]`/`accepted_exts[]`/`rejected_exts[]`；stderr = `[证据]` 行，dry-run 不落状态）⇒ **门禁与文档从实现取值**；②**同一事实此前三份实现**：`vaults::ingest_upload` 的 if/ensure 判据、OpenAPI 里 501 的 description 文案、门禁/文档里手写的「ocr worker 未做」⇒ 现在**改一处**（实现），其余**从它取值**；③**新增 HTTP 端点 `GET /api/v1/capabilities`**（D-034 决策④）⇒ agent/客户端**自己**能判断「我的文件能不能传」，不必猜、不必看日志；④**skill 层同步暴露**：`ehr.sh capabilities` 命令 + `SKILL.md` 命令表 1 行 + `references/rest-contracts.md` 契约行 + 501 语义改写为「先查 `rejected_exts` 的 `reject_reason`」；⑤**OCR 改为可选 feature `ocr`（默认 off）**——见下「OCR 决策」。
 - ✅ **OCR 决策（实测硬证据，不是推测）**：上游 `oar-ocr` 链的 **ONNX Runtime 1.28 预编译静态库要求 glibc ≥ 2.38**（C++23 ABI 符号 `__isoc23_strtol` / `std::__cxx11::basic_string<...>::_M_replace_cold`）。宿主 Ubuntu 22.04 = **glibc 2.35 / libstdc++ 11** ⇒ 链接期报 undefined symbol。**先前把它误诊为「缺 libstdc++」并加 `-C link-arg=-lstdc++`（D-034 修订）——那是错的**：宿主 `nm -D libstdc++.so.6 | grep -c _M_replace_cold` = **0**，加 `-lstdc++` 只能链到同一个缺符号的库，治不了。⇒ **OCR 走 feature `ocr`（默认 off）**：默认构建 = 零 OCR 依赖（`ldd` 无 onnx/ort）、宿主可跑、**既有门禁体系不受影响**；需要 OCR 的产物在 **glibc ≥ 2.38 的容器**（实测 debian:trixie = glibc 2.41 / g++ 14.2）里 `--features ocr` 构建并在该容器内运行。
@@ -320,3 +334,11 @@
    网关可用)→作为extraction_added路径的真实用例; b)上游提PR支持列布局。倾向a。
 2. doc_type分类:体检报告→surgery(上游classify词典缺「健康体检」类目)→随1的extraction修正或上游PR
 3. OCR worker缺位使图片单501(如实拒绝✅但功能缺):若用户常用手机拍照上传,优先级应提前——请用户定
+
+## 真实场景测试第二轮(2026-10-26 · OCR 容器跑通后)——图片检查单闭环 ✅
+
+- OCR 容器(medme-ehr-ocr, trixie/glibc2.38, 298MB) up 于 8587；`/capabilities` 报 ocr_available:true + 7 种 ext
+- **zmf 真实检查单照片 4 张全部 OCR 成功**:血常规 doc_type=lab_report、1781字文本层入库；血脂×3 同样全绿
+- **labs 聚合闭环兑现**: 23→40 序列/41 点(含 flag H/L)；**跨年趋势首次成线**——总胆固醇 2025-08-05 5.9(H) → 2025-09-22 1.23(N)、低密度 3.9、甘油三酯 1.43，全部带 docref 溯源
+- ehtest A~I 容器内复跑 fails=0（OCR 不破坏既有门禁）
+- 缺口收窄：原「缺口① PDF列布局 labs=0」仍待 LLM extraction；「缺口③ OCR worker」**已销账**
