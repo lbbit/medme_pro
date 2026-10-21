@@ -34,7 +34,7 @@
 | 1 | POC：单人不带 UI 跑通内核导入→查询(library级+346单测全绿) | poc/src/import_demo.rs 9步验收全PASS(D-009) | ✅ GREEN(2026-10-19) |
 | 2 | person 层设计 + ehr-api 骨架（axum, OpenAPI）——**已完成** | /api/v1 MVP；curl版抽查对齐POC证据链(D-011:34门全绿)；读侧聚合面已毕业 labs(D-025)/medications(D-026)/conditions(D-027)；写侧手动条目已毕业 entries×3 + measurements(D-028)；审计视图已毕业 audit(D-030) | ✅ GREEN(2026-10-24) |
 | 3 | docker-compose（server+web）+ Web 管理端最小版 | 一键部署可用 | ✅ GREEN(2026-10-20，D-014/D-016) |
-| 4 | MCP server + QwenPaw SKILL | agent 可按人查档/写档 | 🔄 MCP **读侧 10 + 写侧 2 = 12 工具已交付**（D-017/D-019/**D-029**/**D-031**）；工具数改为**从实现派生**（D-032：`--print-mcp-tools`，不再硬编码三处）；SKILL REST 面已扩到 **16 命令**（含 D-028 四个新命令），注册进 skill_pool 待验 |
+| 4 | MCP server + QwenPaw SKILL | agent 可按人查档/写档 | 🔄 MCP **读侧 11 + 写侧 2 = 13 工具已交付**（D-017/D-019/**D-029**/**D-031**）；工具数改为**从实现派生**（D-032：`--print-mcp-tools`，不再硬编码三处）；SKILL REST 面已扩到 **16 命令**（含 D-028 四个新命令），注册进 skill_pool 待验 |
 | 5 | 认证与多客户端（token/token scope），手机客户端预留 | 安全基线 | 🔄 T4 静态 Bearer token 已交付（D-022）；多客户端/手机端待做 |
 
 ## 已知事实（已核实，来源 README/GitHub 页面 2026-10-19）
@@ -53,6 +53,25 @@
 4. 事件 schema 是否已有 subject/patient 概念预留
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
+
+## 当前状态（2026-10-27 · **T27「SKILL.md 字段面」纳入机器核对——agent 第一手说明里的字段承诺也必须与真响应一致，2 处真漂移已修 · D-044 落地**）
+- ✅ **T27-① 接手工作树的第一件事仍是「让它编译并跑一遍」（D-039 新坑② 纪律沿用）**：`cd ehr-api && cargo test --all-targets` ⇒ **83 门全绿**（`mcp` 15 / `entries` 6 / `rest_manifest` 5 / `response_shape` 4 / `auth` 7 / `extraction` 5 / `meds` 2 / `conds` 4 / `audit` 3 / `rebuild` 3 / `capabilities` 3 / `apidoc` 3 / `lib` 21 / `contract` 1 / `sha_gate` 1）⇒ 确认**工作树可编译可跑**。（本轮**未改任何 Rust 代码** ⇒ `Cargo.toml`/`Cargo.lock` **未改动** ⇒ **零新依赖**。）
+- ✅ **T27-② 缺口定位（D-043 未销账①的正面处置）**：D-040 把 **REST 面**（`rest-contracts.md`）、D-043 把 **MCP 面**（`tool-contracts.md`）纳入了机器核对；**`SKILL.md`——agent 真正读到的第一手说明——的字段承诺至今无门**。既有门 `skill-contract-check.sh` 只核**工具数/路径数/工具名**；`skill-rest-check.sh` 核的是**它自己手写的期望字段表**（又是一份手抄清单，且**不来自 SKILL.md**）⇒ **SKILL.md 里的字段名会悄悄变假** ⇒ agent 照它取字段 → 取不到 → 数据全空（D-016 家族的病，主角换成 SKILL.md）。
+- ✅ **T27-③ 新门 `skill-doc-field-check.sh`（+ 内层 `skill_doc_field_check.py`）——把「SKILL.md 承诺的字段」纳入机器核对**：判据**五条独立方向**：①**表格正向（逐命令）**：SKILL.md 新增的「**字段承诺表**」为某命令承诺的每个字段名，必须出现在**该命令自己**的真响应里；②**表格反向（逐命令）**：该命令真响应的**契约级键**（顶层 + 数组元素一层 + 元素内对象一层）必须被表格提及；③**散文 ↔ 表格一致（逐命令）**：命令速查（散文）里提到的字段必须在表格同一命令行里（跨命令引用**允许**，但那行必须**点名 owner 命令**，否则 agent 无处可寻）；④**命令面真实（双向）**：SKILL.md 提到的每个 `ehr.sh <命令>` 必须 helper 真支持（真源 = `ehr.sh --help`），helper 支持的每个命令都必须被 SKILL.md 提到；⑤**数量真实**：工具数与「读侧 N + 写侧 M」== 实现派生（`--print-mcp-tools`）。
+  - **为什么必须「逐命令」**（D-043 决策②的纪律迁移）：把多个响应拼一起查 ⇒ 字段在**任意一个**命令里出现过就算过 ⇒ 「A 命令承诺 B 命令才有的字段」照样绿 ⇒ **门在测错对象**。
+  - **门自己造数**（1 人 + 3 份不同类型原件 + 3 类手动条目 + 1 次 extraction 回写）⇒ `ocr_meta`/`extraction`/`verify_detail`/`values[]` 这类「有内容才出现」的键才存在 ⇒ 空库跑恒绿的问题被治住。
+  - **枚举值 vs 字段名由判据裁决**（D-011 家族纪律）：`status:ok` 的 `ok`、`source=registry` 的 `registry` 是**值** ⇒ 只有当该名字**不是任何响应的键、却等于某个响应的标量值**时才排除（打印 `INFO … 枚举值(非字段,已排除)`），**不靠正则猜**。
+  - **非 JSON 输出单独分流**：`ehr.sh original` 回的是原始字节流 ⇒ 不参与字段级判据（否则门会拿 JSON 判据去套二进制）。
+- ✅ **T27-④ 门是「真门」的负向证据（本轮实撞 5 次，每次复原）**：①表格给 `documents` 注入只属 `labs` 的 `series_count` ⇒ 红 `FAIL documents 表格承诺但真响应没有的字段: ['series_count']`；②表格删掉 `persons` 的 `id_note` ⇒ 红 `FAIL persons 真响应有但表格未提及的字段: ['id_note']`；③表格漏掉 `labs` 的 `total_points` ⇒ 红 `FAIL labs 真响应有但表格未提及的字段: ['total_points']`；④工具数改 13→12 ⇒ 红 `FAIL SKILL.md 工具数=12 ≠ 实现派生 13`；⑤把 `documents` 行的跨命令引用去掉 owner 点名 ⇒ 红 `FAIL documents 散文提到但表格未列、且该行未点名拥有它的命令: ['docref']` ⇒ 复原后 fails=0。
+  - ⚠️ **门自身的第一版有洞，已修**（D-043 新坑②「门红了有两种可能」的同款纪律）：**首版只做「承诺存在」单方向、且把散文当承诺面** ⇒ 负向①「A 命令承诺 B 命令的字段」与负向②「漏字段」**都漏过**（实测两次绿）⇒ 处置：**引入机器可解析的「字段承诺表」**（散文降级为一致性核对面）⇒ 负向 5/5 全红。
+- ✅ **T27-⑤ 本轮实测修掉的真漂移 2 处**（`SKILL.md` 落后于实现）：①`documents` 行原写「`content_hash` = 原件 sha256 = `docref`」——**`docref` 根本不是 `documents` 响应的键**（它只存在于 `labs`/`medications`/`measurements`）⇒ agent 照文档去 `documents` 取 `docref` ⇒ **取不到**；②「字段承诺表」里 `detail` 的 `extraction.raw` 被写成必有键——**真响应只在 `parseable=false` 时才有 `raw`** ⇒ 属「文档过度承诺」⇒ 已标为**可选键**。
+- ✅ **T27-⑥ 证据链（缺一即不算交付）**：
+  - ①**`cargo test --all-targets` 83 门全绿**（本轮**未改任何 Rust 代码**，**零新依赖**）。
+  - ②**统一入口一次跑完全部门禁：17 个脚本全绿，总 fails=0**（`run-all-gates.sh` ⇒ A1 PASS + 17 个 `[PASS] … fails=0`）；**新门已登记进 RUN 清单** ⇒ A1 完整性仍 PASS。**SKIP 2 个**：`container-smoke.sh`（运行中容器是旧镜像）、`agent-e2e.sh`（需真·第三方 agent CLI）——**均写明原因**。
+  - ③**后台卡死检查（D-010）**：**无 cargo/rustc 残留**；常驻只有两个 **10-21 的陈旧** `ehr-api` 进程（`:18999`/`:18991`）、两个 docker 容器（`:8585`/`:8587`）+ 上一轮遗留的 4 个临时取证进程 ⇒ **非卡死**（本轮探针进程已清理）。
+  - ④**零新依赖**：本轮只新增**一个门禁脚本 + 其内层 Python 实现**（无 Rust 改动、零 Cargo 依赖）＋ 文档与清单回写。
+- 🔄 **下一步**：①**统一入口尚未接入 CI**（仓库无 CI 配置 ⇒ 「统一入口」仍只是**本地约定**；这是当前文档面**最后一块无门的地基**）；②**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；③「体检报告 PDF 列布局 labs=0」缺口：extraction 管线已就位，缺的是「把 PDF 送进 LLM」这一步的**端到端脚本**；④「家庭自测趋势」专用视图仍未做；⑤公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token（当前 OCR 编排 `EHR_API_TOKENS` 为空 ⇒ **放行模式**，仅本地）；⑥ghcr 包可见性仍 private（OCR 镜像也尚未推 GHCR）；⑦真·第三方 MCP 客户端互通仍未验；⑧`.dcm`/DICOM worker 未做（能力清单已如实标 `enabled=false`）；⑨**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在；⑩MCP 侧仍**无 resources/prompts**；⑪`docs/API.md` 是**生成物**，改接口须跑 `./api-doc-check.sh --write`；⑫人员域三端点仍 501 且刻意不进 OpenAPI；⑬**OCR 镜像未推 GHCR / 未纳入 CI**；⑭`container-smoke.sh` 仍**未跑**（须先重建镜像）。
+- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（编译期内嵌，无构建链）；`docs/API.md` 是**生成物**；文档覆盖 **REST 面**（`rest-contracts.md`）+ **MCP 面**（`tool-contracts.md`）+ **SKILL.md 面**（本轮新增「字段承诺表」）——**三份文档的面全部有门**；**上游分类缺口**仍在；**上游审计口径缺口**已在 D-030 如实标注（**不造事件补齐**）；**OCR 镜像尚未推 GHCR、未纳入 CI**；**「手抄实现细节」残留**已治到 **stub 清单 / REST 路径 / 响应形状 / 文档字段 / 产物新鲜度 / 门禁编排完整性 / MCP 工具契约字段 / SKILL.md 字段承诺** 八个面——**统一入口仍未接入 CI**。
 
 ## 当前状态（2026-10-26 · **T26「MCP 工具契约字段面」纳入机器核对——`tool-contracts.md` 落后于实现 10 处已修，判据必须「逐工具」 · D-043 落地**）
 - ✅ **T26-① 接手工作树的第一件事仍是「让它编译并跑一遍」（D-039 新坑② 纪律沿用）**：`cd ehr-api && cargo test --all-targets` ⇒ **83 门全绿**（`mcp` 15 / `entries` 6 / `rest_manifest` 5 / `response_shape` 4 / `auth` 7 / `extraction` 5 / `meds` 2 / `conds` 4 / `audit` 3 / `rebuild` 3 / `capabilities` 3 / `apidoc` 3 / `lib` 21 / `contract` 1 / `sha_gate` 1）⇒ 确认**工作树可编译可跑**，再谈别的。（本轮**未改任何 Rust 代码** ⇒ `Cargo.toml`/`Cargo.lock` **未改动** ⇒ **零新依赖**。）

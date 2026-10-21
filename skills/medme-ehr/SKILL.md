@@ -32,7 +32,7 @@ metadata:
 | 「报告里提到 X 吗」 | `ehr.sh search PID "白细胞"` | 中文全文检索，命中片段带 `[高亮]` |
 | 「白细胞这段时间怎么变的」 | `ehr.sh labs PID` | 跨文档趋势；每点带 H/L 标记与 `docref` 证据 |
 | 「他在吃什么药 / 剂量多少」 | `ehr.sh medications PID` | 用药跨度；`latest_dose` 为最近剂量，逐次 `mentions[].docref` 可溯原件 |
-| 「他上传了哪些原件」 | `ehr.sh documents PID` | `content_hash` = 原件 sha256 = `docref` |
+| 「他上传了哪些原件」 | `ehr.sh documents PID` | `content_hash` = 原件 sha256；它就是 `labs`/`medications`/`measurements` 里那个 `docref`（**`docref` 是那几个命令的键名，本命令的键是 `content_hash`**） |
 | 「他自己在家量了血压/血糖？」 | `ehr.sh measurements PID [--kind self_measurement]` | 家庭自测值；**与医院指标永不同组**（`labs` 里 `self_measured=true` 一眼可辨）；区间带 `ref_source` 出处 |
 | 「记一条今天头晕」 | `ehr.sh note PID "今天有点头晕"` | 纯文本笔记，原样落库；写后 `measurements --kind note` 可回读 |
 | 「记一次病程发作」 | `ehr.sh profile-event PID --kind flare --package sle --at 2026-10-22` | `--at` 是**事件发生那天**（不是记录那天）；`--payload` 可带 JSON |
@@ -45,6 +45,36 @@ metadata:
 | 「这个人档案里都发生过什么 / 谁动过」 | `ehr.sh audit [--person PID] [--op OP]` | **两层真相层**：`source=registry`（建档/改档/归档）与 `source=vault`（导入/删除）；`--op` 取 `create\|update\|delete` 或上游中文名 `导入\|导出\|分享\|删除` |
 
 完整字段契约见 `references/rest-contracts.md`（真源 = 运行时 `GET /openapi.json`）。
+
+## 字段承诺表（机器核对面 · 每个命令返回哪些键）
+
+> 这张表是 **`SKILL.md` 自身的字段承诺**，由门禁 `skill-doc-field-check.sh` **逐命令**与
+> **真进程真实响应**核对：① 表格承诺的字段必须真存在；② 真响应出现的键必须被表格提及；
+> ③ 命令速查（散文）里提到的字段必须在本表同一命令行里。
+> ⇒ 字段改了/删了 ⇒ 门禁红 ⇒ 文档不会悄悄变假（agent 照文档取字段取不到 ⇒ 数据全空）。
+> 完整端点级契约见 `references/rest-contracts.md`（真源 = 运行时 `GET /openapi.json`）。
+
+| 命令 | 字段 |
+|---|---|
+| `ehr.sh health` | `status` `home` |
+| `ehr.sh capabilities` | `ocr_available` `ocr_engine` `routes[]`：`id` `name` `exts[]` `enabled` `reject_reason` `accepted_exts[]` `rejected_exts[]` |
+| `ehr.sh persons` | `id` `name` `birthday` `gender` `id_note` `created_at` `updated_at` |
+| `ehr.sh timeline PID` | `person_id` `count` `items[]`：`document_id` `doc_date` `doc_date_end` `doc_type` `title` |
+| `ehr.sh search PID Q` | `person_id` `q` `count` `items[]`：`document_id` `title` `snippet` |
+| `ehr.sh labs PID` | `person_id` `documents_scanned` `series_count` `total_points` `series[]`：`analyte_key` `group_name` `loinc` `unit_canonical` `values_converted` `any_abnormal` `self_measured` `ref_high` `ref_high_canonical` `points[]`：`date` `value` `unit` `value_canonical` `flag` `unverified` `docref` |
+| `ehr.sh medications PID` | `person_id` `documents_scanned` `med_count` `mention_count` `medications[]`：`drug_key` `name` `raw_names` `atc` `latest_dose` `latest_raw_name` `status` `docrefs[]` `unverified` `mentions[]`：`date` `dose` `raw_name` `docref` `origin` `unverified` |
+| `ehr.sh documents PID` | `person_id` `count` `items[]`：`document_id` `content_hash` `original_name` `mime_type` `byte_size` `doc_date` `doc_date_end` `doc_type` `title` `text_indexed` |
+| `ehr.sh measurements PID` | `person_id` `count` `measurements[]`：`document_id` `kind` `taken_at` `title` `docref` `values[]`：`analyte_key` `value` `unit` `ref_high` `ref_source` `flag` `event_kind` `event_package` `event_at` `event_payload` `text` `payload_readable` |
+| `ehr.sh detail PID SHA` | `content_hash` `original_name` `mime_type` `byte_size` `imported_at` `document_id` `doc_type` `doc_date` `doc_date_end` `title` `language` `page_count` `encounter_id` `text_indexed` `text_truncated_bytes`；可选键：`text` `ocr_meta[]`：`pages_with_text` `model_version` `backend` `extraction[]`：`parseable` `json`；可选键：`raw`（仅 `parseable=false` 时） |
+| `ehr.sh extraction PID SHA FILE` | `content_hash` `document_id` `result_hash` `schema` `verified` `verify_detail[]`：`rejected` `unverified` `unverified_fields` `labs_count` `meds_count` `diagnoses_count` |
+| `ehr.sh audit` | `persons_scanned` `count` `entries[]`：`source` `op` `ts` `person_id` `detail` `sha256` |
+| `ehr.sh person-create NAME` | `id` `name` `birthday` `gender` `id_note` `created_at` `updated_at` |
+| `ehr.sh upload PID FILE` | `content_hash` `deduped` `document_id` `text_indexed` `stored_raw_only` `messages[]` |
+| `ehr.sh note PID TEXT` | `document_id` `content_hash` `doc_type` `title` `taken_at` `deduped` |
+| `ehr.sh profile-event PID` | `document_id` `content_hash` `doc_type` `title` `taken_at` `deduped` |
+| `ehr.sh self-measure PID` | `document_id` `content_hash` `doc_type` `title` `taken_at` `deduped` |
+| `ehr.sh original PID SHA` | 原始字节（非 JSON） |
+
 
 ## 组合套路
 
