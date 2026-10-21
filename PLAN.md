@@ -34,7 +34,7 @@
 | 1 | POC：单人不带 UI 跑通内核导入→查询(library级+346单测全绿) | poc/src/import_demo.rs 9步验收全PASS(D-009) | ✅ GREEN(2026-10-19) |
 | 2 | person 层设计 + ehr-api 骨架（axum, OpenAPI）——**已完成** | /api/v1 MVP；curl版抽查对齐POC证据链(D-011:34门全绿)；读侧聚合面已毕业 labs(D-025)/medications(D-026)/conditions(D-027)；写侧手动条目已毕业 entries×3 + measurements(D-028)；审计视图已毕业 audit(D-030) | ✅ GREEN(2026-10-24) |
 | 3 | docker-compose（server+web）+ Web 管理端最小版 | 一键部署可用 | ✅ GREEN(2026-10-20，D-014/D-016) |
-| 4 | MCP server + QwenPaw SKILL | agent 可按人查档/写档 | 🔄 MCP **读侧 10 + 写侧 2 = 12 工具已交付**（D-017/D-019/**D-029**/**D-031**）；SKILL REST 面已扩到 **16 命令**（含 D-028 四个新命令），注册进 skill_pool 待验 |
+| 4 | MCP server + QwenPaw SKILL | agent 可按人查档/写档 | 🔄 MCP **读侧 10 + 写侧 2 = 12 工具已交付**（D-017/D-019/**D-029**/**D-031**）；工具数改为**从实现派生**（D-032：`--print-mcp-tools`，不再硬编码三处）；SKILL REST 面已扩到 **16 命令**（含 D-028 四个新命令），注册进 skill_pool 待验 |
 | 5 | 认证与多客户端（token/token scope），手机客户端预留 | 安全基线 | 🔄 T4 静态 Bearer token 已交付（D-022）；多客户端/手机端待做 |
 
 ## 已知事实（已核实，来源 README/GitHub 页面 2026-10-19）
@@ -54,7 +54,22 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
-## 当前状态（2026-10-26 · **T14 MCP 侧补齐审计工具 `get_audit`（D-031）· MCP 工具数 11→12**）
+## 当前状态（2026-10-26 · **T15「MCP 工具数」三处硬编码→一处派生（`--print-mcp-tools`）· D-031 新坑②已销账**）
+
+- ✅ **T15 交付（消除「MCP 有多少个工具」的三处硬编码漂移 · D-031 未销账⑨已销账）**：①**工具清单的单一事实来源 = 实现**（`mcp::tool_schemas()`），派生两个出口：`mcp::tool_names()`（名字清单）+ `mcp::tool_manifest()`（机器可读 JSON：`count/read/write/names/read_names/write_names`）；②**新增干跑开关 `ehr-api --print-mcp-tools`**（stdout = 机器可读 JSON，stderr = `[证据]` 行，dry-run 不落状态）⇒ 门禁与测试**从实现取值**；③**写侧工具名单也只留一处**（`mcp::WRITE_TOOLS`），**鉴权分权改读它**（`Scope::Ro::allows_tool` 原先在 `auth.rs` 里另写了一份 `matches!` —— 同一事实两份实现，正是本轮要消灭的东西；且**上次加 `get_audit` 时分权表没同步，纯粹因为它恰好是读侧工具**——鉴权是安全面，不能靠「恰好」）；④**文档数字保留但由门禁核对**（`tool-contracts.md` 标题「共 12 / 读侧 10 / 写侧 2」与 `SKILL.md`「12 个工具」是人读上下文，**不删除**，改由 4 门核对：文档写「12」而实现是 13 ⇒ 门禁红）；⑤**「加一个工具」的改动面从四处降为两处**（实现 + 契约文档），漏改立刻红在「文档与实现不一致」上，而不是红在某个无关断言上。
+- ✅ **证据链（缺一即不算交付）**：
+  - ①**`mcp-e2e.sh` 真进程 36 门 PASS / fails=0**（原 34 + 新 2）：`tools_count` 的**期望值不再写死**（来自 `--print-mcp-tools`）；新增 **`tools_names_match_impl`**（`tools/list` 公布的**名字序列逐字等于**实现派生清单 ⇒ 不只数量，顺序与名字也对）；[证据]行显式 `tools_count=12 (derived from --print-mcp-tools, not hardcoded)`。
+  - ②**`skill-contract-check.sh` 真进程 29 门 PASS / fails=0**（原 27 + 新 4）：`tools_declared_in_skill` 的**工具名清单也改为从实现派生**（原为手写 12 名——新增工具若忘了加进那个 for 循环，门禁**根本发现不了**新工具没被 SKILL.md 提到）；新增 `doc_tool_count` / `skill_tool_count` / `doc_read_count` / `doc_write_count`。
+  - ③**门禁是「真门」的负向证据**：把 `tool-contracts.md` 标题的「共 12」**故意改成「共 13」** ⇒ 首跑 **`FAIL doc_tool_count: got=13 want=12` / fails=1** ⇒ 复原后 **fails=0**（门禁真会因漂移而红，不是「怎么都绿」）。
+  - ④**`cargo test --all-targets` 全绿**：新增 `tests/mcp.rs::write_tool_list_and_scope_split_agree` **1 门**（写侧名单 ↔ scope 分权**完全**一致——不是抽样：ro 拒的恰好是写侧全集、放的恰好是读侧全集；且 `WRITE_TOOLS` 每个成员都真被公布，防「名单写了工具却没实现」；manifest 的 count/read/write 自洽）+ **删掉** `assert_eq!(tools.len(), 12)`（硬编码快照）改为断言「公布清单逐字等于 `tool_names()`」+ 旧门禁**未破** ⇒ 合计 **62 门全绿**（lib 18 / apidoc 3 / audit 3 / auth 7 / conds 4 / contract 1 / entries 6 / **mcp 14** / meds 2 / rebuild 3 / sha_gate 1）。
+  - ⑤**旧 e2e 门禁全绿未被破坏**：`ehtest.sh`(34) / `mcp-e2e.sh`(36) / `auth-e2e.sh` / `audit-e2e.sh` / `entries-e2e.sh` / `conds-e2e.sh` / `meds-e2e.sh` / `rebuild-e2e.sh` / `rebuild-lock-e2e.sh` / `skill-rest-check.sh` / `skill-contract-check.sh`(29) / `api-doc-check.sh`(8) / `web-e2e.sh`（起真服务复验，fails=0）**全 fails=0**。
+  - ⑥**零新依赖**：`ehr-api/Cargo.lock` 与 `Cargo.toml` **未改动**（依赖包数 **204** 不变，可验事实）。
+  - ⑦**dry-run 优先**：先跑库级 `cargo test --all-targets`（不起服务、不落状态）与 `--print-mcp-tools` 干跑渲染（`tools=12 (read=10 write=2)`），再起真进程跑 mcp-e2e 与旧门禁复验。
+  - ⑧**参数/状态生效有证据**：`--print-mcp-tools` 是**新参数**⇒ ①传它 ⇒ stdout 出现 JSON 且 `[证据]` 行 `mode=dry-run(print-mcp-tools)`；②**不传它** ⇒ 走 serve 模式（参数真进判据，不是摆设）；③该输出与 `tools/list` 名字序列**逐字相等**；④**故意让文档漂移 ⇒ 门禁红**（见③）。
+- 🔄 **下一步**：①**stub 端点仍剩 1 个**：`PUT /documents/{sha}/extraction`（**新功能** ⇒ 需单独设计字段级 evidence 锚点）；②**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；③「家庭自测趋势」专用视图仍未做；④公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑤ghcr 包可见性仍 private；⑥真·第三方 MCP 客户端互通仍未验；⑦`.dcm`/OCR worker 未做；⑧**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在；⑨MCP 侧仍**无 resources/prompts** 能力；⑩**REST 面的路径数（16）仍是硬编码在 `api-doc-check.sh`/`ehtest.sh` 里**——本轮只治了 MCP 工具面，REST 路径面同病未治（可照本轮做法：OpenAPI 已是运行时真源，缺一个派生比对）。
+- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（`ehr-api/web/index.html` 编译期内嵌，无构建链）；目标验收②的 6 个 stub 端点已实装 5 个，**剩 `extraction` 一个**；`docs/API.md` 是**生成物**，改接口必须跑 `./api-doc-check.sh --write`，手改会被 A3 门禁打回；文档覆盖的是 **REST 面**，`/mcp` 的工具契约仍在 `skills/medme-ehr/references/tool-contracts.md`（该文档的工具数**已由门禁与实现核对**，见 T15）；**上游分类缺口**仍在（D-027 未销账⑧）；**上游审计口径缺口**（`audit_log()` 不展示手动条目的合成导入）已在 D-030 如实标注（**不造事件补齐**）。
+
+### 历史状态（2026-10-26 · **T14 MCP 侧补齐审计工具 `get_audit`（D-031）· MCP 工具数 11→12**）
 
 - ✅ **T14 交付（MCP 侧补齐审计工具 `get_audit` · MCP 工具数 11→12 · 读侧 9→10）**：①**复用同一 `audit_view()`，不另写一份判据**（D-030 未销账②的原文要求）——MCP 工具**直接调用** REST handler 调的那个 `ehr_api::audit::audit_view()`，**零新判据、零新解析路径**；硬证据不是「两边都有数据」（那可以靠两套实现蒙混），而是 **MCP 返回的审计回执与 REST 返回的审计回执逐字相等**（`persons_scanned`/`count`/`entries[]` 全量相等）；②**审计是全局视图 ⇒ MCP 侧不做「人是否存在」的存在性检查**：问「某人有哪些审计条目」答「0 条」是合法答案（与 REST 同口径）⇒ **不返回 -32001**（否则同语义在两面分叉，agent 无法区分「查无此人」与「此人无记录」）；③**参数可选、别名只有一个**：`person`/`op` 都可选（缺省 = 全部人 / 全部动作），`person_id` 是 `person` 的**入参别名**（不是第二份判据）；④**口径分层在 MCP 面同样如实暴露**：`entries[].source` 区分 `registry`/`vault`；registry 侧无内容哈希 ⇒ `sha256` **键缺省**（不编）；vault 侧导入条目的 `sha256` **逐字等于**原件 sha256；上游 `audit_log()` 不展示手动条目的合成导入 ⇒ 笔记在 vault 侧**看不到行**（**不造事件补齐**）。
 - ✅ **证据链（缺一即不算交付）**：

@@ -64,16 +64,37 @@ if echo "$DETAIL" | grep -q '"extraction"'; then
   else echo "  FAIL extraction 缺 parseable"; fails=$((fails+1)); fi
 else echo "  PASS detail.extraction_optional_absent(可缺省,文档已载明)"; fi
 
-# 2) SKILL.md 里提到的 12 个工具名必须都在 tools/list 里公布（D-031：+get_audit）
+# 2) SKILL.md 里提到的每个工具名必须都在 tools/list 里公布，且公布清单 == 实现派生清单
+#    （T15 · D-031 新坑②：工具数不再硬编码——从实现干跑取值）
 TOOLS=$(rpc '{"jsonrpc":"2.0","id":7,"method":"tools/list"}')
+MANIFEST=$(EHR_HOME="$H" "$BIN" --print-mcp-tools 2>/dev/null)
+EXPECTED_NAMES=$(echo "$MANIFEST" | jq_ 'print(",".join(d["names"]))')
+EXPECTED_COUNT=$(echo "$MANIFEST" | jq_ 'print(d["count"])')
+ACTUAL_NAMES=$(echo "$TOOLS" | jq_ 'print(",".join(t["name"] for t in d["result"]["tools"]))')
 miss=""
-for t in list_persons get_timeline search_records get_labs get_medications get_conditions get_measurements get_audit list_documents get_document_detail create_person upload_document; do
+for t in $(echo "$EXPECTED_NAMES" | tr ',' ' '); do
   case "$TOOLS" in *"\"$t\""*) ;; *) miss="$miss $t";; esac
   grep -q "$t" "$SKILL" || { echo "  FAIL SKILL.md 未提工具 $t"; fails=$((fails+1)); }
 done
-[ -z "$miss" ] && echo "  PASS tools_declared_in_skill = 12" || { echo "  FAIL tools/list 缺:$miss"; fails=$((fails+1)); }
-NTOOLS=$(echo "$TOOLS" | jq_ 'print(len(d["result"]["tools"]))')
-gate "tools_count" "$NTOOLS" "12"
+[ -z "$miss" ] && echo "  PASS tools_declared_in_skill = $EXPECTED_COUNT" || { echo "  FAIL tools/list 缺:$miss"; fails=$((fails+1)); }
+gate "tools_count" "$(echo "$TOOLS" | jq_ 'print(len(d["result"]["tools"]))')" "$EXPECTED_COUNT"
+gate "tools_names_match_impl" "$ACTUAL_NAMES" "$EXPECTED_NAMES"
+# 2a) **文档里写的工具数**必须等于实现派生的数（T15：数字只在文档里写一次，门禁核对它）
+#     「共 12」这类数字此前散落在 实现/两个门禁/两份文档 共 5 处 ⇒ 改一处漏四处。
+#     现在：实现=真源，文档=唯一手写处，门禁=核对者。
+DOC_COUNT=$(grep -oE '共 *[0-9]+' "$REFS" | head -1 | grep -oE '[0-9]+')
+if [ -z "$DOC_COUNT" ]; then echo "  FAIL tool-contracts.md 未写「共 N」工具数"; fails=$((fails+1));
+else gate "doc_tool_count" "$DOC_COUNT" "$EXPECTED_COUNT"; fi
+SKILL_COUNT=$(grep -oE '[0-9]+ *个工具' "$SKILL" | head -1 | grep -oE '[0-9]+')
+if [ -z "$SKILL_COUNT" ]; then echo "  FAIL SKILL.md 未写「N 个工具」"; fails=$((fails+1));
+else gate "skill_tool_count" "$SKILL_COUNT" "$EXPECTED_COUNT"; fi
+# 2b) 读/写分栏数也对齐（文档写「读侧 10 + 写侧 2」）
+EXP_READ=$(echo "$MANIFEST" | jq_ 'print(d["read"])')
+EXP_WRITE=$(echo "$MANIFEST" | jq_ 'print(d["write"])')
+DOC_READ=$(grep -oE '读侧 *[0-9]+' "$REFS" | head -1 | grep -oE '[0-9]+')
+DOC_WRITE=$(grep -oE '写侧 *[0-9]+' "$REFS" | head -1 | grep -oE '[0-9]+')
+gate "doc_read_count" "$DOC_READ" "$EXP_READ"
+gate "doc_write_count" "$DOC_WRITE" "$EXP_WRITE"
 
 # 2b) 写侧：SKILL.md 承诺的写侧字段名必须出现在真实写侧响应中
 B64=$(printf '姓名：钱九\n检查项目：血常规\n白细胞计数 13.1 10^9/L 偏高\n' | base64 -w0)

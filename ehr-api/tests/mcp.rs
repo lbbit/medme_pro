@@ -522,7 +522,36 @@ async fn mcp_write_tools_are_advertised() {
     for want in ["create_person", "upload_document"] {
         assert!(names.contains(&want), "{want} must be advertised, got {names:?}");
     }
-    assert_eq!(tools.len(), 12, "10 read + 2 write tools (D-031 adds get_audit): {names:?}");
+    // T15（D-031 新坑②）：工具数**不再硬编码**——断言「tools/list 的公布清单 == 实现派生的清单」。
+    // 硬编码数字是「快照」不是「判据」：加一个工具要同步改三处，漏一处就红且看不出原因。
+    let derived = ehr_api::mcp::tool_names();
+    assert_eq!(names, derived.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        "tools/list must publish exactly the derived tool list: {names:?} vs {derived:?}");
+}
+
+/// T15：写侧工具名单**只有一处**（`mcp::WRITE_TOOLS`）⇒ 工具分权与工具公布不会漂移。
+/// 判据形状：①ro scope 拒的**恰好**是 WRITE_TOOLS 全集；②ro scope 放行的**恰好**是读侧全集。
+/// （不是「抽样几个写侧工具」——抽样会漏掉新增工具的越权。）
+#[test]
+fn write_tool_list_and_scope_split_agree() {
+    let names = ehr_api::mcp::tool_names();
+    for t in &names {
+        let is_write = ehr_api::mcp::WRITE_TOOLS.contains(&t.as_str());
+        assert_eq!(
+            ehr_api::auth::Scope::Ro.allows_tool(t),
+            !is_write,
+            "scope split must agree with WRITE_TOOLS for tool {t}"
+        );
+    }
+    // 反向：WRITE_TOOLS 里的每个名字都必须真的被公布（防止名单写了工具却没实现）
+    for t in ehr_api::mcp::WRITE_TOOLS {
+        assert!(names.iter().any(|n| n == t), "WRITE_TOOLS contains unpublished tool {t}");
+    }
+    // 读侧计数 = 总数 - 写侧计数
+    let man = ehr_api::mcp::tool_manifest();
+    assert_eq!(man["count"].as_u64().unwrap() as usize, names.len());
+    assert_eq!(man["write"].as_u64().unwrap() as usize, ehr_api::mcp::WRITE_TOOLS.len());
+    assert_eq!(man["read"].as_u64().unwrap() as usize, names.len() - ehr_api::mcp::WRITE_TOOLS.len());
 }
 
 /// 测试侧 base64 编码器（生产侧只需解码；这里独立实现一遍，避免「用被测代码造输入」）。

@@ -1,6 +1,10 @@
 # medme-ehr MCP 工具契约（读侧 10 + 写侧 2，共 12）
 
 真源：`ehr-api/src/mcp.rs` 的 `tool_schemas()` 与 `call_tool()`。本文件是它的人类可读镜像；改动须两边同步。
+**工具清单的真源是实现**：`ehr-api --print-mcp-tools`（干跑，stdout 为 JSON）输出
+`{count,read,write,names[],read_names[],write_names[]}`——本文档标题里的「共 12 / 读侧 10 / 写侧 2」
+由 `skill-contract-check.sh` 与该输出**逐项核对**（不一致 ⇒ 门禁红）。写侧工具名单**只此一处**
+（`mcp::WRITE_TOOLS`），鉴权分权（ro/rw）也读它 ⇒ 「公布清单」与「谁能写」不会漂移。
 传输：`POST /mcp`，JSON-RPC 2.0，`protocolVersion=2025-06-18`，无 session。
 
 返回值一律 `result.content[0].text`（人读）与 `result.structuredContent`（机读）**双份同源**，由测试断言相等。工具级失败时 `result.isError=true`，并在 **`result._code`**（顶层，非规范字段，便于断言/改行为）里给出错误码。注意不是 `structuredContent._code`。

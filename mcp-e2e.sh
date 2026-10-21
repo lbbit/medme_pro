@@ -31,9 +31,18 @@ jq_() { python3 -c "import json,sys;d=json.load(sys.stdin);$1"; }
 V=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | jq_ 'print(d["result"]["protocolVersion"])')
 gate "protocolVersion" "$V" "2025-06-18"
 
-# 2) tools/list = 12（10 读 + 2 写；D-029 补 meds/conditions/measurements，D-031 补 get_audit）
-N=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | jq_ 'print(len(d["result"]["tools"]))')
-gate "tools_count" "$N" "12"
+# 2) tools/list 公布的工具清单必须**等于**实现派生的清单（T15 · D-031 新坑②）
+#    工具数不再硬编码：这里断言「公布 == 实现」，实现侧由 `ehr-api --print-mcp-tools` 干跑取值。
+#    （硬编码数字是快照不是判据：加一个工具要改三处，漏一处就红且看不出原因。）
+MANIFEST=$(EHR_HOME="$H" "$BIN" --print-mcp-tools 2>/dev/null)
+EXPECTED_NAMES=$(echo "$MANIFEST" | jq_ 'print(",".join(d["names"]))')
+EXPECTED_COUNT=$(echo "$MANIFEST" | jq_ 'print(d["count"])')
+TOOLS=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
+ACTUAL_NAMES=$(echo "$TOOLS" | jq_ 'print(",".join(t["name"] for t in d["result"]["tools"]))')
+ACTUAL_COUNT=$(echo "$TOOLS" | jq_ 'print(len(d["result"]["tools"]))')
+gate "tools_count" "$ACTUAL_COUNT" "$EXPECTED_COUNT"
+gate "tools_names_match_impl" "$ACTUAL_NAMES" "$EXPECTED_NAMES"
+note "tools_count=$ACTUAL_COUNT (derived from --print-mcp-tools, not hardcoded)"
 
 # 3) 建档 + 上传（REST 侧写入 ⇒ MCP 侧必须读到同一真相层）
 PID=$(curl -s -X POST "127.0.0.1:$PORT/api/v1/persons" -H 'content-type: application/json' \

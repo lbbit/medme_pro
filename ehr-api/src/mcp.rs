@@ -406,6 +406,45 @@ fn prepare(name: &str, args: &Value) -> Result<Prepared, ArgErr> {
     })
 }
 
+/// tools/list 公布的全部工具名 —— **单一事实来源**（与 `tool_schemas()` 同源派生）。
+///
+/// 用途：把「MCP 有多少个工具」从**三处硬编码的数字**（mcp-e2e.sh / skill-contract-check.sh /
+/// tests/mcp.rs）变成**一处派生的事实**（D-031 新坑②）。门禁仍要断言数字，但断言的是
+/// 「实现 == 契约文档」，不是「实现 == 上次的快照」——新增工具时改文档即可，不该三处同步改数字。
+pub fn tool_names() -> Vec<String> {
+    tool_schemas()
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+        .collect()
+}
+
+/// 写侧工具名（其余均为读侧）。用于文档「读侧 N + 写侧 M」分栏核对。
+/// **判据只此一处**：`Scope::allows_tool` 与此表必须一致（由 tests/mcp.rs 交叉断言）。
+pub const WRITE_TOOLS: [&str; 2] = ["create_person", "upload_document"];
+
+/// 工具清单的机器可读形态（`--print-mcp-tools` 干跑输出）。
+///
+/// 为什么要有它（D-031 新坑②）：「MCP 有多少个工具」此前被**硬编码三处**
+/// （mcp-e2e.sh / skill-contract-check.sh / tests/mcp.rs）⇒ 加一个工具要改三处，
+/// 漏一处就红（且红得看不出是「漏改」还是「真坏了」）。本函数把「工具清单」变成
+/// **单一事实来源**：脚本与测试都从它取值，于是「加一个工具」只需改**实现 + 契约文档**两处。
+///
+/// 输出形状（JSON）：
+/// `{"count":N,"read":N1,"write":N2,"names":[...],"read_names":[...],"write_names":[...]}`
+pub fn tool_manifest() -> Value {
+    let names = tool_names();
+    let write: Vec<String> = WRITE_TOOLS.iter().map(|s| s.to_string()).collect();
+    let read: Vec<String> = names.iter().filter(|n| !write.contains(n)).cloned().collect();
+    json!({
+        "count": names.len(),
+        "read": read.len(),
+        "write": write.len(),
+        "names": names,
+        "read_names": read,
+        "write_names": write,
+    })
+}
+
 /// tools/list 的 schema。**与 prepare() 一一对应**：新增工具必须同时改两处，
 /// 且 tests/mcp.rs 断言 tools/list 的每个名字都能被 tools/call 认领（防「挂名不实现」）。
 fn tool_schemas() -> Vec<Value> {

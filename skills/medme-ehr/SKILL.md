@@ -72,6 +72,7 @@ metadata:
 ## 可选：MCP 壳
 
 服务端另有 `POST /mcp`（JSON-RPC 2.0，12 个工具：读侧 10 + 写侧 2），供只吃 MCP 的宿主使用。
+工具清单的**真源是实现**（`ehr-api --print-mcp-tools` 干跑输出 JSON）；本文档里的数字由门禁 `skill-contract-check.sh` 逐项核对（文档与实现不一致 ⇒ 门禁红）。
 契约见 `references/tool-contracts.md`。**宿主不支持 MCP 时直接用上面的 REST 命令即可，两者同源。**
 
 REST 命令 ↔ MCP 工具一一对应（同一真相层，任选其一）：

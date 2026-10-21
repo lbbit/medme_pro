@@ -46,7 +46,8 @@ impl Scope {
     pub fn allows_tool(self, tool: &str) -> bool {
         match self {
             Scope::Rw => true,
-            Scope::Ro => !matches!(tool, "create_person" | "upload_document"),
+            // 写侧工具名单**只有一处**（mcp::WRITE_TOOLS）⇒ 工具分权与工具公布不会漂移。
+            Scope::Ro => !crate::mcp::WRITE_TOOLS.contains(&tool),
         }
     }
 }
