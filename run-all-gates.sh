@@ -51,6 +51,7 @@ RUN_LIST=(
   audit-e2e.sh                  # D-030 审计
   ehtest.sh                     # 端到端总验收
   registry-concurrency-e2e.sh   # T38 person registry 并发写完整性（真相层被打坏 ⇒ 读面永久 500）
+  write-multiround-e2e.sh      # T40 写侧「多轮」：多轮累积/重复上传幂等/重建还原/MCP 面同源与并发
   rebuild-e2e.sh                # 目标验收④ 派生索引可重建
   rebuild-lock-e2e.sh           # D-024 重建期互斥
   web-e2e.sh                    # D-016 Web 管理端

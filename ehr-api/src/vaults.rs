@@ -246,6 +246,25 @@ pub fn ingest_upload(vault: &Vault, filename: &str, bytes: &[u8]) -> Result<Uplo
                 reply.text_indexed = true;
             }
         }
+    } else {
+        // T40：**幂等路径的回执此前与真相层不一致**（真缺陷，实测抓到，非推演）。
+        //   场景：同一份字节**第二次**上传（`imp.deduped=true` 且该件**已建档**）⇒
+        //   旧代码走「零改动直接返回」分支 ⇒ 回执里 `document_id=null`、
+        //   `text_indexed=false`、`doc_type=null` ⇒ **回执说「没建档、没索引」**，
+        //   而真相层里那份文档**确实已建 Document 行、已有 OCR 文本层**
+        //   （读面 `GET /persons/{pid}/documents` 明明写着 `document_id=1, text_indexed=true`）。
+        //   ⇒ **同一事实两处不一致**：调用方（人或 agent）拿回执判「这文档没进去」⇒ 去重传、
+        //   或去修文档；而真相层里它明明在 ⇒ **「以为有、其实没有」的反面**（「以为没有、其实有」）。
+        //   ⇒ 与 D-034（OCR 路径因 `pipeline::ingest` 不带 document_id 而回执 document_id=null）
+        //   **同族**：回执必须回链到**内核里那一份**，不能自造。
+        //   ⇒ 修法：**幂等分支也回填**内核已有的 Document/OCR 事实
+        //   （`document_by_source_file_id` + `ocr_page_numbers` ⇒ 与读面同一份实现）。
+        //   ⇒ 纪律：**回执不是「本次做了什么」的流水，而是「现在真相层里是什么」的快照**。
+        if let Some(doc) = vault.document_by_source_file_id(imp.source_file.id)? {
+            reply.document_id = Some(doc.id);
+            reply.doc_type = Some(doc.doc_type.as_str().to_string());
+            reply.text_indexed = !vault.ocr_page_numbers(doc.id)?.is_empty();
+        }
     }
     Ok(reply)
 }

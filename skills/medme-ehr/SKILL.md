@@ -69,7 +69,7 @@ metadata:
 | `ehr.sh extraction PID SHA FILE` | `content_hash` `document_id` `result_hash` `schema` `verified` `verify_detail[]`：`rejected` `unverified` `unverified_fields` `labs_count` `meds_count` `diagnoses_count` |
 | `ehr.sh audit` | `persons_scanned` `count` `entries[]`：`source` `op` `ts` `person_id` `detail` `sha256` |
 | `ehr.sh person-create NAME` | `id` `name` `birthday` `gender` `id_note` `created_at` `updated_at` |
-| `ehr.sh upload PID FILE` | `content_hash` `deduped` `document_id` `text_indexed` `stored_raw_only` `messages[]` |
+| `ehr.sh upload PID FILE` | `content_hash` `deduped` `document_id` `doc_type` `text_indexed` `stored_raw_only` `messages[]` |
 | `ehr.sh note PID TEXT` | `document_id` `content_hash` `doc_type` `title` `taken_at` `deduped` |
 | `ehr.sh profile-event PID` | `document_id` `content_hash` `doc_type` `title` `taken_at` `deduped` |
 | `ehr.sh self-measure PID` | `document_id` `content_hash` `doc_type` `title` `taken_at` `deduped` |
