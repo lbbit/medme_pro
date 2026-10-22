@@ -64,6 +64,7 @@
   - `---- mcp-interop-e2e.sh` ⇒ **`[PASS] mcp-interop-e2e.sh fails=0`**（runner 上从零装 TUNA pypi 的 `mcp==1.30.0` ⇒ **TUNA pypi 通道实测可用**；该步耗时 51s）；
   - `---- mcp-interop-ts-e2e.sh` ⇒ **`[PASS] mcp-interop-ts-e2e.sh fails=0`**（runner 上从零装 npmmirror 的 `@modelcontextprotocol/sdk@1.32.1` ⇒ **npmmirror 通道实测可用**；该步耗时 29s）；
   - 末行 ⇒ **`[证据] run-all-gates.sh 门禁数=23（本次执行 23）总 fails=0`** ⇒ 23 门在真 runner 上全绿。
+  - **回写 commit 亦在真 runner 上复验**：PLAN/DECISIONS 回写（`a0ab2ae`）⇒ run `39769207268` **同样全绿**（13 步全 success、兜底步 skipped）⇒ **文档回写没有把门禁打红**（`doc-contract`/`api-doc`/`ci-portability` 三门本地也绿）。
 - ✅ **T37-⑤ 通道结论升级为「实测」而非「配方」**：D-004~D-007 的通道配方此前**从未在真 runner 上跑过**（PLAN 反复写「未在真 runner 上实测」）⇒ 本轮起，**npmmirror（TS SDK）与 TUNA pypi（Python SDK）两条通道在真 runner 上各实测成功一次**（门自带 fallback：主通道失败退官方 registry/pypi ⇒ 通道单点失效不会把门打红）。
 - ✅ **T37-⑥ Rust 侧零破坏**：本轮**未改任何 Rust 源码**、**未改 `Cargo.toml`/`Cargo.lock`** ⇒ 零新依赖；runner 上 `cargo test --all-targets --locked` 步 **success**（含 84 门）。
 - ✅ **T37-⑦ 产物新鲜度与同步**：runner 的「同步产物（local target ⇄ shared target）」步 **success** ⇒ `artifact-freshness-check.sh` 在 runner 上绿 ⇒ 两份产物 sha256 逐字一致这条纪律**在真环境成立**。
