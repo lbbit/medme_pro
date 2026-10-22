@@ -45,6 +45,22 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: 装 Node（Web 门禁 W2 的 JS 语法检查需要它）
+        # 为什么必须装（T30 的真缺陷）：`web-e2e.sh` 的 W2 用 `node --check` 校验
+        # Web 页面的 JS 语法；node 不存在时它**静默 SKIP** ⇒ 本机上这道检查
+        # 从来没真正执行过 ⇒ 页面里的 JS **整文件是 SyntaxError**（`j()` 里
+        # `const t` 重复声明）也照样「门禁全绿」。
+        # ⇒ CI 必须**装上 node**，让 W2 变成真门；通道走 TUNA（D-007 同族）。
+        run: |
+          set -euo pipefail
+          NODE_VER=v20.18.0
+          URL="https://mirrors.tuna.tsinghua.edu.cn/nodejs-release/${NODE_VER}/node-${NODE_VER}-linux-x64.tar.xz"
+          curl -fsSL "$URL" -o /tmp/node.tar.xz
+          mkdir -p "$HOME/node" && tar -xJf /tmp/node.tar.xz -C "$HOME/node" --strip-components=1
+          echo "$HOME/node/bin" >> "$GITHUB_PATH"
+          node --version
+          echo "[证据] node 已安装：$(node --version)"
+
       - name: 拉取上游 medme 源码（固定 commit，见 upstream.pin）
         run: ./ci/fetch-upstream.sh
 
@@ -107,6 +123,9 @@ jobs:
         if: failure()
         run: |
           set -euo pipefail
+          # ⚠️ 产物路径仍从唯一来源 ci/env.sh 取（不得在本文件里另写一份，
+          #    ci-portability-check.sh 会机器核对这件事）。
+          . ./ci/env.sh
           echo "::group::门禁产物"
           ls -la "$CARGO_TARGET_DIR"/*/ehr-api || true
           echo "::endgroup::"

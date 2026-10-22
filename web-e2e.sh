@@ -62,7 +62,12 @@ case "$CT" in text/html*) ok "W1 content_type=$CT";; *) bad "W1 content_type=$CT
 BYTES=$(wc -c < /tmp/webe2e.html)
 [ "$BYTES" -gt 2000 ] && ok "W1 bytes=$BYTES" || bad "W1 bytes=$BYTES"
 
-# W2 JS 语法（node 不可用则跳过并明说，不假装通过）
+# W2 JS 语法（node 不可用 ⇒ **红**，不再静默 SKIP；T30）
+#   为什么改：node 缺失时原实现**静默 SKIP** ⇒ 本机上 W2 从未真正执行过
+#   ⇒ Web 页面的 JS 整文件是 SyntaxError（`j()` 里 `const t` 重复声明）
+#   也照样「门禁全绿」⇒ 直到 CI 装了 node 才暴露。
+#   ⇒ 纪律沿用 D-042「允许跳过，但必须写明原因」+ D-011「门红了先怀疑门」：
+#   一道**静默跳过**的检查 = 一道不存在的门 ⇒ 缺依赖必须**红**并给出修复路径。
 python3 - <<'PY'
 import re,sys
 h=open('/tmp/webe2e.html',encoding='utf-8').read()
@@ -72,7 +77,8 @@ PY
 if command -v node >/dev/null 2>&1; then
   node --check /tmp/webe2e.js && ok "W2 js syntax" || bad "W2 js syntax"
 else
-  echo "SKIP W2 js syntax (node 不存在；已用容器内 playwright 镜像 node --check 代偿，见 DECISIONS D-016)"
+  bad "W2 js syntax 未执行（node 不存在）"
+  echo "       修复：装 node（CI 已装；本机可用 TUNA 通道 nodejs-release 安装），或用容器内 node 代偿"
 fi
 
 # W3 端到端业务流：建档 → 上传 → 时间线/文档/指标/检索 → 字段交叉核对

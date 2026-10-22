@@ -67,9 +67,9 @@ async function j(path, opt) {
   opt.headers = Object.assign({}, opt.headers || {});
   if (t) opt.headers["Authorization"] = "Bearer " + t;
   const r = await fetch(API + path, opt);
-  const t = await r.text();
-  let d; try { d = JSON.parse(t); } catch (e) { d = { raw: t }; }
-  if (!r.ok) throw new Error((d && d.error) || (r.status + " " + t.slice(0,200)));
+  const txt = await r.text();
+  let d; try { d = JSON.parse(txt); } catch (e) { d = { raw: txt }; }
+  if (!r.ok) throw new Error((d && d.error) || (r.status + " " + txt.slice(0,200)));
   return d;
 }
 const esc = s => String(s==null?"":s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
