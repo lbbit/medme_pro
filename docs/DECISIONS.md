@@ -1,5 +1,27 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-050 2026-10-22 · **T33「容器化门从 SKIP 转正为 RUN」——重建镜像让 `container-smoke.sh` 真正存在；并当场抓出该门自身的一个假绿洞：「派生的期望值为空 ⇒ 空==空 ⇒ 判 PASS」**
+
+**为什么做**：PLAN 连续多轮（自 T25 起）都挂着同一条未销账项：「**`container-smoke.sh` 仍**未跑**（须先重建镜像）**」。事实核对：运行中的 `deploy-ehr-api-1` 用的是 **10-21 的旧镜像**（image `a4edd6b7…`）⇒ 跑它只会红在陈旧产物 ⇒ 该门被登记进 `run-all-gates.sh` 的 **SKIP 清单**（理由写明「需要先重建镜像」）⇒ **这道门从 10-21 起就没存在过**。而「容器化 e2e」恰是目标验收①「docker-compose 一键起」的最后一道机器判据。
+**关键结构决策①：先核实通道与前提，再动手（D4「参数生效要有证据」）**。本轮动手前逐项实测：TUNA sparse `https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/` ⇒ **HTTP 200**；宿主代理 `127.0.0.1:7890` **在监听**（容器 build 期的 `host.docker.internal:7890` 靠它）；`docker compose config` ⇒ OK；`.dockerignore` 白名单含 `upstream-medme/packages/` ⇒ context 完整；磁盘余量 124G。⇒ **不是盲跑**。
+**关键结构决策②：镜像必须与当前 HEAD 同源，且要有「同源」的机器证据**。`docker compose build ehr-api` ⇒ 3m36s 成功、新镜像 sha `1cd00ea21147`（替换旧 `a4edd6b7…`）；构建期自带探针打印 `[证据] Dockerfile build: manifest_paths=17 openapi_paths=17` 与 `[证据] ehr-api dry-run exit=0` ⇒ **镜像里的二进制就是当前 HEAD 编译出来的**（不是旧产物）。⇒ 这正是 D-035 新坑③「先问它跑的是哪一份产物」在容器面的正面处置。
+**关键结构决策③（本轮最关键）：门自身有假绿洞，实测抓出并修**。首次跑 `container-smoke.sh` ⇒ `fails=1`，红在 `openapi.paths: got= want=ok`。真因**不是服务坏了**，而是**门的判据自己有洞**：步骤 4/5 用 `docker run -e EHR_HOME=/tmp/h` 从**镜像自身**派生期望路径数，而**容器内 `/tmp/h` 不存在** ⇒ ehr-api 报 `EHR_HOME not accessible` ⇒ **stdout 为空** ⇒ `EXP=""`、`M=""` ⇒ **两个空串相等 ⇒ 步骤 5 被判 PASS（假绿）**；同时步骤 4 拿真实的 17 与空串比 ⇒ 假红。⇒ 修法**不在服务端，在判据**：①`EHR_HOME=/tmp`（容器内**已存在**的目录，dry-run 才不落状态）；②**派生的期望值为空时必须红**（新增 `image.manifest.paths`、`image.dry-run.paths` 两条空值断言）⇒ 修后 `paths=17 expected=17`、`image_paths=17 expected=17`（两边都从镜像派生，仍非手抄）。
+**关键结构决策④：纪律升级——「派生出来的期望值」为空时必须红，不许拿空值参与比较**。这是 D-044「判据必须能被证伪」与 D-011「门红了先怀疑门」的**双向合并**：空值比较会让门**同时假红与假绿**（拿真实值比空 ⇒ 红；拿空比空 ⇒ 绿）⇒ 门对「派生源出错」**毫无判别力**。⇒ 凡「期望值由现场派生」（镜像自身清单、运行时 OpenAPI、实现派生的路径数）⇒ **必须先断言期望值非空**，再比较。
+**关键结构决策⑤：门从 SKIP 转正为 RUN，但 SKIP 清单不许消失**。`container-smoke.sh` 移入 RUN 清单（**20 门**）；SKIP 只剩 `agent-e2e.sh`（**理由仍必填**）⇒ A1 判据（文件系统派生核对登记表）不变 ⇒ `--list` dry-run 打印 `RUN=20 / SKIP=1` 且「[证据] A1 登记表完整」。
+**关键结构决策⑥：`agent-e2e` 这类「依赖外部引擎」的门**不并入例行入口**，即使它本轮绿**。** 本轮 `agent-e2e.sh` 补跑 **rc=0、3/3 PASS**（「找到目标人」「报出数值 13.5」「给出证据来源」docref `43b5077d…`；此前 PLAN 记的 exit=124 超时**本轮未复现**，Duration 1m30s）——但它依赖真·第三方 CLI + 外部 LLM 引擎 ⇒ 抖动时**红在引擎而不是代码** ⇒ 按 D-048「用真服务验证的性质 / 可离线复现的性质必须分层」：**真引擎的取证可以做，例行门禁不能建在它上面** ⇒ 留在 SKIP 清单作**按需补跑**项，理由写明。
+**证据链（缺一即算交付）**：
+①**通道证据**：TUNA sparse **HTTP 200**、代理 7890 在监听、`compose config` OK、磁盘余量 124G。
+②**镜像重建证据**：build **3m36s 成功**，新 sha `1cd00ea21147`；构建期 `[证据] manifest_paths=17 openapi_paths=17` + `[证据] ehr-api dry-run exit=0`；起容器后日志 `[证据] ehr-api v0.0.1 | mode=serve | EHR_HOME=/home/ehr | ADDR=0.0.0.0:8443`（D1 证据行与实际 bind 同源）。
+③**门自身假绿洞被抓出（实测，非推演）**：首次跑 `fails=1`（`openapi.paths: got= want=ok`）⇒ 定位到 `/tmp/h` 不存在 ⇒ stdout 空 ⇒ **空==空被判 PASS**。
+④**修后全绿**：`./container-smoke.sh` ⇒ **fails=0**，`paths=17 expected=17`、`image_paths=17 expected=17`、volume 末行 `{"op":"create",...,"name":"容器验收·李四"}`（真相层落盘）、步骤 7 证据行同源。
+⑤**门是「真门」的负向证据**：把 `--print-rest-manifest` 改成 `--print-rest-manifestX` ⇒ **红 fails=3**（「派生的期望值为空」+ 步骤4 + 步骤5）⇒ 复原 ⇒ **fails=0** ⇒ **新判据有判别力**。
+⑥**统一入口全量复跑：20 门全绿，总 fails=0**（`run-all-gates.sh` ⇒ A1 PASS + 20 个 `[PASS] … fails=0`；末行 `[证据] run-all-gates.sh 门禁数=20（本次执行 20）总 fails=0`）。
+⑦**Rust 侧零破坏**：**未改任何 Rust 源码**，`Cargo.toml`/`Cargo.lock` **未改动** ⇒ **零新依赖**；改动只在两个 shell 脚本 ⇒ 不需重编译，产物新鲜度门仍绿。
+⑧**后台卡死检查（D-010）**：**无 cargo/rustc 残留**、**无 copilot 残留**；临时目录由脚本自清；常驻只剩 10-21 陈旧取证进程（`:18999`/`:18991`/`:19031`/`:19032`）、本轮新容器（`:8585`）与 10-21 的 OCR 容器 ⇒ **非卡死**。
+**新坑一则（D4 同族）**：
+①**「派生的期望值为空」会让门同时假红与假绿**。本轮实测：同一个根因（容器内 `/tmp/h` 不存在 ⇒ 派生的路径数为空）⇒ 步骤 4 **假红**（17 vs 空）、步骤 5 **假绿**（空 vs 空）⇒ **若只看汇总的 fails=1，会以为「门红了 ⇒ 服务坏了」**；而真实病灶在**门自己**。⇒ 纪律升级（已写入代码）：**凡期望值由现场派生，必须先断言非空，再比较**。这条与 D-046 决策⑨（行尾注释让整行逃逸）、D-048 决策⑨（Python 注释判定）是**同一族第三次复发**：**「判据必须判事实」**——空值不是事实。
+**未销账/下一步**：①**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；②MCP 侧仍无 resources/prompts；③公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token（当前 `EHR_API_TOKENS` 为空 ⇒ 放行模式，仅本地）；④ghcr 包可见性仍 private（OCR 镜像未推 GHCR、未纳入 CI）；⑤**本轮新增的 `container-smoke.sh` 门尚未在真 GitHub runner 上验过**（runner 无本机代理 7890 ⇒ 需先有 CI 侧镜像构建通道）；⑥真·第三方 MCP 客户端互通仍未验；⑦`.dcm`/DICOM worker 未做；⑧上游分类缺口（认「出院记录」不认「出院小结」）仍在；⑨`docs/API.md` 是**生成物**，改接口须跑 `./api-doc-check.sh --write`（本轮**未改接口** ⇒ 无需重生成）；⑩人员域三端点仍 501 且刻意不进 OpenAPI；⑪`agent-e2e.sh` 本轮补跑 3/3 PASS（rc=0），但仍按 D-048 分层留在 SKIP 清单作按需补跑项。
+
 ## D-049 2026-10-22 · **T32「家庭自测趋势」专用视图——把「家庭自测值 ≠ 医院指标」这条上游结构约束，在 Web 端显式做成一屏；并给它配一道「页面读的字段必须来自运行时 OpenAPI」的门（字段清单与 schema 两边都派生，不手抄）**
 
 **为什么做**：PLAN 里连着多轮列着同一条未销账项——「**「家庭自测趋势」专用视图仍未做**」。它不是装饰性的 UI 缺口：**上游用 `GroupKey::SelfMeasured` 把家庭自测序列与医院序列**结构上分开**（家庭血压的参考区间是「家庭自测上限 135/85」，与门诊 140/90 不可套用）⇒ 若把两者画进同一条线/同一张表，**参考区间就是错的**。⇒ 现有 Web「指标」页只读 `GET /persons/{pid}/labs`（`labs` 里虽有 `self_measured` 标志，但**没有任何一处把家庭自测单独呈现**）⇒ 消费方极易把家庭值当医院值解读（D-016 家族：「数据在，但没人告诉你怎么读」）。

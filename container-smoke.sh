@@ -27,14 +27,26 @@ echo "== 4 服务端 openapi paths =="
 N=$(curl -s -m 5 "$B/openapi.json" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["paths"]))')
 # T16 · D-032 未销账⑩：期望路径数**从镜像自身派生**（--print-rest-manifest），不再硬编码 16。
 #   为什么：16 此前散在 5 处，真源在同一份代码里 ⇒ 同一事实五份实现。现在实现=真源。
-EXP=$(docker run --rm --user 0 -e EHR_HOME=/tmp/h --entrypoint /usr/local/bin/ehr-api deploy-ehr-api --print-rest-manifest 2>/dev/null \
+EXP=$(docker run --rm --user 0 -e EHR_HOME=/tmp --entrypoint /usr/local/bin/ehr-api deploy-ehr-api --print-rest-manifest 2>/dev/null \
   | python3 -c 'import json,sys;print(json.load(sys.stdin)["paths"])')
-ck "openapi.paths" "$([ "$N" = "$EXP" ] && echo ok)" "ok"; echo "paths=$N expected=$EXP (derived, not hardcoded)"
+# D-050：派生的 expected 若为空 ⇒ 「空 == 空」会被判成 PASS（假绿，本轮实测踩到）。
+#   起因：容器内 /tmp/h 不存在 ⇒ ehr-api 报 "EHR_HOME not accessible" ⇒ stdout 空 ⇒
+#   EXP 为空、步骤5 的 M 也为空 ⇒ 两个空串相等 ⇒ ck 判 PASS ⇒ 门是空的。
+#   ⇒ 纪律：任何**派生的期望值**为空时必须红（期望值本身要被断言），不许拿空值参与比较。
+if [ -z "$EXP" ]; then
+  echo "[FAIL] image.manifest.paths: 镜像自身 --print-rest-manifest 未产出路径数（期望值为空 ⇒ 后续比较会是假绿）"
+  fail=$((fail+1)); EXP=""
+fi
+ck "openapi.paths" "$([ -n "$N" ] && [ -n "$EXP" ] && [ "$N" = "$EXP" ] && echo ok)" "ok"; echo "paths=$N expected=$EXP (derived, not hardcoded)"
 
 echo "== 5 镜像自身 dry-run(不经宿主二进制) =="
-M=$(docker run --rm --user 0 -e EHR_HOME=/tmp/h --entrypoint /usr/local/bin/ehr-api deploy-ehr-api --print-openapi 2>/dev/null \
+M=$(docker run --rm --user 0 -e EHR_HOME=/tmp --entrypoint /usr/local/bin/ehr-api deploy-ehr-api --print-openapi 2>/dev/null \
   | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["paths"]))')
-ck "image.dry-run.paths" "$([ "$M" = "$EXP" ] && echo ok)" "ok"; echo "image_paths=$M expected=$EXP (derived, not hardcoded)"
+if [ -z "$M" ]; then
+  echo "[FAIL] image.dry-run.paths: 镜像自身 --print-openapi 未产出路径数（值为空 ⇒ 比较会假绿）"
+  fail=$((fail+1))
+fi
+ck "image.dry-run.paths" "$([ -n "$M" ] && [ -n "$EXP" ] && [ "$M" = "$EXP" ] && echo ok)" "ok"; echo "image_paths=$M expected=$EXP (derived, not hardcoded)"
 
 echo "== 6 volume 落盘真相层(append-only JSONL 末行) =="
 docker exec deploy-ehr-api-1 tail -n 1 /home/ehr/registry/persons.jsonl

@@ -50,11 +50,11 @@ RUN_LIST=(
   rebuild-e2e.sh                # 目标验收④ 派生索引可重建
   rebuild-lock-e2e.sh           # D-024 重建期互斥
   web-e2e.sh                    # D-016 Web 管理端
+  container-smoke.sh            # D-050 容器化 e2e（本轮起进 RUN：镜像已重建为当前 HEAD）
 )
 
 # ---- SKIP 清单：明确知道「本入口不跑」的脚本 + 原因（原因不得为空）----
 SKIP_LIST=(
-  "container-smoke.sh|需要先重建镜像（运行中的容器是 10-21 旧镜像 ⇒ 跑了只会红在陈旧产物）"
   "agent-e2e.sh|需要真·第三方 agent CLI（copilot）+ 外部服务态，例行入口不跑"
 )
 
