@@ -11,7 +11,10 @@
 #
 # 用法: rebuild-e2e.sh <abs-binary-path> [port]
 set -u -o pipefail; umask 077
-BIN="${1:?usage: rebuild-e2e.sh abs-binary-path [port]}"; PORT="${2:-8961}"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+# 产物路径的**唯一来源**（ci/env.sh）——本脚本原先自己拼 $HOME/medme-shared-target/...
+. "$ROOT/ci/env.sh"
+BIN="${1:-$EHR_REL_BIN}"; PORT="${2:-8961}"   # 缺省取唯一来源（ci/env.sh）
 API="http://127.0.0.1:${PORT}/api/v1"
 H=$(mktemp -d /tmp/ehrrb.XXXXXX) || { echo FATAL-TMPDIR; exit 3; }
 WORK=$(mktemp -d /tmp/ehrrbw.XXXXXX) || { echo FATAL-TMPDIR; exit 3; }

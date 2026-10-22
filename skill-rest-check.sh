@@ -4,8 +4,9 @@
 # 用法: ./skill-rest-check.sh [PORT]   默认 18715
 set -uo pipefail
 PORT="${1:-18715}"
-BIN="${EHR_BIN:-$HOME/medme-shared-target/release/ehr-api}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+. "$ROOT/ci/env.sh"
+BIN="$EHR_BIN"
 E="$ROOT/skills/medme-ehr/scripts/ehr.sh"
 SKILL="$ROOT/skills/medme-ehr/SKILL.md"
 REFS="$ROOT/skills/medme-ehr/references/rest-contracts.md"

@@ -23,12 +23,16 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 export PATH="$HOME/.cargo/bin:$PATH"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/medme-shared-target}"
-REL_BIN="$CARGO_TARGET_DIR/release/ehr-api"
+# 产物路径的**唯一来源**（ci/env.sh）——各门禁脚本自己也 source 它 ⇒ 同一事实一份实现。
+# 注意：本入口只 export CARGO_TARGET_DIR（供 ehtest/rebuild 等需要显式路径的门），
+# 门禁脚本内部一律用 $EHR_BIN / $EHR_DBG_BIN，不再自己拼路径。
+. "$ROOT/ci/env.sh"
+REL_BIN="$EHR_REL_BIN"
 
 # ---- RUN 清单：默认参与统一入口的门禁（顺序 = 依赖顺序：产物/文档面在前，e2e 在后）----
 RUN_LIST=(
   artifact-freshness-check.sh   # T24 产物新鲜度（先跑：后面所有门都依赖这份产物）
+  ci-portability-check.sh       # T28 CI 可移植性（不许写死机器专属路径/产物路径单一来源）
   doc-contract-check.sh         # T23 文档字段面
   api-doc-check.sh              # D-025 docs/API.md 漂移
   skill-contract-check.sh       # D-018 SKILL/MCP 工具契约

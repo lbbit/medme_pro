@@ -20,8 +20,9 @@
 # 用法: ./skill-doc-field-check.sh [PORT]   默认 18735
 set -uo pipefail
 PORT="${1:-18735}"
-BIN="${EHR_BIN:-$HOME/medme-shared-target/release/ehr-api}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+. "$ROOT/ci/env.sh"
+BIN="$EHR_BIN"
 SKILL="$ROOT/skills/medme-ehr/SKILL.md"
 HELPER="$ROOT/skills/medme-ehr/scripts/ehr.sh"
 fails=0

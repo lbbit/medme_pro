@@ -4,8 +4,9 @@
 # 用法: ./skill-contract-check.sh [PORT]   默认 18692
 set -uo pipefail
 PORT="${1:-18692}"
-BIN="${EHR_BIN:-$HOME/medme-shared-target/release/ehr-api}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+. "$ROOT/ci/env.sh"
+BIN="$EHR_BIN"
 SKILL="$ROOT/skills/medme-ehr/SKILL.md"
 REFS="$ROOT/skills/medme-ehr/references/tool-contracts.md"
 fails=0

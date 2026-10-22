@@ -3,8 +3,10 @@
 # 用法: ./mcp-e2e.sh [PORT]   默认 18691
 # 门禁口径: 任何一步 fails>0 即 exit=1。D4：参数生效要有证据，fails 计数必须打印出来。
 set -uo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+. "$ROOT/ci/env.sh"
 PORT="${1:-18691}"
-BIN="${EHR_BIN:-$HOME/medme-shared-target/release/ehr-api}"
+BIN="$EHR_BIN"
 fails=0
 note() { echo "[证据] $*"; }
 gate() { # gate <name> <actual> <expected>

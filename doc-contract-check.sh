@@ -12,8 +12,9 @@
 # 用法: ./doc-contract-check.sh [PORT]   默认 18733
 set -uo pipefail
 PORT="${1:-18733}"
-BIN="${EHR_BIN:-$HOME/medme-shared-target/release/ehr-api}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+. "$ROOT/ci/env.sh"
+BIN="$EHR_BIN"
 RDOC="$ROOT/skills/medme-ehr/references/rest-contracts.md"
 fails=0
 [ -x "$BIN" ] || { echo "missing binary: $BIN"; exit 1; }

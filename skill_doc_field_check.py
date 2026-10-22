@@ -45,7 +45,17 @@ SKILL = sys.argv[2]
 HELPER = sys.argv[3]
 DUMP = "--dump" in sys.argv
 
-BIN = os.path.expanduser(os.environ.get("EHR_BIN", "~/medme-shared-target/release/ehr-api"))
+# 产物路径的**唯一来源**（ci/env.sh）—— 判据 D/E（ci_portability_check.py）：
+#   本行原先是 `os.environ.get("EHR_BIN", "~/medme-shared-target/release/ehr-api")`
+#   ⇒ 那是**第二份实现**（且兜底默认值指向某台机器上的固定路径）
+#   ⇒ 在 CI 上如果注入漏了，就会**静默**跑那份默认路径上的旧产物，而门是绿的
+#   （D-035 新坑③「先问它跑的是哪一份产物」）。
+#   ⇒ 改为「没注入就明确失败」。
+BIN = os.environ.get("EHR_BIN")
+if not BIN:
+    print("FAIL 产物路径未注入（EHR_BIN）⇒ 只能来自唯一来源 ci/env.sh")
+    sys.exit(1)
+BIN = os.path.expanduser(BIN)
 BASE = f"http://127.0.0.1:{PORT}"
 fails = 0
 

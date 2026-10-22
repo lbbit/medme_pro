@@ -36,26 +36,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 拉取上游 medme 源码（固定 commit，见 upstream.pin）
-        run: |
-          set -euo pipefail
-          . upstream.pin
-          echo "[证据] upstream = $UPSTREAM_REPO@$UPSTREAM_COMMIT"
-          for URL in \
-            "https://codeload.github.com/$UPSTREAM_REPO/tar.gz/$UPSTREAM_COMMIT" \
-            "https://ghfast.top/https://github.com/$UPSTREAM_REPO/archive/$UPSTREAM_COMMIT.tar.gz" ; do
-            echo "try $URL"
-            if curl -sSfL --retry 2 --max-time 600 -o /tmp/upstream.tar.gz "$URL"; then
-              break
-            fi
-          done
-          test -s /tmp/upstream.tar.gz
-          mkdir -p upstream-medme
-          tar xzf /tmp/upstream.tar.gz -C /tmp
-          SRC=$(find /tmp -maxdepth 1 -type d -name "medme-*" | head -1)
-          test -n "$SRC"
-          cp "$SRC/Cargo.toml" "$SRC/Cargo.lock" upstream-medme/
-          cp -r "$SRC/packages" upstream-medme/
-          echo "[证据] upstream packages: $(ls upstream-medme/packages | tr '\n' ' ')"
+        # 与 ci-gates.yml 共用同一份实现（ci/fetch-upstream.sh）——同一事实一份实现，
+        # 避免「镜像能构建但门禁跑不了」这类两份代码各自漂移。
+        run: ./ci/fetch-upstream.sh
 
       - name: 解析镜像 tag
         id: meta

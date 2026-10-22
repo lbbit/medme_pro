@@ -4,7 +4,10 @@
 # ⚠️陷阱(本轮实撞):裸写`set -u pipefail`=「声明变量pipefail取其$1」而非开pipefail选项!
 #   $1缺省时 set -u 直接崩、$1有值时BIN会被污染成"pipefail"(GATE-FATAL-BIN假死相)。正确形态用 -o：
 set -u -o pipefail; umask 077
-BIN="${1:?usage: ehtest.sh abs-binary-path [port]}"; PORT="${2:-8951}"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+# 产物路径的**唯一来源**（ci/env.sh）——本脚本原先自己拼 $HOME/medme-shared-target/...
+. "$ROOT/ci/env.sh"
+BIN="${1:-$EHR_REL_BIN}"; PORT="${2:-8951}"   # 缺省取唯一来源（ci/env.sh）
 BASE="http://127.0.0.1:${PORT}"; API="$BASE/api/v1"
 H=$(mktemp -d /tmp/ehrt.XXXXXX) || { echo FATAL-TMPDIR; exit 3; }
 WORK=$(mktemp -d /tmp/ehrw.XXXXXX) || { echo FATAL-TMPDIR; exit 3; }

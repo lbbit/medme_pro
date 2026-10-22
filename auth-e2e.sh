@@ -3,9 +3,14 @@
 # 判据（PLAN T4）：无 token 401 / 错 token 401 / ro token 读全绿 / ro token 写 403 / rw token 写全绿。
 # 依赖：cargo（构建）+ curl + python3；不依赖 docker。
 set -uo pipefail
-cd "$(dirname "$0")/ehr-api"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT/ehr-api"
 
 export PATH="$HOME/.cargo/bin:$PATH"
+# 产物路径的**唯一来源**（ci/env.sh）——本脚本原先用相对路径 ./target/debug/ehr-api，
+# 而 cargo build 写进 $CARGO_TARGET_DIR ⇒ 两者不同时它启动的是**另一份（可能很旧的）产物**，
+# 而门禁照样是绿的（D-035 新坑③「先问它跑的是哪一份产物」）。
+. "$ROOT/ci/env.sh"
 PORT="${PORT:-18655}"
 BASE="http://127.0.0.1:${PORT}"
 HOME_DIR="$(mktemp -d /tmp/ehr-auth-e2e-XXXXXX)"
@@ -23,10 +28,12 @@ trap cleanup EXIT
 
 echo "== 1) 构建 =="
 cargo build --quiet || { echo "FAIL cargo build"; exit 1; }
+[ -x "$EHR_DBG_BIN" ] || { echo "FAIL no binary at $EHR_DBG_BIN"; exit 1; }
+echo "[证据] 门禁使用的产物 = $EHR_DBG_BIN"
 
 echo "== 2) 启动（auth 开启：rw token + ro token） =="
 EHR_HOME="$HOME_DIR" EHR_API_TOKENS="rwsecret:rw,rosecret:ro" \
-  ./target/debug/ehr-api --addr="127.0.0.1:${PORT}" >"$LOG" 2>&1 &
+  "$EHR_DBG_BIN" --addr="127.0.0.1:${PORT}" >"$LOG" 2>&1 &
 PID=$!
 
 for i in $(seq 1 50); do
@@ -92,7 +99,7 @@ PY
 
 echo "== 10) open 模式（不配置 token）⇒ 放行且证据行标 auth=open =="
 PORT2=$((PORT+1)); HOME2="$(mktemp -d /tmp/ehr-auth-open-XXXXXX)"
-EHR_HOME="$HOME2" ./target/debug/ehr-api --addr="127.0.0.1:${PORT2}" >"$HOME_DIR/open.log" 2>&1 &
+EHR_HOME="$HOME2" "$EHR_DBG_BIN" --addr="127.0.0.1:${PORT2}" >"$HOME_DIR/open.log" 2>&1 &
 PID2=$!
 for i in $(seq 1 50); do curl -sS -o /dev/null "http://127.0.0.1:${PORT2}/api/v1/healthz" 2>/dev/null && break; sleep 0.2; done
 c=$(code "http://127.0.0.1:${PORT2}/api/v1/persons")

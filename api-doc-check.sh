@@ -8,15 +8,16 @@
 #
 # 用法: ./api-doc-check.sh   （不需要真服务；走 dry-run 打印模式）
 set -u
-cd "$(dirname "$0")"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
 export PATH="$HOME/.cargo/bin:$PATH"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/home/lbb/medme-shared-target}"
+. "$ROOT/ci/env.sh"
 fail=0
 ok(){ echo "PASS $1"; }
 bad(){ echo "FAIL $1"; fail=$((fail+1)); }
 
 # 优先用已构建二进制；没有就现场构建（零新依赖，只用本仓库代码）
-BIN="$CARGO_TARGET_DIR/debug/ehr-api"
+BIN="$EHR_DBG_BIN"
 if [ ! -x "$BIN" ]; then
   echo "… building ehr-api (first run)"
   (cd ehr-api && cargo build 2>&1 | tail -5) || { echo "FAIL build"; exit 1; }

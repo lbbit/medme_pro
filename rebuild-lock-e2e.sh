@@ -10,7 +10,10 @@
 #   L6 陈旧锁（pid 已死）不阻塞服务（200），且可被重建命令回收
 #   L7 锁文件不在 vaults/ 下（重建不会删掉自己的锁 ⇒ 不会自锁）
 set -u -o pipefail; umask 077
-BIN="${1:?usage: rebuild-lock-e2e.sh abs-binary-path [port]}"; PORT="${2:-8963}"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+# 产物路径的**唯一来源**（ci/env.sh）——本脚本原先自己拼 $HOME/medme-shared-target/...
+. "$ROOT/ci/env.sh"
+BIN="${1:-$EHR_REL_BIN}"; PORT="${2:-8963}"   # 缺省取唯一来源（ci/env.sh）
 API="http://127.0.0.1:${PORT}/api/v1"
 H=$(mktemp -d /tmp/ehrrl.XXXXXX) || { echo FATAL-TMPDIR; exit 3; }
 fails=0; SRV_PID=""

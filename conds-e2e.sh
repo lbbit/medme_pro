@@ -11,14 +11,15 @@
 #
 # 依赖：cargo（构建）+ curl + python3；不依赖 docker。
 set -uo pipefail
-cd "$(dirname "$0")"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
 
 export PATH="$HOME/.cargo/bin:$PATH"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/home/lbb/medme-shared-target}"
+. "$ROOT/ci/env.sh"
 PORT="${PORT:-18661}"
 BASE="http://127.0.0.1:${PORT}"
 API="$BASE/api/v1"
-BIN="$CARGO_TARGET_DIR/debug/ehr-api"
+BIN="$EHR_DBG_BIN"
 HOME_DIR="$(mktemp -d /tmp/ehr-conds-e2e-XXXXXX)"
 LOG="$HOME_DIR/server.log"
 fails=0

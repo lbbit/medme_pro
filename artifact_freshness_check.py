@@ -29,8 +29,21 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-SHARED = os.environ.get("CARGO_TARGET_DIR", os.path.expanduser("~/medme-shared-target"))
-LOCAL = os.path.join(ROOT, "ehr-api", "target")
+
+# 产物路径的**唯一来源**（ci/env.sh）—— 判据 D/E（ci_portability_check.py）：
+#   「门禁跑哪份产物」这件事**只允许一份实现**。本文件原先自己写死
+#   `os.environ.get("CARGO_TARGET_DIR", "~/medme-shared-target")`
+#   ⇒ 那是**第二份实现**（且默认值指向某台机器上的固定路径）⇒ 必须改成
+#   「没注入就明确失败」，不许悄悄用兜底值。
+#
+# 注入方式：artifact-freshness-check.sh 先 source ci/env.sh，再把
+#   EHR_SHARED_TARGET_DIR / EHR_LOCAL_TARGET_DIR 传进来。
+SHARED = os.environ.get("EHR_SHARED_TARGET_DIR")
+LOCAL = os.environ.get("EHR_LOCAL_TARGET_DIR")
+if not SHARED or not LOCAL:
+    print("FAIL 产物路径未注入（EHR_SHARED_TARGET_DIR / EHR_LOCAL_TARGET_DIR）")
+    print("     ⇒ 产物路径只能来自唯一来源 ci/env.sh；不许本文件自带兜底默认值")
+    sys.exit(1)
 
 # 源码集合：本仓 ehr-api + 上游只读依赖（上游改了对本仓同样生效）
 SRC_DIRS = [os.path.join(ROOT, "ehr-api", "src"), os.path.join(ROOT, "ehr-api", "tests"),

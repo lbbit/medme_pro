@@ -15,8 +15,13 @@
 # 用法: ./artifact-freshness-check.sh
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+# 产物路径的**唯一来源**（ci/env.sh）—— 本门要比「local 产物」与「shared 产物」两份，
+# 两份路径都从这里来 ⇒ 内层实现不许自带默认值（T29 判据 D/E）。
+. "$ROOT/ci/env.sh"
 fails=0
-python3 "$ROOT/artifact_freshness_check.py"; rc=$?
+EHR_SHARED_TARGET_DIR="$CARGO_TARGET_DIR" \
+EHR_LOCAL_TARGET_DIR="$EHR_LOCAL_TARGET_DIR" \
+  python3 "$ROOT/artifact_freshness_check.py"; rc=$?
 [ $rc -eq 0 ] || fails=$((fails+1))
 echo "[证据] artifact-freshness-check.sh fails=$fails"
 [ "$fails" -eq 0 ] || exit 1

@@ -1,0 +1,112 @@
+# medme-ehr · T28 CI：统一门禁入口接入 CI（PLAN 下一步①）
+#
+# 为什么需要这个 workflow（PLAN「当前状态」未销账项①）：
+#   `run-all-gates.sh` 存在（D-042）但**没有 CI 配置** ⇒ 「统一入口」只是**本地约定**。
+#   ⇒ 一次「我跑了全部」在**别的机器上无法复现**，而 PLAN 每轮都把
+#     「门禁全量复跑 fails=0」当成交付证据链的一环 ⇒ 那个支点在 CI 上是**空的**。
+#   ⇒ 本 workflow 让「门禁全绿」变成**每次 push 都自动判定**的事实。
+#
+# 通道与配方（D-004~D-007）：
+#   - 上游源码：先 `ci/fetch-upstream.sh`（直连 codeload，失败退 ghfast.top）；
+#   - crates.io：TUNA sparse index + static 下载（见 ci/env.sh 注释与 Dockerfile）；
+#   - 基础镜像/工具：ubuntu-latest 自带 rustup/cargo/curl/python3。
+#
+# 关键设计（每条都有理由，不是随手写的）：
+#   ① **只跑门禁，不推镜像**：镜像发布是独立 workflow（ci-image.yml，走 tag 触发），
+#      本 workflow 只做「代码质量/契约/文档漂移」的判定 ⇒ 两者职责不混。
+#   ② **`--locked`**：Cargo.lock 已入库 ⇒ 构建可复现；不许 CI 悄悄改依赖版本。
+#   ③ **产物路径唯一来源**：CI 用 `CARGO_TARGET_DIR` 指向 runner 本地目录，
+#      门禁脚本内部一律经 `ci/env.sh` 取路径 ⇒ 「跑的是哪一份产物」是机器判据
+#      （D-035 新坑③），不是靠约定。
+#   ④ **容器那道门仍 SKIP**：`container-smoke.sh` 需要已构建的镜像
+#      （`deploy-ehr-api-1`）⇒ CI 里没有 ⇒ 照旧进 SKIP 清单并写明原因
+#      （D-042 决策②「允许跳过，但必须写明原因」）。
+#   ⑤ **上游锚点与本地一致**：一律读 `upstream.pin`（同一事实一份实现）。
+name: gates
+
+on:
+  push:
+    branches: [ 'main' ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Rust 工具链
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: 拉取上游 medme 源码（固定 commit，见 upstream.pin）
+        run: ./ci/fetch-upstream.sh
+
+      - name: 依赖通道配置（TUNA sparse + static，见 D-007）
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cargo"
+          cat > "$HOME/.cargo/config.toml" <<'EOF'
+          [source.crates-io]
+          replace-with = 'tuna'
+
+          [source.tuna]
+          registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
+
+          [registries.tuna-static]
+          registry = "sparse+https://static.crates.io"
+          EOF
+          echo "[证据] cargo 通道 = TUNA sparse"
+
+      - name: 构建（debug + release，--locked 固定版本）
+        run: |
+          set -euo pipefail
+          cd ehr-api
+          cargo build --locked
+          cargo build --release --locked
+          echo "[证据] 构建完成"
+
+      - name: cargo test（单测 + 契约门）
+        run: |
+          set -euo pipefail
+          cd ehr-api
+          cargo test --all-targets --locked
+
+      - name: 同步产物（local target ⇄ shared target，两份必须逐字一致）
+        run: |
+          set -euo pipefail
+          # artifact-freshness 门会核对「两份产物 sha256 逐字相等 + 不比源码旧」。
+          # 它比的是 `ehr-api/target/<profile>/ehr-api`（cargo 默认输出）
+          # 与 `$CARGO_TARGET_DIR/<profile>/ehr-api`（门禁实际跑的那份，由 ci/env.sh 决定）。
+          # ⚠️ 因此**构建阶段不能预设 CARGO_TARGET_DIR**（那会让 cargo 不写 ehr-api/target，
+          #    local 侧就缺产物 ⇒ 新鲜度门会以「产物不存在」红）⇒ 这里显式把两份都摆好。
+          # ⚠️ T29：这里的默认根目录**必须来自唯一来源 ci/env.sh**，不许在本文件里
+          #    另写一份 `medme-shared-target` ⇒ 否则「门禁跑哪份产物」又是两份实现
+          #    （ci-portability-check.sh 会机器核对这件事）。
+          . ./ci/env.sh
+          SHARED="$CARGO_TARGET_DIR"
+          LOCAL_TARGET="$EHR_LOCAL_TARGET_DIR"
+          mkdir -p "$SHARED/debug" "$SHARED/release"
+          cp -f "$LOCAL_TARGET/debug/ehr-api"   "$SHARED/debug/ehr-api"
+          cp -f "$LOCAL_TARGET/release/ehr-api" "$SHARED/release/ehr-api"
+          echo "[证据] 产物已同步到 $SHARED"
+          sha256sum "$LOCAL_TARGET/debug/ehr-api"   "$SHARED/debug/ehr-api"
+          sha256sum "$LOCAL_TARGET/release/ehr-api" "$SHARED/release/ehr-api"
+
+      - name: 统一门禁入口（run-all-gates.sh）
+        # 产物路径由 ci/env.sh 统一决定（默认 $HOME/medme-shared-target）⇒ 单一来源
+        run: ./run-all-gates.sh
+
+      - name: 门禁失败时打印每道门的原始输出
+        if: failure()
+        run: |
+          set -euo pipefail
+          echo "::group::门禁产物"
+          ls -la "$CARGO_TARGET_DIR"/*/ehr-api || true
+          echo "::endgroup::"
