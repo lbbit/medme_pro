@@ -61,6 +61,25 @@ jobs:
           node --version
           echo "[证据] node 已安装：$(node --version)"
 
+      - name: 装 Playwright + Chromium（T41 浏览器级冒烟门需要）
+        # 为什么必须装（PLAN T30 遗留⑨ / D-058 未销账① 的前置）：
+        #   `web-e2e.sh` 只验 JS **语法** ⇒ DOM 渲染 / 事件绑定 / 点击后的真实数据流
+        #   **从来没有任何门** ⇒ 页面坏成什么样都是「门禁全绿」。
+        #   ⇒ 新增 `web-browser-e2e.sh` 用真 Chromium 点真页面 ⇒ 必须有浏览器二进制。
+        # 通道：pypi 走 TUNA（先于官方 pypi），chromium 下载走 playwright 官方 CDN
+        #   （无国内镜像 ⇒ 失败时门会红，不静默跳过 —— D-042 纪律）。
+        run: |
+          set -euo pipefail
+          python3 -m venv "$HOME/.cache/medme-ehr-browser-venv" || \
+            python3 -m venv --without-pip "$HOME/.cache/medme-ehr-browser-venv"
+          "$HOME/.cache/medme-ehr-browser-venv/bin/pip" install -q \
+            -i https://pypi.tuna.tsinghua.edu.cn/simple \
+            --trusted-host pypi.tuna.tsinghua.edu.cn playwright \
+            || "$HOME/.cache/medme-ehr-browser-venv/bin/pip" install -q playwright
+          "$HOME/.cache/medme-ehr-browser-venv/bin/python" -m playwright install chromium
+          echo "EHR_BROWSER_PYTHON=$HOME/.cache/medme-ehr-browser-venv/bin/python" >> "$GITHUB_ENV"
+          echo "[证据] playwright + chromium 已装"
+
       - name: 拉取上游 medme 源码（固定 commit，见 upstream.pin）
         run: ./ci/fetch-upstream.sh
 

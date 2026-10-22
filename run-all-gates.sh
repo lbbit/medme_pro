@@ -55,6 +55,7 @@ RUN_LIST=(
   rebuild-e2e.sh                # 目标验收④ 派生索引可重建
   rebuild-lock-e2e.sh           # D-024 重建期互斥
   web-e2e.sh                    # D-016 Web 管理端
+  web-browser-e2e.sh            # T41 Web 管理端「浏览器级冒烟」（真 Chromium：DOM 渲染/事件绑定）
   container-smoke.sh            # D-050 容器化 e2e（本轮起进 RUN：镜像已重建为当前 HEAD）
 )
 

@@ -68,6 +68,8 @@ NEEDS_ENV = [
     "registry-concurrency-e2e.sh",
     # T40 新增：写侧多轮门也起真进程（要产物路径）⇒ 同样必须经唯一来源
     "write-multiround-e2e.sh",
+    # T41 新增：浏览器级冒烟门也起真进程（要产物路径）⇒ 同样必须经唯一来源
+    "web-browser-e2e.sh",
 ]
 
 # 产物路径的「自己拼」形态：含 debug/ehr-api 或 release/ehr-api 的**路径 token**
