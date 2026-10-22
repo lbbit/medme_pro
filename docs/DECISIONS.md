@@ -1,5 +1,31 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-052 2026-10-22 · **T35「真·第三方 MCP 客户端互通」——用官方 MCP Python SDK 当客户端，当场抓出 resources/read 的错误信封不合规范（官方 SDK 抛 ValidationError 崩溃 ⇒ 错误码白设计），并把「第三方客户端能吃」变成一道可复跑的门**
+
+**为什么做**：PLAN 从 T34 起连续多轮挂着同一条未销账项：「**真·第三方 MCP 客户端互通仍未验**（含 resources 面的真客户端消费）⇒ 优先级上升」。事实核对：本仓库的 `mcp-e2e.sh` / `mcp-resources-e2e.sh` **全部是自家写 curl 调自家服务** ⇒ 只能证明「本实现自洽」，**证不了「官方 SDK 能不能吃」**。⇒ 一个只被自家 curl 门覆盖的协议面，**可能整族不合规范而门禁全绿**。这正是 D-047（CI 抓出 Web 的 JS SyntaxError，而本地 curl 门全绿）的同族风险，只是这次发生在协议面。
+**关键结构决策①：第三方客户端 = 官方 SDK，不是「另一个 curl」**。选 **官方 MCP Python SDK**（`mcp` 包，版本钉死 `1.30.0`），走 `streamablehttp_client` + `ClientSession` ⇒ 客户端的形状判定**由官方的 pydantic 模型做**（`ReadResourceResult` / `CallToolResult` / `ServerCapabilities` …）⇒ 服务端形状不合规范时**官方模型直接拒收** ⇒ 判别力来自第三方权威，不是来自我们的约定。
+**关键结构决策②（本轮最关键）：本轮真抓到了缺陷——`resources/read` 的失败信封不合 MCP 规范**。T34 落地 resources 面时，失败沿用了 tools/call 的形状（`result.isError=true` + `result._code`）。实测（官方 SDK 1.30.0 消费本服务）：`read_resource("ehr://definitely-not-a-resource")` ⇒ **抛 `ValidationError`（不是 `McpError`）**——因为 SDK 把响应当 **`ReadResourceResult`** 校验，而该形状缺 `contents` ⇒ **校验失败**。⇒ 后果不是「不好看」而是**功能性的**：宿主 agent 拿到的是「客户端崩溃」，`-32005/-32001/-32602` 三个错误码**白设计了**（agent 无法据此改 URI / 换人 / 改参数）。⇒ 修法**不在客户端，在服务端信封**：MCP 规范里 `resources/read` 的失败是**协议级错误** ⇒ 改回 JSON-RPC `{"error":{"code","message"}}`（**不带** `isError`）。
+**关键结构决策③：两个面的错误信封**故意不同**，且必须记住「不同」的理由**。`tools/call` 的失败是**工具执行失败**（规范用 `result.isError=true`）；`resources/read` 的失败是**协议级错误**（规范用 `error` 对象）⇒ 两者不可统一。⇒ 已在 `tool-contracts.md` 写明这条差异**及其规范依据**（不是「我们喜欢不同」）。
+**关键结构决策④：错误码从 `_code`（非规范字段）搬到 `error.code`（规范字段）后，错误码**才第一次真的对第三方可见**。⇒ 协议面错误码的验收标准也随之升级：**能在官方 SDK 里被断言**才算数（`exc.error.code == -32005`）。
+**关键结构决策⑤：新门 `mcp-interop-e2e.sh` + `tools/mcp_interop_probe.py`（真进程、真实数据、零 mock）**，判据六条：I1 握手可被官方模型解析（含「`prompts` **不**宣告」——**显式断言 `prompts is None`**，把 D-051 决策④的「不提供 prompts」钉成机器判据而非注释）· I2 工具数 == **干跑清单**派生（不手抄）· I3 `tools/call` 真跑通（探针**自己造人**⇒ 不依赖已有数据，空库时不恒绿）· I4 资源数/模板数 == 干跑清单派生 · I5 **跨面不变量在第三方客户端上复现**（`read_resource` 的 text 与 `call_tool` 的 `structuredContent` **逐字相等**）· I6 **错误语义可判读**（必须是 `McpError` + 正确 `code`；**任何其它异常 = 客户端崩溃 ⇒ 红**）。
+**关键结构决策⑥：官方 SDK 是**门禁侧**依赖，不是**产品**依赖**（D-016 同形：本项目「构建期零外网 / 依赖面最小」的不变量不能破）⇒ 它不进 `Cargo.toml`/`Cargo.lock`/产品镜像；而是按需装到**门禁专用 venv**（`$HOME/.cache/medme-ehr-mcp-venv`，不进仓库）⇒ 通道按 D-004~D-007 配方：**TUNA pypi 优先，失败退官方 pypi**；版本钉死 ⇒ 门禁行为可复现。⇒ **新门仍进 RUN 清单**（不是 SKIP）——它的依赖是**可离线复现的**（pip 装包不需要外部服务态）⇒ 按 D-048「用真服务验证的性质 vs 可离线复现的性质必须分层」，**属于可离线复现 ⇒ 该进例行**。
+**关键结构决策⑦：既有门必须同步，且「同步」本身要机器守住**。T35 改了协议形状 ⇒ `mcp-resources-e2e.sh` 的 R4 判据（读 `result._code`）当场红（fails=3）⇒ 改为读 `error.code`，**并新增一条形状纪律**：`resources/read` 的失败响应**不得**带 `isError` 残留（防将来又改回错误形状）⇒ 另在 Rust 侧补 `tests/mcp.rs::mcp_resources_read_failures_use_jsonrpc_error_envelope`（三条错误码 + 「不得带 isError」+ **对照断言**「tools/call 的失败**仍**是 isError 形状」）⇒ **两个面的信封差异被双向钉死**。
+**证据链（缺一即算交付）**：
+①**干跑在前**：动手前先用一次性探针实测「官方 SDK 能不能吃」——`initialize` OK、`tools: 13`、`resources: 3`、`templates: 11`、`call_tool` 与 `read_resource` 均成功 ⇒ 通道（venv + TUNA pypi）在干净环境**可复现**（`mcp==1.30.0` 安装 rc=0）。
+②**真缺陷（非推演）**：注入前实测 `read_resource("ehr://nope")` ⇒ 抛 **`ValidationError`**（`1 validation error for ReadResourceResult / contents Field required`）⇒ 证据里**原样记录了异常文本**。
+③**修复后新门全绿**：`./mcp-interop-e2e.sh` ⇒ **16 条判据全 PASS、fails=0**；关键证据：`I1.initialize.prompts_not_declared = None`（显式不提供 prompts 被钉住）、`I2.tools_count_matches_impl = 13`、`I4.resources=3 / templates=11`、`I5.read_resource_equals_call_tool`（跨面不变量在第三方客户端上复现）、`I6.unknown_uri.code = -32005` / `I6.unknown_person.code = -32001`（**现在是 `McpError` 里的规范 `error.code`**，不再是崩溃）。
+④**门是「真门」的负向证据（实撞 1 次，每次复原）**：把 `read_resource` 的失败改回 `tool_err(...)`（旧形状）⇒ 重编译 ⇒ **红**：`FAIL I6.unknown_uri.raises_mcperror: got='ValidationError' want='McpError'` + `FAIL I6.unknown_person...` ⇒ **fails=1** ⇒ 复原 ⇒ **fails=0** ⇒ **新判据精确指认了那一条真缺陷**（其余 14 条仍 PASS ⇒ 不是「整门崩了」）。
+⑤**Rust 侧零破坏**：`cargo test --all-targets --locked` ⇒ **84 门全绿**（16 个 test target；mcp.rs 由 15 门增至 16 门）；`Cargo.toml`/`Cargo.lock` **未改动** ⇒ **零新依赖**（官方 SDK 在门禁侧，产品面零影响）。
+⑥**既有门同步后全绿**：`./mcp-resources-e2e.sh` ⇒ **fails=0**（R4 三码归位 + 新增形状纪律通过）。
+⑦**统一入口全量复跑：22 门全绿，总 fails=0**（`run-all-gates.sh` ⇒ A1 PASS + 22 个 `[PASS] … fails=0`；末行「门禁数=22（本次执行 22）总 fails=0」）⇒ 覆盖面净增一道真跑的门（21 → 22）。
+⑧**可移植性门覆盖到新载体**：`ci_portability_check.py` 的 `NEEDS_ENV` 增 `mcp-interop-e2e.sh`（它起真进程 ⇒ 必须经唯一来源取产物路径）⇒ 受检集合 **33 → 36 个**（新增 `mcp-interop-e2e.sh` + `tools/mcp_interop_probe.py` + 此前未纳入的 `mcp-resources-e2e.sh`）⇒ **fails=0**。
+⑨**文档面同步**：`tool-contracts.md` 的 resources 面「失败形状」段落改写为**错误信封 + 规范依据 + 实测后果（官方 SDK 会崩）**，并写明由两道门守住。
+⑩**产物新鲜度**：改了 Rust 源码 ⇒ 重编译 debug+release（**local target 与 shared target 两份**，D-029 纪律）⇒ 同步（`cp .new && mv` 换 inode，绕开 `Text file busy`）⇒ `artifact-freshness-check.sh` **fails=0**（两份 sha256 逐字一致）。
+⑪**后台卡死检查（D-010）**：**无 cargo/rustc 残留**；临时 ehr-api 由门禁脚本 `trap` 自清；常驻只剩 docker 容器 ⇒ **非卡死**。
+**新坑一则（D4 同族）**：
+①**「自家 curl 门全绿」不等于「协议面合规」**。本轮之前 resources 面被两道自家 curl 门（`mcp-e2e`/`mcp-resources-e2e`）**完整覆盖**（含错误码逐条断言）⇒ 门全绿 ⇒ 但**官方 SDK 一读就崩**。⇒ 根因不是「门写错了」，而是**门的判据只用了自家约定的形状**（`result._code`）⇒ 它**必然**与自家实现一致 ⇒ **对「形状是否合规」零判别力**。⇒ 纪律升级（已写入代码与文档）：**协议面的验收标准必须由第三方权威模型给出**（官方 SDK 的 pydantic 模型）⇒ 「自家实现 + 自家断言」只能证明自洽，不能证明合规。⇒ 凡「只被自家 curl 覆盖的协议面」⇒ 一律视为**未验收**。
+**未销账/下一步**：①**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；②**MCP 侧仍无 prompts**（本轮**显式钉住「不提供」**——`prompts` 能力不宣告，已成机器判据）；③**真·第三方客户端互通本轮只覆盖 Python SDK**（官方 SDK 另有 TypeScript/Java 实现 ⇒ 未验；且**只读面**已覆盖，**写侧**（`create_person`/`upload_document`）本轮仅各调 1 次，未做多轮/并发/大载荷）；④公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑤ghcr 包可见性仍 private（OCR 镜像未推 GHCR、未纳入 CI）；⑥`.dcm`/DICOM worker 未做；⑦上游分类缺口仍在；⑧`docs/API.md` 是**生成物**（本轮**未改 REST 接口** ⇒ 无需重生成）；⑨人员域三端点仍 501 且刻意不进 OpenAPI；⑩**T35 新门尚未在真 GitHub runner 上验过**（本轮含 Rust 源码改动 + 新门 ⇒ 需一次 push 触发真 runner；**注意 CI 上官方 SDK 的安装需要 pip 通道**——TUNA pypi 已在配方内，但**尚未在真 runner 上实测**）；⑪**产物新鲜度门在本机红过一次**（本机此前一直在 shared target 构建 ⇒ local target 产物旧 ⇒ 门红）⇒ 按 CI 配方在 local target 重建并同步后转绿 ⇒ **这条红是门自己的正确行为**（D-011 家族的反例：门红了**不是**环境问题）。
+
 ## D-051 2026-10-22 · **T34「MCP resources 面落地」——第二个协议面补齐；并用「跨面不变量」把它钉在 tools 面旁边（`resources/read` == `tools/call`，逐字相等）**
 
 **为什么做**：PLAN 从 T25 起连续多轮挂着同一条未销账项：「**MCP 侧仍无 resources/prompts**」。事实核对：此前 `initialize` 只宣告 `capabilities.tools`，`mcp.rs` 里**没有任何** `resources/*` 方法 ⇒ 该面**根本不存在**（不是「文档漏写」，是协议面缺失）⇒ 只吃 MCP 的宿主只能「调动作」，无法「按 URI 定位只读上下文」。

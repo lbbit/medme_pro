@@ -680,3 +680,69 @@ async fn mcp_capabilities_match_rest_capabilities_endpoint() {
         assert!(covered, "rejected ext {e} must belong to a disabled route with a reason");
     }
 }
+
+/// T35：resources 面的**协议形状**守卫（防止将来又改回不合规范的错误形状）。
+///
+/// 为什么需要它（实测抓到的真缺陷）：
+///   `resources/read` 的失败此前回成 `result.isError=true` + `result._code`
+///   （tools/call 的形状）⇒ 官方 MCP Python SDK 把它当 **ReadResourceResult** 校验
+///   ⇒ 缺 `contents` ⇒ 抛 **ValidationError** ⇒ 宿主 agent 拿到的是「客户端崩溃」，
+///   错误码（-32005/-32001/-32602）**白设计了**。
+///   ⇒ MCP 规范：resources/read 的失败 = 协议级 error ⇒ `{"error":{code,message}}`。
+///   ⇒ 本测试把这条钉死：失败**必须**走 error 信封，且**不得**带 isError 残留。
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_resources_read_failures_use_jsonrpc_error_envelope() {
+    let app = fixture("res-err");
+
+    for (uri, want_code, tag) in [
+        ("ehr://nope", -32005i64, "unknown uri"),
+        (
+            "ehr://persons/00000000-0000-0000-0000-000000000000/labs",
+            -32001,
+            "unknown person",
+        ),
+    ] {
+        let r = rpc(
+            &app,
+            json!({"jsonrpc":"2.0","id":9,"method":"resources/read","params":{"uri":uri}}),
+        )
+        .await;
+        assert!(
+            r.get("error").is_some(),
+            "resources/read failure ({tag}) must be a JSON-RPC error envelope, got: {r}"
+        );
+        assert_eq!(r["error"]["code"], want_code, "resources/read {tag} code: {r}");
+        assert!(
+            r["error"]["message"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+            "resources/read {tag} must carry a human-readable message: {r}"
+        );
+        assert!(
+            r.get("result").is_none(),
+            "resources/read failure ({tag}) must NOT carry a result envelope: {r}"
+        );
+    }
+
+    // 缺 uri 参数 ⇒ -32602（改参数，不是重试）
+    let r = rpc(&app, json!({"jsonrpc":"2.0","id":9,"method":"resources/read","params":{}})).await;
+    assert_eq!(r["error"]["code"], -32602, "missing uri must be INVALID_PARAMS: {r}");
+
+    // 形状纪律：失败响应里**不得**残留 isError（那是 tools/call 的形状，会让官方 SDK 崩）
+    let r = rpc(
+        &app,
+        json!({"jsonrpc":"2.0","id":9,"method":"resources/read","params":{"uri":"ehr://nope"}}),
+    )
+    .await;
+    assert!(
+        r.get("result").and_then(|x| x.get("isError")).is_none(),
+        "resources/read failure must not expose isError: {r}"
+    );
+
+    // 对照：**tools/call** 的失败仍是 isError 形状（两个面的错误信封**不同**，各有各的规范依据）
+    let t = rpc(
+        &app,
+        json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"get_labs","arguments":{"person_id":"00000000-0000-0000-0000-000000000000"}}}),
+    )
+    .await;
+    assert_eq!(t["result"]["isError"], true, "tools/call failure stays isError: {t}");
+    assert_eq!(t["result"]["_code"], -32001, "tools/call keeps _code convention: {t}");
+}

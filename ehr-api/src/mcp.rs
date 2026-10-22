@@ -117,6 +117,11 @@ pub fn handle_message_with_scope(
         // 不允许出现「MCP resource 里有的、REST 里查不到」的分叉（D2 跨面不变量）。
         "resources/list" => ok_obj(id.clone(), json!({ "resources": resource_schemas() })),
         "resources/templates/list" => ok_obj(id.clone(), json!({ "resourceTemplates": resource_templates() })),
+        // ⚠️ T35：**参数错误走 JSON-RPC error 信封**（不是 tools/call 的 isError 形状）。
+        //   实测（官方 MCP Python SDK 1.30.0）：若回 `result.isError=true`，
+        //   SDK 把它当 **ReadResourceResult** 校验 ⇒ 缺 `contents` ⇒ 抛 **ValidationError**
+        //   ⇒ 宿主 agent 拿到的是「客户端崩溃」而不是「可判读的错误码」⇒ 错误码白设计了。
+        //   MCP 规范：resources/read 的失败 = 协议级 error ⇒ `{"error":{code,message}}`。
         "resources/read" => {
             let uri = params
                 .get("uri")
@@ -132,10 +137,10 @@ pub fn handle_message_with_scope(
             let uri = match uri {
                 Ok(u) => u,
                 Err((code, why)) => {
-                    return Some(tool_err(
+                    return Some(err_obj(
                         id.clone(),
                         code,
-                        format!("invalid arguments for resources/read: {why}"),
+                        &format!("invalid arguments for resources/read: {why}"),
                     ))
                 }
             };
@@ -702,11 +707,18 @@ fn resource_contents(uri: &str, data: &Value) -> Value {
 ///   ① URI 形态不合法（不是 ehr://…）⇒ -32005（未知资源）；
 ///   ② person_id 不存在 ⇒ -32001（查无此人，与工具面同码）——**与「URI 写错了」区分开**；
 ///   ③ 其余错误（内部）⇒ -32002。
+///
+/// ⚠️ T35：**失败走 JSON-RPC error 信封**（`{"error":{code,message}}`），
+///   **不是** tools/call 的 `result.isError=true` 形状。
+///   实测（官方 MCP Python SDK 1.30.0 消费本服务）：`isError` 形状会让 SDK 把它当
+///   `ReadResourceResult` 校验 ⇒ 缺 `contents` ⇒ 抛 **ValidationError**（客户端崩溃），
+///   宿主 agent 拿不到错误码 ⇒ 错误码设计白费。
+///   ⇒ 错误码在 `error.code`（可判读），message 里另附人读说明。
 fn read_resource(st: &Arc<AppState>, id: Value, uri: &str) -> Value {
     let outcome = tokio::task::block_in_place(|| resource_payload(st, uri));
     match outcome {
         Ok(data) => ok_obj(id, resource_contents(uri, &data)),
-        Err((code, msg)) => tool_err(id, code, msg),
+        Err((code, msg)) => err_obj(id, code, &msg),
     }
 }
 

@@ -60,6 +60,8 @@ NEEDS_ENV = [
     "extraction-e2e.sh",
     # T29 新增：新鲜度门要拿**两份**产物路径（local + shared）⇒ 也必须经唯一来源
     "artifact-freshness-check.sh",
+    # T35 新增：第三方 MCP 互通门也起真进程（要产物路径）⇒ 同样必须经唯一来源
+    "mcp-interop-e2e.sh",
 ]
 
 # 产物路径的「自己拼」形态：含 debug/ehr-api 或 release/ehr-api 的**路径 token**

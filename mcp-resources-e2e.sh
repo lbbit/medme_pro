@@ -144,12 +144,20 @@ gate "doc.resources_uris_match_impl" "$DOC_URIS_SORTED" "$IMPL_URIS"
 fi
 
 echo "== R4 错误语义分得开 =="
-V=$(rpc '{"jsonrpc":"2.0","id":13,"method":"resources/read","params":{"uri":"ehr://nope"}}' | jq_ 'print(d["result"]["_code"])')
+# ⚠️ T35：resources/read 的失败**走 JSON-RPC error 信封**（`error.code`），
+#   **不是** tools/call 的 `result.isError` + `result._code` 形状。
+#   理由（实测）：官方 MCP SDK 把 isError 形状当 ReadResourceResult 校验 ⇒ 缺 contents
+#   ⇒ 抛 ValidationError（客户端崩溃）⇒ 错误码白设计。R4 判据随之改为读 `error.code`。
+#   同时断言**没有** isError 字段残留（防止将来又改回错误形状）。
+V=$(rpc '{"jsonrpc":"2.0","id":13,"method":"resources/read","params":{"uri":"ehr://nope"}}' | jq_ 'print(d["error"]["code"])')
 gate "unknown_uri=-32005" "$V" "-32005"
-V=$(rpc '{"jsonrpc":"2.0","id":14,"method":"resources/read","params":{"uri":"ehr://persons/00000000-0000-0000-0000-000000000000/labs"}}' | jq_ 'print(d["result"]["_code"])')
+V=$(rpc '{"jsonrpc":"2.0","id":14,"method":"resources/read","params":{"uri":"ehr://persons/00000000-0000-0000-0000-000000000000/labs"}}' | jq_ 'print(d["error"]["code"])')
 gate "unknown_person=-32001" "$V" "-32001"
-V=$(rpc '{"jsonrpc":"2.0","id":15,"method":"resources/read","params":{}}' | jq_ 'print(d["result"]["_code"])')
+V=$(rpc '{"jsonrpc":"2.0","id":15,"method":"resources/read","params":{}}' | jq_ 'print(d["error"]["code"])')
 gate "missing_uri=-32602" "$V" "-32602"
+# 形状纪律：resources/read 的失败**不得**再带 isError（那是 tools/call 的形状，会让官方 SDK 崩）
+V=$(rpc '{"jsonrpc":"2.0","id":13,"method":"resources/read","params":{"uri":"ehr://nope"}}' | jq_ 'print("isError" in d.get("result",{}))')
+gate "resources_read_error_has_no_isError" "$V" "False"
 
 echo "== R3 只读：ro token 也能读资源 =="
 PORT2=$((PORT+1)); HOME2="$(mktemp -d)"; mkdir -p "$HOME2/vaults"
