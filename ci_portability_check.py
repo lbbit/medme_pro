@@ -62,6 +62,8 @@ NEEDS_ENV = [
     "artifact-freshness-check.sh",
     # T35 新增：第三方 MCP 互通门也起真进程（要产物路径）⇒ 同样必须经唯一来源
     "mcp-interop-e2e.sh",
+    # T36 新增：TS 面第三方互通门也起真进程（要产物路径）⇒ 同样必须经唯一来源
+    "mcp-interop-ts-e2e.sh",
 ]
 
 # 产物路径的「自己拼」形态：含 debug/ehr-api 或 release/ehr-api 的**路径 token**

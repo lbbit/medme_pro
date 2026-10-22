@@ -54,6 +54,23 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
+## 当前状态（2026-10-22 · **T36「真·第三方 MCP 客户端互通（TypeScript 官方 SDK 面）」——把「官方 SDK 能吃」从一个实现的结论升级为**两个官方实现的结论**（Python pydantic + TS zod/v4 两个独立解析器），并给 TS 面补一道同形门；实测**两侧判据都抓得住**同一个真缺陷（TS 侧报 `$ZodError`、Python 侧报 `ValidationError`）· D-053 落地**）
+
+- ✅ **T36-① 缺口定位（D-052 未销账项③的原话）**：「**真·第三方 MCP 互通本轮只覆盖 Python SDK**（官方另有 TypeScript/Java 实现 ⇒ 未验）」。事实核对：官方 SDK 有 **两个独立实现**（Python `mcp` / TS `@modelcontextprotocol/sdk`）⇒ **解析器不同**（Python=pydantic v2，TS=zod/v4）⇒ 「服务端形状不合规范」这件事，**一个实现拒收、另一个实现可能放行**是可能的 ⇒ 只验一个实现 ⇒ **不能声称「协议面合规」**，只能说「Python 面合规」。
+- ✅ **T36-② 结构决策：TS 面判据与 Python 面**同形**（T1~T6 ↔ I1~I6），便于双面对照**。六条：T1 握手可被官方 zod 模型解析（**显式断言 `prompts` 不被宣告**）· T2 工具数 == 干跑清单派生 · T3 `tools/call` 真跑通（探针**自己造人**⇒ 空库不恒绿）· T4 资源/模板数 == 干跑清单派生 · T5 **跨面不变量在 TS 客户端上复现**（`readResource` 的 text 与 `callTool` 的 `structuredContent` 逐字相等）· T6 **错误语义可判读**（必须 `McpError` + 正确 `code`；**任何其它异常 = 客户端崩溃 ⇒ 红**）。
+- ✅ **T36-③ 官方 TS SDK 仍是**门禁侧**依赖，不是产品依赖**（D-016/D-052 同形）⇒ 装到门禁专用目录 `$HOME/.cache/medme-ehr-mcp-ts` ⇒ **不进仓库、不进 package.json、不进产品镜像** ⇒ 版本钉死（`@modelcontextprotocol/sdk@1.32.1`）⇒ 门禁行为可复现 ⇒ 通道 **npmmirror 优先、失败退官方 registry.npmjs.org**。
+- ✅ **T36-④ 探针**放在门禁依赖目录里跑**（ESM 依赖解析需要 `node_modules` 在其上级目录）⇒ 仓库里只留一份 `.mjs` 源（`tools/mcp_interop_ts_probe.mjs`）⇒ **仓库不留 `node_modules`**。
+- ✅ **T36-⑤ 一处**同形差异**已记明：TS 侧「不提供 prompts」表现为属性缺省（`undefined`）**，Python 侧是 `None` ⇒ 探针里做归一（`?? null`）⇒ **两边判据同义**，不因运行时差异而假红。
+- ✅ **T36-⑥ 门是「真门」的负向证据（实撞 1 次，已复原）**：把 `resources/read` 的失败改回 T35 之前的旧形状（`result.isError=true` + `_code`）⇒ 重编译 ⇒ **两面同时红**：TS 面 `FAIL T6.unknown_uri.raises_mcperror: got="$ZodError" want="McpError"`（fails=2），Python 面 `FAIL I6.unknown_uri.raises_mcperror: got='ValidationError' want='McpError'`（fails=2）⇒ 复原 ⇒ 两面各 fails=0 ⇒ **两个解析器各自独立地拒绝了这个形状**（判别力来自第三方权威，不是自家约定）。
+- ✅ **T36-⑦ Rust 侧零破坏**：`cargo test --all-targets --locked` ⇒ **84 门全绿**（16 个 test target；mcp.rs 仍 16 门）⇒ **未改任何 Rust 源码**（本轮只动门禁脚本与探针）⇒ `Cargo.toml`/`Cargo.lock` **未改动** ⇒ 零新依赖。
+- ✅ **T36-⑧ 统一入口全量复跑：23 门全绿，总 fails=0**（`run-all-gates.sh` ⇒ A1 PASS + 23 个 `[PASS] … fails=0`；末行「门禁数=23（本次执行 23）总 fails=0」）⇒ 覆盖面净增一道真跑的门（22 → 23）。
+- ✅ **T36-⑨ 可移植性门覆盖到新载体**：`ci_portability_check.py` 的 `NEEDS_ENV` 增 `mcp-interop-ts-e2e.sh` ⇒ 该门也起真进程 ⇒ 必须经唯一来源取产物路径 ⇒ **fails=0**。
+- ✅ **T36-⑩ Python 面的依赖通道也做了加固**（顺手补的**真**风险点）：`python3 -m venv` 在 CI runner 上常因缺 `python3-venv` 失败 ⇒ 门会「装不上依赖 ⇒ 直接红」⇒ 已加**可复现的退化路径**（`--target` 目录 + `PYTHONPATH`）⇒ 依赖面拿不到时**不直接红**，而是走等价可复现路径（D-050 家族）。
+- ✅ **T36-⑪ 产物新鲜度门本轮红过一次（门自己的正确行为）**：改了 `src/mcp.rs`（负向注入）⇒ local target 产物比源码旧 ⇒ 门红（fails=2）⇒ 按 CI 配方在 local target 重建 debug+release 并同步（`cp .new && mv` 换 inode）⇒ 转绿 ⇒ **这次红是门自己的正确行为**（D-011 家族的反例）。
+- ✅ **T36-⑫ 后台卡死检查（D-010）**：**无 cargo/rustc 残留**；临时 ehr-api 由门禁 `trap` 自清；常驻只剩 docker 容器 ⇒ **非卡死**。
+- 🔄 **下一步**：①**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；②**真·第三方客户端互通现覆盖 Python + TypeScript 两个官方实现**（**Java 实现仍未验**；**只读面**已覆盖，**写侧**两轮各调 1 次，未做多轮/并发/大载荷）；③**T35/T36 两道新门尚未在真 GitHub runner 上验过**（含 npm 通道 —— npmmirror 已在配方内但**未在真 runner 上实测**）；④公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑤ghcr 包可见性仍 private（OCR 镜像未推 GHCR、未纳入 CI）；⑥`.dcm`/DICOM worker 未做；⑦上游分类缺口仍在；⑧`docs/API.md` 是**生成物**（本轮**未改 REST 接口** ⇒ 无需重生成）；⑨人员域三端点仍 501 且刻意不进 OpenAPI；⑩MCP 侧**仍无 prompts**（已显式钉住「不提供」——两套官方 SDK 上都是机器判据）。
+- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（编译期内嵌，无构建链）；`docs/API.md` 是**生成物**；文档覆盖 **REST 面** + **MCP 面** + **SKILL.md 面** + **CI 可移植性面** + **Web 页面 JS 读面** + **第三方客户端消费面（两个官方实现）** 六份面全部有门；**「手抄实现细节」残留**已治到十四个面；**「只被自家 curl 覆盖的协议面」已升级为「必须被官方 SDK 消费才算验收」（且从 1 个实现扩到 2 个官方实现）**（D-052 新坑① + D-053 新坑①）。
+
 ## 当前状态（2026-10-22 · **T35「真·第三方 MCP 客户端互通」——用官方 MCP Python SDK 当客户端，当场抓出 resources/read 的失败信封不合规范（官方 SDK 抛 `ValidationError` 崩溃 ⇒ 三个错误码白设计），修后补一道可复跑的第三方互通门 · D-052 落地**）
 - ✅ **T35-① 缺口定位（PLAN 连续多轮列着的同一条未销账项）**：「**真·第三方 MCP 客户端互通仍未验**（含 resources 面的真客户端消费）⇒ 优先级上升」。事实核对：本仓库的 `mcp-e2e.sh` / `mcp-resources-e2e.sh` **全部是自家写 curl 调自家服务** ⇒ 只能证明「本实现自洽」，**证不了「官方 SDK 能不能吃」** ⇒ 一个只被自家 curl 门覆盖的协议面，**可能整族不合规范而门禁全绿**（D-047 同族风险，这次在协议面）。
 - ✅ **T35-② 结构决策：第三方客户端 = 官方 SDK（不是「另一个 curl」）**。选 **官方 MCP Python SDK**（`mcp==1.30.0`，版本钉死）⇒ 走 `streamablehttp_client` + `ClientSession` ⇒ **形状判定由官方 pydantic 模型做** ⇒ 服务端不合规范时官方模型直接拒收 ⇒ 判别力来自第三方权威，不是自家约定。

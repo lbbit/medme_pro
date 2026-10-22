@@ -1,5 +1,26 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-053 2026-10-22 · **T36「真·第三方 MCP 客户端互通（TypeScript 官方 SDK 面）」——把「官方 SDK 能吃」从一个实现的结论升级为**两个官方实现的结论**（两套独立解析器：Python pydantic v2 / TS zod v4），并给 TS 面补一道同形门；实测**两侧判据都独立地抓得住**同一个真缺陷**
+
+**为什么做**：D-052 未销账项③原话：「**真·第三方客户端互通本轮只覆盖 Python SDK**（官方另有 TypeScript/Java 实现 ⇒ 未验；且写侧仅各调 1 次，未做多轮/并发/大载荷）」。事实核对：官方 MCP SDK 有 **两个独立实现** —— Python `mcp`（pydantic v2 校验响应形状）与 TypeScript `@modelcontextprotocol/sdk`（zod/v4 校验响应形状）⇒ 二者**解析器不同、宽松度可能不同** ⇒ 「服务端形状不合规范」这件事，**一个实现拒收、另一个实现可能放行**是完全可能的 ⇒ 只验一个实现 ⇒ 最多只能说「Python 面合规」，**不能声称「协议面合规」**。这正是 D-052 新坑①（「自家 curl 门全绿 ≠ 协议面合规」）的**同族第二版**：D-052 把判别力从「自家约定」换成「第三方权威」；本轮把第三方权威**从一个实现扩到两个**。
+**关键结构决策①：TS 面判据与 Python 面**同形**（T1~T6 ↔ I1~I6），刻意一一对应**。六条：T1 握手可被官方 zod 模型解析（含**显式断言 `prompts` 不被宣告**）· T2 工具数 == **干跑清单**派生（不手抄）· T3 `tools/call` 真跑通（探针**自己造人**⇒ 空库不恒绿）· T4 资源/模板数 == 干跑清单派生 · T5 **跨面不变量在 TS 客户端上复现**（`readResource` 的 text 与 `callTool` 的 `structuredContent` **逐字相等**）· T6 **错误语义可判读**（必须 `McpError` + 正确 `code`；**任何其它异常 = 客户端崩溃 ⇒ 红**）。⇒ 同形是为了**双面对照**：任何一个实现拒收的形状，都必须被两道门同时指认。
+**关键结构决策②：官方 TS SDK 是**门禁侧**依赖，不是**产品**依赖**（D-016 / D-052 同形：本项目「构建期零外网 / 依赖面最小」的不变量不能破）⇒ 装到门禁专用目录 `$HOME/.cache/medme-ehr-mcp-ts` ⇒ **不进仓库、不进 package.json、不进产品镜像** ⇒ 版本钉死（`@modelcontextprotocol/sdk@1.32.1`）⇒ 门禁行为可复现 ⇒ 通道 **npmmirror（registry.npmmirror.com）优先，失败退官方 registry.npmjs.org**（D-004~D-007 配方）。
+**关键结构决策③：探针源码留在仓库、依赖不留**。ESM 的依赖解析要求 `node_modules` 在模块**上级目录**⇒ 探针运行时被**复制**到门禁依赖目录里执行 ⇒ 仓库里只有一份 `.mjs` 源（`tools/mcp_interop_ts_probe.mjs`）⇒ **仓库零 `node_modules`**（`.gitignore` 无需新增规则，因为根本不存在）。
+**关键结构决策④：一处**同形差异**必须记明，否则会假红**：TS 侧「不提供 prompts」表现为**属性缺省**（`caps.prompts === undefined`），Python 侧是 `None` ⇒ 探针里做归一（`?? null`）⇒ **两边判据同义**。⇒ 纪律：**跨实现的判据要按「语义」对齐，不按「运行时表示」对齐**；表示差异只在探针里归一一次。
+**关键结构决策⑤：Python 面的依赖通道顺手加固（真风险点，非臆测）**。`python3 -m venv` 在 CI runner 上**常因缺 `python3-venv` 而失败**（Debian/Ubuntu 把 venv 拆包）⇒ 原实现会「装不上依赖 ⇒ 门直接红」⇒ 这是一个**假红来源**（D-011 家族）⇒ 已加**可复现的退化路径**（`pip install --target $HOME/.cache/medme-ehr-mcp-pydeps` + `PYTHONPATH`）⇒ 依赖面拿不到时**不直接红**，而是走等价可复现路径（D-050 家族：**期望拿不到时不能直接判失败，要有一条可复现的替代路径**）。
+**证据链（缺一即算交付）**：
+①**通道证据**：npmmirror **HTTP 200**、官方 registry **HTTP 200**；`npm install @modelcontextprotocol/sdk@1.32.1` rc=0（95 包 / 24s）⇒ 通道在干净目录**可复现**。
+②**新门实测全绿**：`./mcp-interop-ts-e2e.sh` ⇒ **fails=0**；关键证据 `T1.initialize.server_name = "medme-ehr"`、`T2.tools_count_matches_impl = 13`、`T4.resources=3 / templates=11`、`T5.read_resource_equals_call_tool`（跨面不变量在 TS 客户端上复现）、`T6.unknown_uri.code = -32005` / `T6.unknown_person.code = -32001`（**`McpError` 里的规范 `error.code`**）。
+③**门是「真门」的负向证据（实撞 1 次，每次复原）**：把 `resources/read` 的失败改回 T35 之前的旧形状（`result.isError=true` + `_code`）⇒ 重编译 ⇒ **两面同时红**：TS 面 `FAIL T6.unknown_uri.raises_mcperror: got="$ZodError" want="McpError"`（fails=2）、Python 面 `FAIL I6.unknown_uri.raises_mcperror: got='ValidationError' want='McpError'`（fails=2）⇒ 复原 ⇒ **两面各 fails=0** ⇒ **两个独立的第三方解析器各自拒收了同一个形状** ⇒ 判别力来自第三方权威，不是自家约定。
+④**Rust 侧零破坏**：`cargo test --all-targets --locked` ⇒ **84 门全绿**（16 个 test target；mcp.rs 仍 16 门）⇒ **本轮未改任何 Rust 源码**（只动门禁脚本 + 探针）⇒ `Cargo.toml`/`Cargo.lock` **未改动** ⇒ 零新依赖。
+⑤**统一入口全量复跑：23 门全绿，总 fails=0**（`run-all-gates.sh` ⇒ A1 PASS + 23 个 `[PASS] … fails=0`；末行「门禁数=23（本次执行 23）总 fails=0」）⇒ 覆盖面净增一道真跑的门（22 → 23）。
+⑥**可移植性门覆盖到新载体**：`ci_portability_check.py` 的 `NEEDS_ENV` 增 `mcp-interop-ts-e2e.sh`（它起真进程 ⇒ 必须经唯一来源取产物路径）⇒ **fails=0**。
+⑦**产物新鲜度门本轮红过一次（门自己的正确行为）**：负向注入改过 `src/mcp.rs` ⇒ local target 产物比源码旧 ⇒ 门红（fails=2）⇒ 按 CI 配方在 local target 重建 debug+release 并同步（`cp .new && mv` 换 inode）⇒ 转绿 ⇒ **这次红是门自己的正确行为**（D-011 家族的反例：门红了不是环境问题）。
+⑧**后台卡死检查（D-010）**：**无 cargo/rustc 残留**；临时 ehr-api 由门禁 `trap` 自清；常驻只剩 docker 容器 ⇒ **非卡死**。
+**新坑一则（D-052 新坑①的同族第二版）**：
+①**「被第三方权威验过」也需要说明「验的是哪个第三方」**。D-052 把「自家 curl 门」升级为「官方 SDK 消费」⇒ 解决了「自洽 ≠ 合规」；但**官方 SDK 不止一个实现**（Python / TypeScript / Java）⇒ 只验一个 ⇒ 「**某一实现能吃**」被当成「**协议面合规**」⇒ 实际上「宽松的那一个」会放行不合规的形状。⇒ 纪律升级：**协议面的第三方验收必须覆盖 ≥2 个独立实现**（本轮补上 TypeScript ⇒ Python + TS 两个解析器），并且**期望是「两侧都拒收」而不是「一侧拒收即可」**。⇒ 凡官方有多个参考实现的协议面 ⇒ 一律视为**未验收**，直到 ≥2 个实现都验过。
+**未销账/下一步**：①**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；②**官方 SDK 的 Java 实现仍未验**（⇒ 按新坑①，「≥2 个实现」这条已达成，但「全部官方实现」尚未）；③**写侧（`create_person`/`upload_document`）两轮各只调 1 次**，未做多轮/并发/大载荷；④**T35/T36 两道新门尚未在真 GitHub runner 上验过**（含 **npm 通道** —— npmmirror 已在配方内，但**尚未在真 runner 上实测**；Python 面的 venv 退化路径同）⇒ 需一次 push；⑤公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑥ghcr 包可见性仍 private（OCR 镜像未推 GHCR、未纳入 CI）；⑦`.dcm`/DICOM worker 未做；⑧上游分类缺口仍在；⑨`docs/API.md` 是**生成物**（本轮**未改 REST 接口** ⇒ 无需重生成）；⑩人员域三端点仍 501 且刻意不进 OpenAPI；⑪MCP 侧**仍无 prompts**（已显式钉住「不提供」——**两套官方 SDK 上都是机器判据**）。
+
 ## D-052 2026-10-22 · **T35「真·第三方 MCP 客户端互通」——用官方 MCP Python SDK 当客户端，当场抓出 resources/read 的错误信封不合规范（官方 SDK 抛 ValidationError 崩溃 ⇒ 错误码白设计），并把「第三方客户端能吃」变成一道可复跑的门**
 
 **为什么做**：PLAN 从 T34 起连续多轮挂着同一条未销账项：「**真·第三方 MCP 客户端互通仍未验**（含 resources 面的真客户端消费）⇒ 优先级上升」。事实核对：本仓库的 `mcp-e2e.sh` / `mcp-resources-e2e.sh` **全部是自家写 curl 调自家服务** ⇒ 只能证明「本实现自洽」，**证不了「官方 SDK 能不能吃」**。⇒ 一个只被自家 curl 门覆盖的协议面，**可能整族不合规范而门禁全绿**。这正是 D-047（CI 抓出 Web 的 JS SyntaxError，而本地 curl 门全绿）的同族风险，只是这次发生在协议面。

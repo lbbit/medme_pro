@@ -43,13 +43,30 @@ ensure_sdk() {
     return 0
   fi
   note "安装门禁侧依赖 $MCP_PKG（通道 $PIP_INDEX）"
-  python3 -m venv "$VENV" >/dev/null 2>&1 || { echo "  FAIL 建 venv 失败: $VENV"; return 1; }
-  if ! "$VENV/bin/pip" install -q -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED" "$MCP_PKG"; then
-    note "TUNA 通道失败，退官方 pypi"
-    "$VENV/bin/pip" install -q "$MCP_PKG" || { echo "  FAIL 装 $MCP_PKG 失败"; return 1; }
+  # ⚠️ 建 venv 可能失败：CI runner 的 python3 常缺 python3-venv（Debian 拆包）
+  #   ⇒ 退化到「装到 --target 目录 + PYTHONPATH」，仍不进仓库、不污染系统。
+  #   （D-050 家族：**期望的依赖面拿不到时不能直接红**，要有可复现的退化路径。）
+  if python3 -m venv "$VENV" >/dev/null 2>&1; then
+    if ! "$VENV/bin/pip" install -q -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED" "$MCP_PKG"; then
+      note "TUNA 通道失败，退官方 pypi"
+      "$VENV/bin/pip" install -q "$MCP_PKG" || { echo "  FAIL 装 $MCP_PKG 失败"; return 1; }
+    fi
+    if ! "$PY" -c "import mcp" >/dev/null 2>&1; then
+      echo "  FAIL 装完仍 import 不到 mcp"; return 1
+    fi
+  else
+    note "建 venv 失败（多半缺 python3-venv）⇒ 退化到 --target 目录安装"
+    TGT="$HOME/.cache/medme-ehr-mcp-pydeps"
+    mkdir -p "$TGT" || { echo "  FAIL 建依赖目录失败: $TGT"; return 1; }
+    if ! python3 -m pip install -q --target "$TGT" -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED" "$MCP_PKG"; then
+      note "TUNA 通道失败，退官方 pypi"
+      python3 -m pip install -q --target "$TGT" "$MCP_PKG" || { echo "  FAIL 装 $MCP_PKG 失败"; return 1; }
+    fi
+    PY="python3"
+    export PYTHONPATH="$TGT${PYTHONPATH:+:$PYTHONPATH}"
+    python3 -c "import mcp" || { echo "  FAIL 装完仍 import 不到 mcp"; return 1; }
   fi
-  "$PY" -c "import mcp" || { echo "  FAIL 装完仍 import 不到 mcp"; return 1; }
-  "$PY" -c "import importlib.metadata as m; print('[证据] 门禁侧 SDK 版本 mcp==%s' % m.version('mcp'))"
+  "$PY" -c "import importlib.metadata as m; print('[证据] 门禁侧 SDK 版本 mcp==%s' % m.version('mcp'))" 2>/dev/null || true
 }
 
 [ -x "$BIN" ] || { echo "missing binary: $BIN"; exit 1; }

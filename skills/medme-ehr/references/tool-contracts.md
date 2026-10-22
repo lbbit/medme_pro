@@ -58,9 +58,13 @@ MCP 的**第二个协议面**：tools 是「动作」，resources 是「某个�
   - `tools/call` 的失败是**工具执行失败** ⇒ MCP 规范用 `result.isError=true` + `result._code`；
   - `resources/read` 的失败是**协议级错误** ⇒ 规范用 JSON-RPC `error` 对象。
   ⚠️ 这条不是洁癖：实测（T35）若把 resources/read 的失败回成 `isError` 形状，
-  **官方 MCP SDK 会抛 ValidationError 崩溃**（它把响应当 ReadResourceResult 校验，缺 `contents`），
+  **官方 MCP SDK 会崩**（它把响应当 ReadResourceResult 校验，缺 `contents`），
   宿主 agent 拿不到错误码 ⇒ 错误码白设计。已由 `mcp-interop-e2e.sh`（I6）与
   `ehr-api/tests/mcp.rs::mcp_resources_read_failures_use_jsonrpc_error_envelope` 双门守住。
+  ⚠️ 更进一步（T36）：**两个官方实现各自独立地拒收了它** —— Python SDK 抛 `ValidationError`，
+  TypeScript SDK 抛 `$ZodError` ⇒ 「官方 SDK 能吃」已从**一个实现**的结论升级为
+  **两个独立解析器**的结论（`mcp-interop-e2e.sh` / `mcp-interop-ts-e2e.sh` 双门守住）。
+  ⇒ 纪律：协议面的第三方验收须覆盖 **≥2 个官方实现**。
 
 **URI 清单的真源是实现**：`ehr-api --print-mcp-resources`（干跑，stdout 为 JSON）输出
 `{count, templates, uris[], template_uris[]}`。下表由 `mcp-resources-e2e.sh` 的 R7 判据
