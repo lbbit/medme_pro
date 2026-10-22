@@ -1,5 +1,27 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-049 2026-10-22 · **T32「家庭自测趋势」专用视图——把「家庭自测值 ≠ 医院指标」这条上游结构约束，在 Web 端显式做成一屏；并给它配一道「页面读的字段必须来自运行时 OpenAPI」的门（字段清单与 schema 两边都派生，不手抄）**
+
+**为什么做**：PLAN 里连着多轮列着同一条未销账项——「**「家庭自测趋势」专用视图仍未做**」。它不是装饰性的 UI 缺口：**上游用 `GroupKey::SelfMeasured` 把家庭自测序列与医院序列**结构上分开**（家庭血压的参考区间是「家庭自测上限 135/85」，与门诊 140/90 不可套用）⇒ 若把两者画进同一条线/同一张表，**参考区间就是错的**。⇒ 现有 Web「指标」页只读 `GET /persons/{pid}/labs`（`labs` 里虽有 `self_measured` 标志，但**没有任何一处把家庭自测单独呈现**）⇒ 消费方极易把家庭值当医院值解读（D-016 家族：「数据在，但没人告诉你怎么读」）。
+**关键结构决策①：视图只读**已有的真端点，**不新增后端接口**。数据源 = `GET /persons/{pid}/measurements?kind=self_measurement`（D-028 已实装的写侧回放投影）⇒ **零新 Rust 代码、零新依赖、零 API 契约变更** ⇒ 本轮 diff 落在 `web/index.html`（`include_str!` 内嵌）与门禁脚本上。
+**关键结构决策②：与「指标」页**刻意分栏**，并在页面上写明「不与医院指标混用参考区间」**。这不是文案洁癖，是**把上游的结构约束暴露给人看**：页面显示家庭区间时**带 `ref_source` 出处**（上游 `home_ref_range` 写明来源）⇒ 用户能自己判断这个区间从哪来。
+**关键结构决策③：**「查不到出处就不给区间」这条上游纪律必须在 UI 上保持**。真响应里 `ref_low`/`ref_high` 是**可选键**（无区间时不存在）⇒ 页面用 `v.ref_low!=null||v.ref_high!=null` 判存在，缺区间显示 `—` ⇒ **不臆造阈值**。同时 `payload_readable=false` 的记录被**过滤掉**（结构化载荷读不出来时，原文仍在 `text` 里；这一屏只画能读的值，不猜）。
+**关键结构决策④：判据落到 **schema**，不是「真响应里必须有该键」**。这是本轮最关键的一处取舍：若按「页面读的每个字段都必须在真响应里出现」来判，**合法的可选键**（`ref_low`/`ref_high`/`flag`）会**假红**（D-011 家族「门红了先怀疑门」）⇒ 改判「该字段必须存在于**运行时 OpenAPI 的 schema**」（可选键也在 schema 里）⇒ 既不假红，又仍能抓住「页面读了一个服务端根本不存在的字段」。
+**关键结构决策⑤：字段清单与 schema **两边都派生，都不手抄**。①「页面读了哪些字段」= 从**页面源码**里正则派生（`d.<f>` 顶层 / `m.<f>` 记录项 / `v.<f>` 值项）；②「服务端有哪些字段」= 从**运行时 `/openapi.json`** 顺着 `$ref` 走到 `MeasurementsReply → MeasurementOut → MeasurementValueOut`（**不手写 schema 名**，改名就红）。⇒ 页面改字段 ⇒ 门自动跟着变；服务端改契约 ⇒ 门自动红。
+**关键结构决策⑥：判据还必须覆盖**路径**，不只字段**。视图若把请求路径改错（打到了别的端点），字段名可能照样「看起来对」⇒ 追加判据：页面里 `j(\`...\`)` 的路径（`${cur}`→`{pid}`）必须在 OpenAPI `paths` 里**且是真 operation**。
+**关键结构决策⑦：门必须**自己造数**，不依赖已有数据**。W4 现场 `POST /persons/{pid}/entries/self-measurement` 写一条血压自测（`bp_systolic`/`bp_diastolic`）⇒ 然后读真响应 ⇒ 断言真响应里**确有** `taken_at`/`docref`/`payload_readable`/`values` 与值项的 `analyte_key`/`value`/`unit` ⇒ 空库/未造数时该门**恒绿**的老问题被治住（与 T27「门自己造数」同款纪律）。
+**证据链（缺一即算交付）**：
+①**先干跑，再动手**（D4「参数生效要有证据」）：动手前起临时 ehr-api，真写 3 条自测 ⇒ 观测到 `measurements` 响应**逐字段**为 `taken_at`/`docref`/`values[].analyte_key`/`value`/`unit`/`ref_low`/`ref_high`/`ref_source`/`flag`，且 `labs` 里 `self_measured=true` ⇒ 视图的读法是照着**真响应**写的，不是照着想象写的。
+②**新判据实测全绿**：`./web-e2e.sh` ⇒ W1/W2/W3 照旧绿 + **W4 绿** ⇒ `fails=0`；W4 打印的派生结果为 `d=['count','measurements'] m=['docref','payload_readable','taken_at','values'] v=['analyte_key','flag','ref_high','ref_low','unit','value']`、路径 `/api/v1/persons/{pid}/measurements`、`count=1`。
+③**门是「真门」的负向证据（本轮实撞 2 次，每次复原）**：①把页面里 `m.payload_readable` 改成 `m.payload_readableX` ⇒ **红 fails=1**「页面读的字段在 OpenAPI schema 里不存在: ['m.payload_readableX']」；②把请求路径改成 `.../measurementsX` ⇒ **红 fails=1**「页面请求路径 /api/v1/persons/{pid}/measurementsX 不在 OpenAPI 里」⇒ **新判据有判别力**（字段面与路径面各一次）。
+④**Rust 侧零破坏**：`cargo test --all-targets --locked` ⇒ **83 门全绿**（16 个 test target 全 ok，rc=0）；**未改任何 Rust 源码**，`Cargo.toml`/`Cargo.lock` **未改动** ⇒ **零新依赖**。
+⑤**统一入口全量复跑：19 门全绿，总 fails=0**（`run-all-gates.sh` ⇒ `门禁数=19（本次执行 19）总 fails=0`）。
+⑥**产物新鲜度与同步**：本轮改了 `web/index.html`（`include_str!` ⇒ 需重编译才进二进制）⇒ 重编译 debug+release 并同步到 shared-target ⇒ **两份产物 sha256 逐字一致**（release `d5204a26…`、debug `1106db38…`），`artifact-freshness-check.sh` 绿。
+⑦**后台卡死检查（D-010）**：**无 cargo/rustc 残留**；本轮起的临时 ehr-api（`:19077`）已收割、临时目录 `/tmp/ehr-dry-*` 已清；常驻只剩 10-21/10-22 的陈旧 `ehr-api`（`:18999`/`:18991`/`:19031`/`:19032`）与两个 docker 容器 ⇒ **非卡死**。
+**新坑一则（D4 同族）**：
+①**「产物被运行中的进程占住 ⇒ 同步产物失败」这个坑，之前只表现为报错，本轮暴露了它的**真实影响面**：两个 10-21/10-22 的陈旧取证进程**一直持有** `~/medme-shared-target/release/ehr-api` ⇒ 直接 `cp` 覆盖会 **`Text file busy`** ⇒ 门禁会继续跑**旧产物**（D-035 新坑③的又一次复发，且这次是**被系统调用挡住、差点被我当成「环境问题」跳过**）。⇒ 处置：**先 `cp` 到 `.new` 再 `mv` 覆盖**（`mv` 换 inode ⇒ 绕过 busy，且老进程继续跑它的旧 inode，不影响本轮门禁测的产物）⇒ **同步步骤从此对「有进程在跑」免疫**。⇒ 纪律升级：**「同步产物」不该依赖「没人在跑那份二进制」这个前提**。
+**未销账/下一步**：①**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）——本轮只补了**一个视图**，Web 端仍是单文件最小版（编译期内嵌、无构建链）；②**MCP 侧仍无 resources/prompts**；③公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token（当前 `EHR_API_TOKENS` 为空 ⇒ 放行模式，仅本地）；④ghcr 包可见性仍 private（OCR 镜像未推 GHCR、未纳入 CI）；⑤真·第三方 MCP 客户端互通仍未验；⑥`.dcm`/DICOM worker 未做（能力清单已如实标 `enabled=false`）；⑦上游分类缺口（认「出院记录」不认「出院小结」）仍在；⑧`docs/API.md` 是**生成物**，改接口须跑 `./api-doc-check.sh --write`（本轮**未改接口** ⇒ 无需重生成）；⑨人员域三端点仍 501 且刻意不进 OpenAPI；⑩`container-smoke.sh` 仍**未跑**（须先重建镜像）；⑪**本轮改动尚未推真 GitHub runner**（本地 19 门全绿；下一次 push 到 `main` 才是真 runner 验证）。
+
 ## D-048 2026-10-27 · **T31「体检报告列布局 labs=0」缺口关闭——缺口本体先复现，再用「可离线判定的门」证明抽取路径能救；再拿真 PDF + 真 LLM 网关跑通端到端（labs 0 ⇒ 50 series）；顺带补上可移植性门的一个新洞（Python 行尾注释让整行逃逸）**
 **为什么做**：PLAN 未销账项里**同一条缺口连写了两遍**——「**「体检报告 PDF 列布局 labs=0」缺口：extraction 管线已就位，缺的是「把 PDF 送进 LLM」这一步的**端到端脚本**」。事实核对：extraction 的**写侧**（`PUT /documents/{sha}/extraction`）确实已就位且有 D-023 语义（逐字闸）；**读侧**（`GET /persons/{pid}/labs` 聚合）也已就位 ⇒ 缺的确实是**中间那一段**：把原件的文本层交给 LLM、再把模型输出原样送回服务端。但 D-035~D-047 的纪律是「**说出来的事必须被机器判定**」⇒ **脚本本身要能证明它救回来了**，且**最好不依赖外部 LLM**（否则每次跑都要 key/网络 ⇒ 门禁不可复现）。
 **关键结构决策①：先复现缺口，再谈补法（不粉饰）**。真实列布局体检报告 `2021_0907.pdf` 入档 ⇒ **正则路径 labs series=0 / points=0** ⇒ 确认缺口是真的，且**不是**环境差异。（这个 0 是本轮全部工作的**基线**——没有它，「后面 50」无从谈起。）

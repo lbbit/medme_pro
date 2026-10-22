@@ -82,9 +82,9 @@ async function loadPersons() {
   [...pl.children].forEach(li => li.onclick = () => { cur = li.dataset.id; loadPersons(); render(); });
 }
 function tabs() {
-  const t = ["timeline","documents","labs","search"];
+  const t = ["timeline","documents","labs","home","search"];
   document.getElementById("tabs").innerHTML = t.map(x =>
-    `<button data-t="${x}" class="${tab===x?"on":""}">${{timeline:"时间线",documents:"文档",labs:"指标",search:"检索"}[x]}</button>`).join("");
+    `<button data-t="${x}" class="${tab===x?"on":""}">${{timeline:"时间线",documents:"文档",labs:"指标",home:"自测趋势",search:"检索"}[x]}</button>`).join("");
   [...document.getElementById("tabs").children].forEach(b => b.onclick = () => { tab = b.dataset.t; render(); });
 }
 function out(html) { document.getElementById("pane").innerHTML = html; }
@@ -129,6 +129,34 @@ async function render() {
           `<h3>${esc(s.group_name||s.analyte_key||"未命名序列")} <span class="mut">${esc(s.unit_canonical||"")} · n=${(s.points||[]).length}${s.any_abnormal?" · 异常":""}</span></h3><table><tr><th>日期</th><th>值</th><th>flag</th><th>证据</th></tr>` +
           (s.points||[]).map(pt => `<tr><td>${esc(pt.date||"—")}</td><td>${esc(pt.value)}${esc(s.unit_canonical?" "+s.unit_canonical:"")}</td><td>${esc(pt.flag||"")}</td><td class="mut">${esc((pt.docref||"").slice(0,12))}</td></tr>`).join("") + `</table>`).join("")
           : '<p class="mut">无已解析指标。上传含检验数据的 txt 报告后重试。</p>'));
+    } else if (tab === "home") {
+      // 家庭自测趋势（T32）：**只**读 /measurements?kind=self_measurement。
+      // ⚠️ 与「指标」页**刻意分开展示**：家庭自测值与医院指标参考区间不同，
+      // 永不能画成同一条线（上游 GroupKey::SelfMeasured 的结构约束，见 docs/API.md）。
+      const d = await j(`/persons/${cur}/measurements?kind=self_measurement`);
+      const rows = (d.measurements || []).filter(m => m.payload_readable);
+      // 按 analyte_key 归组（血压两条值共享一条记录 ⇒ 一行两个值）
+      const g = {};
+      for (const m of rows) for (const v of (m.values || [])) {
+        const k = v.analyte_key || "?";
+        (g[k] = g[k] || []).push({ m, v });
+      }
+      const keys = Object.keys(g);
+      out(`<h2>${esc(p.name)} · 自测趋势 <span class="mut">count=${d.count} · 分组=${keys.length}</span></h2>` +
+        `<p class="mut">来源：<code>GET /persons/{pid}/measurements?kind=self_measurement</code>（家庭自测，<b>不与医院指标混用参考区间</b>）</p>` +
+        (keys.length ? keys.map(k => {
+          const items = g[k].sort((a,b) => (a.m.taken_at||"").localeCompare(b.m.taken_at||""));
+          const v0 = items[0].v;
+          return `<h3>${esc(k)} <span class="mut">${esc(v0.unit||"")} · n=${items.length}</span></h3>` +
+            `<table><tr><th>日期</th><th>值</th><th>flag</th><th>家庭区间</th><th>证据</th></tr>` +
+            items.map(({m,v}) => `<tr><td>${esc((m.taken_at||"—").slice(0,10))}</td>` +
+              `<td>${esc(v.value)}${esc(v.unit?" "+v.unit:"")}</td>` +
+              `<td>${esc(v.flag||"—")}</td>` +
+              `<td class="mut">${esc((v.ref_low!=null||v.ref_high!=null) ? (v.ref_low!=null?v.ref_low:"") + " ~ " + (v.ref_high!=null?v.ref_high:"") : "—")}</td>` +
+              `<td class="mut">${esc((m.docref||"").slice(0,12))}</td></tr>`).join("") + `</table>` +
+            (v0.ref_source ? `<p class="mut">区间出处：${esc(v0.ref_source)}</p>` : "");
+        }).join("")
+          : '<p class="mut">暂无家庭自测记录。可用 <code>ehr.sh measurements PID --kind self_measurement</code> 查看（写入走 REST <code>POST /persons/{pid}/entries/self-measurement</code>）。</p>'));
     } else {
       out(`<h2>${esc(p.name)} · 检索</h2><div class="row"><input id="q" placeholder="如：血常规"><button id="go">搜索</button></div><div id="res"></div>`);
       const go = document.getElementById("go");

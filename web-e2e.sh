@@ -129,5 +129,68 @@ if miss:
 print("persons=%d timeline=%d docs=%d series=%d search=%d"%(len(g("/persons")),tl["count"],dc["count"],len(lb["series"]),sr["count"]))
 PY
 
+# W4 「家庭自测趋势」视图（T32）：页面 JS 读的每个字段名，必须真实存在于
+#    **运行时 OpenAPI 的 schema** 里（且该端点在 OpenAPI 里是真 operation）。
+#    为什么这样判：①字段清单若是「手抄」的就会悄悄漂移（D-016 家族的病）；
+#      ②「JS 读 v.ref_low 而服务端只在有区间时才给该键」是**合法的可选键**，
+#      硬要求「真响应里必须有」会假红 ⇒ 判据落到 schema（可选键也在 schema 里）。
+#    ⇒ 字段清单**从页面源码派生**、schema **从运行时 OpenAPI 派生**，两边都不是手抄。
+echo "== W4 自测趋势视图字段面 =="
+W4_BODY=$(curl -s -XPOST "$BASE/api/v1/persons/$PID/entries/self-measurement"   -H 'content-type: application/json'   -d '{"taken_at":"2026-10-01T08:00:00Z","values":[{"analyte_key":"bp_systolic","value":128,"unit":"mmHg"},{"analyte_key":"bp_diastolic","value":82,"unit":"mmHg"}]}')
+W4_SHA=$(printf '%s' "$W4_BODY" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("content_hash",""))' 2>/dev/null)
+if [ -n "$W4_SHA" ]; then ok "W4 写入自测记录 sha=${W4_SHA:0:12}"; else bad "W4 写入自测记录失败: $W4_BODY"; fi
+
+python3 - "$BASE" "$PID" <<'PY' && ok "W4 视图字段面(JS 派生 × OpenAPI 派生)" || bad "W4 视图字段面"
+import json,re,sys,urllib.request
+base,pid=sys.argv[1],sys.argv[2]; B=base+"/api/v1"
+h=open('/tmp/webe2e.html',encoding='utf-8').read()
+# ① 页面里 home 分支的源码（判据只针对「自测趋势」这一个视图，不牵连其它页）
+m=re.search(r'tab === "home"(.*?)\} else \{',h,re.S)
+if not m: print("FAIL 页面里找不到 home 分支（视图被删了？）"); sys.exit(1)
+src=m.group(1)
+# ② 从源码派生「读了哪些字段」：d.<f> = 顶层(reply) / m.<f> = 记录项 / v.<f> = 值项
+reads={"d":set(),"m":set(),"v":set()}
+for var,f in re.findall(r'(?<![A-Za-z0-9_$])([dmv])\.([A-Za-z_][A-Za-z0-9_]*)',src):
+    reads[var].add(f)
+# ③ 从运行时 OpenAPI 派生 schema：reply → 记录项 → 值项（顺着 $ref 走，不手写 schema 名）
+oa=json.load(urllib.request.urlopen(base+"/openapi.json"))
+path="/api/v1/persons/{pid}/measurements"
+if path not in oa["paths"]: print("FAIL OpenAPI 里没有 %s"%path); sys.exit(1)
+op=oa["paths"][path].get("get")
+if not op: print("FAIL %s 没有 get operation"%path); sys.exit(1)
+ref=op["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+S=oa["components"]["schemas"]
+def deref(r): return S[r.split("/")[-1]]
+reply=deref(ref)
+item=deref(reply["properties"]["measurements"]["items"]["$ref"])
+value=deref(item["properties"]["values"]["items"]["$ref"])
+schema={"d":reply,"m":item,"v":value}
+# ④ 页面读的字段必须在对应 schema 的 properties 里（可选键也在 schema 里 ⇒ 不假红）
+miss=[]
+for var,fs in reads.items():
+    props=schema[var]["properties"]
+    for f in sorted(fs):
+        if f not in props: miss.append("%s.%s"%(var,f))
+if miss:
+    print("FAIL 页面读的字段在 OpenAPI schema 里不存在:",miss); sys.exit(1)
+# ⑤ 页面请求的路径必须与 OpenAPI 里的路径对得上（把 ${cur} 换回 {pid}）
+req=re.search(r'j\(`([^`]*)`',src)
+if not req: print("FAIL home 分支里找不到请求路径"); sys.exit(1)
+p=req.group(1).replace("${cur}","{pid}")
+qs=p.split("?")[0]
+if not qs.startswith("/api/v1"): qs="/api/v1"+qs
+if qs not in oa["paths"]: print("FAIL 页面请求路径 %s 不在 OpenAPI 里"%qs); sys.exit(1)
+# ⑥ 真响应里这些字段确实有值（不止 schema 有，真数据也得有）
+real=json.load(urllib.request.urlopen(B+"/persons/%s/measurements?kind=self_measurement"%pid))
+if not real.get("measurements"): print("FAIL 真响应 measurements 为空（视图会空白）"); sys.exit(1)
+it=real["measurements"][0]
+for f in ("taken_at","docref","payload_readable","values"):
+    if f not in it: print("FAIL 真响应记录项缺字段 %s"%f); sys.exit(1)
+vv=it["values"][0]
+for f in ("analyte_key","value","unit"):
+    if f not in vv: print("FAIL 真响应值项缺字段 %s"%f); sys.exit(1)
+print("OK reads: d=%s m=%s v=%s | path=%s | count=%d"%(sorted(reads["d"]),sorted(reads["m"]),sorted(reads["v"]),qs,real.get("count",0)))
+PY
+
 echo "fails=$fail"
 [ "$fail" -eq 0 ]
