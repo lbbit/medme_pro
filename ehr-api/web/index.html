@@ -90,6 +90,28 @@ function tabs() {
 function out(html) { document.getElementById("pane").innerHTML = html; }
 function fail(e) { out(`<pre class="msg">[ERROR] ${esc(e.message)}</pre>`); }
 
+// T44：派生读面速览——上传原件后**服务端聚合是实时的**（同一次 parser::aggregate，
+// 不需要重跑抽取），所以「上传完看不到用药/病程/指标」是**页面**没把新状态取回来，
+// 不是产品没算。本函数在「文档」页渲染一次、在上传成功后随 render() 再渲染一次。
+// ⚠️ 只读面：不新增端点、不写任何数据（口径与 D-060 同族）。
+async function derivedView() {
+  const el = document.getElementById("derived");
+  if (!el) return;
+  try {
+    const [l, m, c] = await Promise.all([
+      j(`/persons/${cur}/labs`), j(`/persons/${cur}/medications`), j(`/persons/${cur}/conditions`),
+    ]);
+    el.innerHTML = `<p class="mut">派生读面（随上传自动刷新 · 数值原样透传）</p>` +
+      `<table><tr><th>读面</th><th>计数</th><th>参与文档</th></tr>` +
+      `<tr><td>指标 labs</td><td>series=${(l.series_count!=null?l.series_count:(l.series||[]).length)} · points=${(l.total_points!=null?l.total_points:0)}</td><td class="mut">${esc(l.documents_scanned||0)}</td></tr>` +
+      `<tr><td>用药 meds</td><td>med_count=${(m.med_count!=null?m.med_count:0)}</td><td class="mut">${esc(m.documents_scanned||0)}</td></tr>` +
+      `<tr><td>病程 conds</td><td>condition_count=${(c.condition_count!=null?c.condition_count:0)}</td><td class="mut">${esc(c.documents_scanned||0)}</td></tr>` +
+      `</table>`;
+  } catch (e) {
+    el.innerHTML = `<pre class="msg">[ERROR] ${esc(e.message)}</pre>`;
+  }
+}
+
 async function render() {
   tabs();
   if (!cur) return out('<p class="mut">← 左侧选择或新建人员。</p>');
@@ -105,6 +127,7 @@ async function render() {
       const d = await j(`/persons/${cur}/documents`);
       out(`<h2>${esc(p.name)} · 文档 <span class="mut">count=${d.count}</span></h2>` +
         `<div class="row"><input type="file" id="f"><button id="up">上传原件</button></div>` +
+        `<div id="derived"><p class="mut">派生读面加载中…</p></div>` +
         (d.count ? `<table><tr><th>sha256</th><th>文件名</th><th>大小</th></tr>` +
           d.items.map(i => `<tr><td><a href="#" data-sha="${i.content_hash}" class="det">${esc((i.content_hash||"").slice(0,12))}…</a></td><td>${esc(i.original_name||"")}</td><td class="mut">${esc(i.byte_size)} B · ${esc(i.mime_type)}</td></tr>`).join("") + `</table>`
           : '<p class="mut">暂无文档。</p>'));
@@ -116,6 +139,9 @@ async function render() {
           alert(`已入库 sha=${(r.content_hash||"").slice(0,12)}… deduped=${!!r.deduped}`); render();
         } catch (e) { alert("上传失败: " + e.message); }
       };
+      // 页面「文档」页一进来就把派生读面取回来；上传成功后 render() 会重建该页，
+      // 因此上传后**自动**再取一次 ⇒ 用户当场看见「用药/病程/指标」因这次上传而变化。
+      derivedView();
       document.querySelectorAll("a.det").forEach(a => a.onclick = async ev => {
         ev.preventDefault();
         try { const d = await j(`/persons/${cur}/documents/${a.dataset.sha}`);

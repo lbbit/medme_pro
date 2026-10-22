@@ -18,6 +18,7 @@
     B8  自测趋势页：先经 API 写入一条自测（写进**页面上正选着的那个人**）⇒ 页面渲染出分组与数值
     B9  检索页：填 #q → 点 #go ⇒ 命中结果渲染
     B10 页面不得把错误当内容渲染出来（出现 [ERROR] ⇒ 红）
+    B17 上传原件后「派生读面」区块自动刷新（med_count 0 → ≥1）——T44
 
 **门自身的纪律**（D-011 家族：门红了先怀疑门）：
     每一步都包在 try/except 里 ⇒ 任何一步抛异常都记成该步 FAIL 并**继续往下跑**，
@@ -155,6 +156,38 @@ def main():
                 ok("B5b 文档表渲染 %d 行，含详情链接" % len(det))
             else:
                 bad("B5b 文档表没有详情链接（上传未落到页面？）")
+
+        # ---- B17 派生读面随上传自动刷新（T44）----
+        # 判据：同一页面（documents 页）上，**经页面自己的上传控件**传一份处方原件，
+        #   「派生读面」区块的 med_count 必须从 0 变成 ≥1 ⇒ 证明「上传 → 派生读面更新」
+        #   这条链在页面上是通的（服务端聚合是实时的，页面必须自己去取回来）。
+        @step("B17")
+        def _b17():
+            meds = os.environ.get("SAMPLE_MEDS", "")
+            if not meds or not os.path.exists(meds):
+                bad("B17 没有处方样本可上传（SAMPLE_MEDS=%r）" % meds)
+                return
+            page.click('button[data-t="documents"]')
+            page.wait_for_timeout(800)
+            before = page.inner_text("#derived")
+            page.set_input_files("#f", meds)
+            with page.expect_event("dialog") as di:
+                page.click("#up")
+            dlg = di.value
+            dlg.accept()
+            page.wait_for_timeout(2000)
+            after = page.inner_text("#derived")
+            import re as _re
+            def _mc(txt):
+                mm = _re.search(r"med_count=(\d+)", txt or "")
+                return int(mm.group(1)) if mm else None
+            b, a = _mc(before), _mc(after)
+            if b is None or a is None:
+                bad("B17 派生读面区块没有 med_count 字段: before=%r after=%r" % (before[:120], after[:120]))
+            elif a >= 1 and a > b:
+                ok("B17 上传原件后派生读面自动刷新: med_count %s -> %s" % (b, a))
+            else:
+                bad("B17 派生读面未随上传刷新: med_count %s -> %s（before=%r）" % (b, a, before[:120]))
 
         # ---- B6 详情面板 ----
         @step("B6")
