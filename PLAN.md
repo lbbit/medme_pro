@@ -554,3 +554,25 @@
 - **mode 语义实测**: image 模式验不过→unverified 标记(6个,charting-safety 设计内);text 模式→rejected=1(白细胞值 4.35 vs 原文不符则清字段)——两档行为都符合上游红线
 - **labs 聚合吃上 extraction**: 白细胞 4.35(N) 从 extraction 进聚合,unverified:false
 - 待销账: ①unverified_fields 列表为空但 unverified=6 的计数粒度(上游只有 top_field 进列表,内部字段只计数——如实记录);②体检 PDF 列布局同样可用此管线(labs=0 缺口对齐);③extraction 提示词进 SKILL.md
+
+## T30 澄清与补强（2026-10-27，用户两点反馈）
+
+### ① "本机无 node"表述澄清
+用户 10-22 08:08 手动装了 node v20.18.0(`~/.local/bin/node`)。我此前的"本机无 node"判断
+出自 D-016(10-20 12:15 Web 版落地时)——**当时确实没有**；W2 静默 SKIP 的窗口是
+10-20~10-22 08:14(修复提交)。用户装 node 的动作与 CI 首跑在同一时间窗，两者共同促成修复。
+此后门禁一律以 `command -v node` 实时探测，不再沿用历史判断。
+
+### ② "CI 抓出 Web 跑不起来而我没发现"的根因与机制化补强(用户定性:严重问题)
+根因链:W2 依赖 node→本机(当时)无 node→**静默 SKIP**(设计缺陷:跳过=不存在)→
+页面 JS SyntaxError 数月无门能抓→仅 W1/W3(HTML 200+字段对齐)绿→假绿。
+用户定性正确:这说明**没有 CI 时,本机"门禁全绿"不能保证基本功能可用**。
+已落地(D-047,真 CI 首跑即抓出并修复):
+- W2 缺依赖由 SKIP 改 **红**(门禁体系不再允许"因缺依赖假装通过")
+- CI workflow 装 node(TUNA 通道 v20.18.0)
+- 修复 Web JS 真缺陷(const t 重复声明),真 runner 复跑 18/18 绿
+机制化三条(本轮新增,防复发):
+1. **run-all-gates.sh 为唯一真跑入口**——人工"逐个跑"不再是有效证据;`--list` dry-run 随时核对登记表
+2. **SKIP 必须附"谁负责补跑"**——container-smoke/agent-e2e 两门在 PLAN 当前状态区有对应补跑节拍
+3. **浏览器级冒烟提上待办**:W2 只查 JS 语法,DOM 渲染/事件绑定仍无门——T5 Web 正式化时以
+   headless 浏览器(container 内 chromium+playwright)补"页面真的能渲染出表格"的门
