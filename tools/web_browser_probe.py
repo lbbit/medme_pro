@@ -285,6 +285,81 @@ def main():
             else:
                 bad("B13 审计页未渲染出条目: %r" % pane[:200])
 
+        # ---- B14/B15/B16 写侧「记录」页（T5 第 3 小步：页面此前只能读不能写）----
+        @step("B14")
+        def _b14():
+            page.click('button[data-t="records"]')
+            page.wait_for_timeout(800)
+            pane = page.inner_text("#pane")
+            if "自测值" not in pane or "addMeas" not in page.inner_html("#pane"):
+                bad("B14 记录页未渲染出自测值写入表单")
+                return
+            page.select_option("#mKey", "heart_rate")
+            page.fill("#mVal", "72")
+            with page.expect_event("dialog") as di:
+                page.click("#addMeas")
+            dlg = di.value
+            msg = dlg.message
+            dlg.accept()
+            if "自测值成功" in msg:
+                ok("B14 自测值写入成功(alert): %s" % msg[:80])
+            else:
+                bad("B14 自测值写入失败(alert): %s" % msg[:200])
+
+        @step("B14b")
+        def _b14b():
+            # 判据落在**回放投影**（页面把刚写的东西列出来）⇒ 证明「写进去且读得回来」
+            page.click('button[data-t="records"]')
+            page.wait_for_timeout(1200)
+            pane = page.inner_text("#pane")
+            if "heart_rate=72" in pane:
+                ok("B14b 记录页回放投影渲染出 heart_rate=72")
+            else:
+                bad("B14b 记录页回放投影未渲染出写入的自测值: %r" % pane[:300])
+
+        @step("B15")
+        def _b15():
+            page.click('button[data-t="records"]')
+            page.wait_for_timeout(800)
+            page.fill("#nText", "浏览器门禁写的笔记")
+            with page.expect_event("dialog") as di:
+                page.click("#addNote")
+            dlg = di.value
+            msg = dlg.message
+            dlg.accept()
+            if "笔记成功" not in msg:
+                bad("B15 笔记写入失败(alert): %s" % msg[:200])
+                return
+            page.wait_for_timeout(1000)
+            pane = page.inner_text("#pane")
+            if "浏览器门禁写的笔记" in pane:
+                ok("B15 笔记写入后回放投影渲染出该笔记")
+            else:
+                bad("B15 笔记未出现在回放投影: %r" % pane[:300])
+
+        @step("B16")
+        def _b16():
+            page.click('button[data-t="records"]')
+            page.wait_for_timeout(800)
+            page.fill("#pKind", "enable")
+            page.fill("#pPkg", "sle")
+            page.fill("#pAt", "2026-10-01")
+            page.fill("#pPayload", "{}")
+            with page.expect_event("dialog") as di:
+                page.click("#addPe")
+            dlg = di.value
+            msg = dlg.message
+            dlg.accept()
+            if "病程事件成功" not in msg:
+                bad("B16 病程事件写入失败(alert): %s" % msg[:200])
+                return
+            page.wait_for_timeout(1000)
+            pane = page.inner_text("#pane")
+            if "profile_event" in pane and "2026-10-01" in pane:
+                ok("B16 病程事件写入后回放投影渲染出该事件")
+            else:
+                bad("B16 病程事件未出现在回放投影: %r" % pane[:300])
+
         # ---- B10 页面不得把错误当内容渲染出来 ----
         @step("B10")
         def _b10():

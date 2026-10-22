@@ -82,9 +82,9 @@ async function loadPersons() {
   [...pl.children].forEach(li => li.onclick = () => { cur = li.dataset.id; loadPersons(); render(); });
 }
 function tabs() {
-  const t = ["timeline","documents","labs","home","search","meds","conds","audit"];
+  const t = ["timeline","documents","labs","home","search","meds","conds","audit","records"];
   document.getElementById("tabs").innerHTML = t.map(x =>
-    `<button data-t="${x}" class="${tab===x?"on":""}">${{timeline:"时间线",documents:"文档",labs:"指标",home:"自测趋势",search:"检索",meds:"用药",conds:"病程",audit:"审计"}[x]}</button>`).join("");
+    `<button data-t="${x}" class="${tab===x?"on":""}">${{timeline:"时间线",documents:"文档",labs:"指标",home:"自测趋势",search:"检索",meds:"用药",conds:"病程",audit:"审计",records:"记录"}[x]}</button>`).join("");
   [...document.getElementById("tabs").children].forEach(b => b.onclick = () => { tab = b.dataset.t; render(); });
 }
 function out(html) { document.getElementById("pane").innerHTML = html; }
@@ -152,6 +152,78 @@ async function render() {
         ((d.entries||[]).length ? `<table><tr><th>时刻</th><th>来源</th><th>动作</th><th>概要</th><th>sha256</th></tr>` +
           (d.entries||[]).map(e => `<tr><td class="mut">${esc((e.ts||"").slice(0,19))}</td><td>${esc(e.source||"")}</td><td>${esc(e.op||"")}</td><td>${esc(e.detail||"—")}</td><td class="mut">${esc((e.sha256||"").slice(0,12))}</td></tr>`).join("") + `</table>`
           : '<p class="mut">该人员暂无审计条目。</p>'));
+    } else if (tab === "records") {
+      // 写侧「手工条目」面板（T5 第 3 小步）：三种没有原件的记录（自测/笔记/病程事件）
+      // 走 REST 的三个 POST 端点（D-028 已毕业，此前页面只能读不能写），
+      // 并把回放投影（GET /measurements）列在下方 ⇒ 写完立刻能看到自己写的东西。
+      // 口径纪律：单位/值**原样**提交（服务端做生理学合理性校验并回 400），
+      // 事件日期 at = **事件发生的那天**（不是记录那天）；诊断/状态不推断。
+      const AN = ["bp_systolic","bp_diastolic","heart_rate","body_weight","body_temperature","glucose"];
+      out(`<h2>${esc(p.name)} · 记录 <span class="mut">写入=手工条目 · 无原件的记录</span></h2>` +
+        `<h3>自测值</h3><div class="row">` +
+          `<select id="mKey">${AN.map(k=>`<option value="${k}">${k}</option>`).join("")}</select>` +
+          `<input id="mVal" placeholder="数值，如 128" inputmode="decimal">` +
+          `<input id="mUnit" placeholder="单位，如 mmHg" value="mmHg">` +
+          `<input id="mAt" placeholder="时刻(可空) 如 2026-10-01T08:00:00Z">` +
+          `<button id="addMeas">记一条</button></div>` +
+        `<h3>笔记</h3><div class="row"><input id="nText" placeholder="原文即内容"><button id="addNote">记一条</button></div>` +
+        `<h3>病程事件</h3><div class="row">` +
+          `<input id="pKind" placeholder="kind，如 enable" value="enable">` +
+          `<input id="pPkg" placeholder="病种包，如 sle" value="sle">` +
+          `<input id="pAt" placeholder="事件那天 YYYY-MM-DD">` +
+          `<input id="pPayload" placeholder="payload JSON 对象" value="{}">` +
+          `<button id="addPe">记一条</button></div>` +
+        `<h3>已写入的记录（回放投影）</h3><div id="recList"><p class="mut">加载中…</p></div>`);
+      const refresh = async () => {
+        const d = await j(`/persons/${cur}/measurements`);
+        const el = document.getElementById("recList");
+        if (!el) return;
+        el.innerHTML = (d.measurements||[]).length
+          ? `<p class="mut">count=${d.count}</p><table><tr><th>时刻</th><th>类型</th><th>内容</th><th>证据</th></tr>` +
+            d.measurements.map(m => `<tr><td class="mut">${esc((m.taken_at||"").slice(0,19))}</td>` +
+              `<td>${esc(m.kind||"")}</td>` +
+              `<td>${esc(m.kind==="self_measurement" ? (m.values||[]).map(v=>`${v.analyte_key}=${v.value}${v.unit?" "+v.unit:""}`).join(" / ") : (m.kind==="note" ? (m.text||"") : `${m.event_kind||""} ${m.event_package||""} @${m.event_at||""}`))}</td>` +
+              `<td class="mut">${esc((m.docref||"").slice(0,12))}</td></tr>`).join("") + `</table>`
+          : `<p class="mut">该人员暂无手工记录。</p>`;
+      };
+      const post = async (url, body, label) => {
+        try {
+          const r = await j(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+          alert(`${label}成功 sha=${(r.content_hash||"").slice(0,12)}… deduped=${!!r.deduped}`);
+          await refresh();
+        } catch (e) { alert(`${label}失败: ${e.message}`); }
+      };
+      const addMeas = document.getElementById("addMeas");
+      if (addMeas) addMeas.onclick = () => {
+        const key = document.getElementById("mKey").value;
+        const val = parseFloat(document.getElementById("mVal").value);
+        const unit = document.getElementById("mUnit").value.trim();
+        const at = document.getElementById("mAt").value.trim();
+        if (!isFinite(val)) return alert("数值不合法");
+        const body = { values: [{ analyte_key: key, value: val, unit: unit }] };
+        if (at) body.taken_at = at;
+        post(`/persons/${cur}/entries/self-measurement`, body, "自测值");
+      };
+      const addNote = document.getElementById("addNote");
+      if (addNote) addNote.onclick = () => {
+        const t = document.getElementById("nText").value.trim();
+        if (!t) return alert("笔记不能为空");
+        post(`/persons/${cur}/entries/note`, { text: t }, "笔记");
+      };
+      const addPe = document.getElementById("addPe");
+      if (addPe) addPe.onclick = () => {
+        const at = document.getElementById("pAt").value.trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(at)) return alert("事件日期格式应为 YYYY-MM-DD");
+        let pl = {};
+        try { pl = JSON.parse(document.getElementById("pPayload").value || "{}"); }
+        catch (e) { return alert("payload 不是合法 JSON"); }
+        post(`/persons/${cur}/entries/profile-event`, {
+          kind: document.getElementById("pKind").value.trim(),
+          package: document.getElementById("pPkg").value.trim(),
+          at, payload: pl,
+        }, "病程事件");
+      };
+      try { await refresh(); } catch (e) { fail(e); }
     } else if (tab === "home") {
       // 家庭自测趋势（T32）：**只**读 /measurements?kind=self_measurement。
       // ⚠️ 与「指标」页**刻意分开展示**：家庭自测值与医院指标参考区间不同，

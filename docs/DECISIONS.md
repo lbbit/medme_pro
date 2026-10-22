@@ -1,5 +1,31 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-061 2026-10-23 · **T43「T5 Web 管理端正式化 · 第 3 小步」——页面此前只能读不能写（写侧只有「上传原件」），而 D-028 三类手工条目（自测/笔记/病程事件）从无写入口 ⇒ 新增「记录」tab（三种写入口 + 回放投影），浏览器门从 13 条扩到 18 条；同时销账 T42 的「CI 未验」未销账项**
+
+**为什么做**：①**T42 留了个未销账项**：本轮改了编译期内嵌的页面 + 增了门禁判据 ⇒ 按 D-058 纪律必须有一次真 runner 绿（且 runner 日志的「门禁数」必须与本机同数）⇒ 未验就等于「门在 CI 上可能不存在」；②**T5「Web 管理端正式化」的第 3 小步**：T42 已把三个**读面**接进页面 ⇒ 但量到页面 tab 共 8 个、**写侧只有「上传原件」一处** ⇒ 而 REST 侧 D-028 三个写端点（`POST /entries/self-measurement` / `POST /entries/note` / `POST /entries/profile-event`）早已毕业、`GET /measurements` 还有回放投影 ⇒ ⇒ 管理端用户**能看不能写** ⇒ 这不是「新功能」，是**产品面落后于 API 面**（与 T42 同一形状）。
+
+**先量再动手（干跑在前）**：先用一次性真进程干跑（自起临时 ehr-api，`:18790`/`:18791`）量接口语义：三个写端点均 **201**（回执带 `content_hash` / `deduped=false`）；边界输入均 **400**（`implausible self-measured value: OutOfRange { analyte_key: "bp_systolic", value: 138388.0, low: 60.0, high: 260.0 }`、`at` 形状错、空笔记、`payload` 非 JSON 对象）⇒ ⇒ 写入口有真落点，且**错误语义齐备**（页面只需把 400 的原因原样显示，不必自己判断）。
+
+**关键结构决策①：本轮仍然**不新增后端接口**，交付形态 = 「把已有能力接到页面 + 把接上钉成门」。
+- ⇒ 页面 diff 落在 `ehr-api/web/index.html`（`include_str!` 内嵌）+ 门禁侧探针 `tools/web_browser_probe.py` ⇒ **零新 Rust 代码、零新依赖、零 API 契约变更**（与 T32 同款口径）。
+- ⇒ 口径纪律：数值/单位**原样提交**（生理学合理性由服务端判、页面**不自行判断**）；病程事件的 `at` = **事件发生的那天**（不是记录那天）；诊断/状态**不推断**；回放投影**只读**。
+
+**关键结构决策②：写侧判据必须**验「写进去 + 读得回来」两半**，不能只验 alert**。
+- ⇒ 理由：alert 只证明「POST 成功」；若页面把回放列表渲染坏（空表/字段名错），用户仍会以为没写进去 ⇒ 假绿。
+- ⇒ 故 **B14（alert 成功）配 B14b（回放投影出现 `heart_rate=72`）**；B15/B16 同样以回放投影为准 ⇒ 判据落在**不会因下一次 `render()` 而消失的那半**（与 D-060「B10 看整页」同族）。
+
+**证据链（缺一即算交付）**：
+①**T42 的 CI 未销账项已销账**：run **39856129501**（head_sha `3cbafbb`、run_number 26）conclusion=success、job 120094690183 全 success、13 个 step 逐个 success；runner 日志末行「**[证据] run-all-gates.sh 门禁数=26（本次执行 26）总 fails=0**」⇒ 与本机**逐字相同**（D-058 判据）。
+  - ⇒ **新坑一则（取证路径）**：拉 runner 日志用 `GET /repos/{o}/{r}/actions/runs/{id}/logs` ⇒ **无 admin 权限时 403**（`"Must have admin rights to Repository."`）⇒ 必须带 `Authorization: token $GH_TOKEN`；带 token 后 200 且是 zip（解包后按 step 分文件，最后一个 `0_gates.txt` 是汇总）⇒ 否则会误判成「日志拿不到 ⇒ 没验过」。
+②**浏览器门 18 条判据全绿、fails=0**：B1/B2(`paths=17`)/B3/B4/B5(`sha=724bd4364b84…`)/B5b/B6/B7(`series=3`)/B8(`bp_systolic/128`)/B9(`count=1`)/B11(`med_count=2`)/B12(`condition_count=4`)/B13(`count=5`) + **B14（alert `sha=af8888118ab3…`）** + **B14b（`heart_rate=72`）** + **B15（笔记「浏览器门禁写的笔记」）** + **B16（`profile_event` + `2026-10-01`）** + B10 + B1b ⇒ `== RESULT fails=0`。
+③**负向证据（实撞 1 次）**：坏页（`tools/web_browser_broken_proxy.py`）⇒ **B2~B9、B11~B16 逐条红 ⇒ fails=16**、exit=1 ⇒ 新增四条写侧判据**随坏页变红** ⇒ 有判别力，不是假弱门。
+④**Rust 侧零新依赖**：只改 `web/index.html` + 门禁侧探针 ⇒ `Cargo.toml`/`Cargo.lock` **未改动** ⇒ 零新依赖；重编译 debug+release 两份（local 与 shared，D-029 纪律）⇒ 产物新鲜度门 fails=0（两份 sha256 逐字相同：debug `43221cda…`、release `830eedea…`）；并用 `strings` 命中 `addMeas` 确认页面**确已进二进制**（排除「改了没生效」）。
+⑤**统一入口全量复跑：26 门全绿，总 fails=0**（末行「门禁数=26（本次执行 26）总 fails=0」，exit=0）⇒ 门禁数**未变**（加判据不加门）。
+⑥**后台卡死检查（D-010）**：无 cargo/rustc 残留、无 done 哨兵残留；本轮临时 ehr-api 与坏页反代、探针进程**均已收割** ⇒ 常驻只剩两个 docker 容器内的 ehr-api ⇒ **非卡死**。
+⑦**门自身的坑（实撞 1 处，假红）**：把 `with page.expect_event("dialog") as di:` 写成一个**空块**（点击放在 `with` 之外）⇒ 对话框在 `with` 之前就弹出 ⇒ 探针超时**假红** ⇒ 修法：**点击必须在 `expect_event` 上下文内** ⇒ 复跑全绿 ⇒ 纪律再确认（D-011 家族）：**门红时先问「红的是不是被测的那个东西」**。
+
+**未销账/下一步**：①**T5 第 2 小步**：页面从**单文件内嵌**迁到构建链/静态资源——**先报方案再动手**；②**T5 后续**：写侧交互补「档案事件/病程包」的可视化、上传原件后自动刷新派生读面（用药/病程需重跑抽取才出现）；③**本轮改动尚未在真 GitHub runner 上验过**（改了编译期内嵌页面 + 门禁判据增加 ⇒ 需一次 push；runner 日志的**门禁数必须 == 26**）；④MCP 侧 prompts 仍显式钉住「不提供」；⑤官方 SDK 的 Java 实现仍未验；⑥公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑦ghcr 包可见性仍 private；⑧`.dcm`/DICOM worker 未做；⑨上游分类缺口仍在；⑩人员域三端点仍 501 且刻意不进 OpenAPI；⑪**agent-e2e 真 agent 门**仍 SKIP。
+
 ## D-060 2026-10-23 · **T42「T5 Web 管理端正式化 · 第 1 小步」——**已毕业但页面从未接**的三个读面（用药/病程/审计）补进 Web；浏览器门从 10 条判据扩到 13 条；同时销账 T41 的「CI 未验」未销账项**
 
 **为什么做**：①**T41 留了个未销账项**：本轮改了 CI workflow + 增了新门 ⇒ 按 D-058 纪律必须有一次真 runner 绿（且 runner 日志的「门禁数」必须与本机同数）⇒ 未验就等于「门在 CI 上可能不存在」；②**T5「Web 管理端正式化」是目标验收①最后一块**，动手前先量「页面到底接了哪些读面」⇒ 量到：OpenAPI 运行时 paths=**17**，而页面只有 5 个 tab（timeline/documents/labs/home/search）⇒ **用药 `/medications`（D-026 已毕业）、病程 `/conditions`（D-027 已毕业）、审计 `/audit`（D-030 已毕业）三个读面在 API 侧早就毕业，页面却从未接** ⇒ 管理端用户**看不到**三个已具备的能力 ⇒ 这不是「新功能」，是**产品面落后于 API 面**。

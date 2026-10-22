@@ -54,6 +54,28 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
+## 当前状态（2026-10-23 · **T43「T5 Web 管理端正式化 · 第 3 小步」——页面此前**只能读不能写**（写侧只有「上传原件」），而 REST 侧三类手工条目（自测/笔记/病程事件，D-028 已毕业）从无写入口 ⇒ 新增「记录」tab（三种写入口 + 回放投影），浏览器门从 13 条扩到 **18 条（B14/B14b/B15/B16）**；同时销账 T42 的「CI 未验」未销账项（run 39856129501 全绿、runner 门禁数=26 与本机逐字相同）· D-061 落地**）
+
+- ✅ **T43-① 先销账 T42 的「CI 未验」未销账项（本轮第一个可验证小步）**：T42 改了编译期内嵌的页面 + 增了门禁判据 ⇒ 按 D-058 纪律必须有一次真 runner 绿。核对 GitHub API：`runs` ⇒ run **39856129501**（head_sha `3cbafbb`、run_number 26）conclusion=**success**；`jobs` ⇒ job 120094690183 全 success，13 个 step 逐个 success（checkout / 装 Rust / 装 Node / 装 Playwright+Chromium / 拉上游 / TUNA 通道 / 构建 debug+release / cargo test / 同步产物 / 构建镜像 / 起 compose / **统一门禁入口** success，「门禁失败时打印原始输出」skipped）⇒ 拉 runner 日志（`runs/{id}/logs` + `Authorization: token $GH_TOKEN`，**无 admin 时 403 ⇒ 必须带 token**）⇒ 末行 **「[证据] run-all-gates.sh 门禁数=26（本次执行 26）总 fails=0」** ⇒ 与本机**逐字相同** ⇒ ⇒ **T42 的「本轮改动需在真 GitHub runner 上验过」已销账**。
+- ✅ **T43-② 缺口定位（干跑在前）**：先量「页面到底能写什么」⇒ 页面 tab 共 8 个（timeline/documents/labs/home/search/meds/conds/audit）⇒ **写侧只有「上传原件」一处**；而 REST 侧 D-028 早已毕业三个写端点（`POST /entries/self-measurement` / `POST /entries/note` / `POST /entries/profile-event`），并且 `GET /measurements` 有回放投影 ⇒ ⇒ 结论同 T42：**不是「新功能」，是「产品面落后于 API 面」**（管理端用户能看自测/笔记/病程事件，却**没法在页面上写**）。
+- ✅ **T43-③ 结构决策①：本轮交付形态 = 「把已有能力接到页面 + 把接上钉成门」，仍然**不新增后端接口**。
+  - ⇒ 页面 diff 落在 `ehr-api/web/index.html`（`include_str!` 内嵌）+ 门禁侧探针 ⇒ **零新 Rust 代码、零新依赖、零 API 契约变更**（与 T32 同款口径）。
+  - ⇒ 口径纪律沿用既有：数值/单位**原样提交**（服务端做生理学合理性校验并回 400，页面**不自行判断**）、事件日期 `at` = **事件发生的那天**（不是记录那天）、诊断/状态**不推断**。
+- ✅ **T43-④ 干跑取证（真进程、真 HTTP，量接口语义而非推演）**：自起临时 ehr-api（`:18790`/`:18791`）⇒ 三个写端点均 **201** 且回执带 `content_hash`/`deduped=false`；边界输入均 **400**（`implausible self-measured value: OutOfRange { analyte_key: "bp_systolic", value: 138388.0, low: 60.0, high: 260.0 }`、`at` 形状错、空笔记、`payload` 非 JSON 对象）⇒ ⇒ **写入口有真落点，且错误语义齐备**（页面只需把 400 的原因原样显示）。
+- ✅ **T43-⑤ 页面改动（新增「记录」tab）**：①**自测值**： analyte 规范键下拉（`bp_systolic`/`bp_diastolic`/`heart_rate`/`body_weight`/`body_temperature`/`glucose`）+ 数值 + 单位 + 可选时刻 ⇒ `POST /entries/self-measurement`；②**笔记**：原文即内容 ⇒ `POST /entries/note`；③**病程事件**：kind / 病种包 / 事件那天 / payload JSON ⇒ `POST /entries/profile-event`（页面只做**格式**校验：日期须 `YYYY-MM-DD`、payload 须可解析为 JSON；**语义校验全在服务端**）；④写完即**回放投影**（`GET /measurements`）把新记录列在页面下方 ⇒ 「写进去且读得回来」当场可见。
+  - ⇒ 与 T32 同款纪律：回放投影**只读**，不新增投影端点。
+- ✅ **T43-⑥ 结构决策②：写侧判据必须**验「写进去 + 读得回来」两半**，不能只验 alert。
+  - ⇒ 理由：alert 只证明「POST 成功」⇒ 但若页面把回放列表渲染坏（空表/字段名错），用户仍会以为没写进去 ⇒ 假绿。
+  - ⇒ 故 B14（alert 成功）**配** B14b（回放投影里出现 `heart_rate=72`）；B15/B16 同样以**回放投影**为准 ⇒ 判据落在**不会因下一次 `render()` 而消失的那半**（与 D-060「B10 看整页」同族）。
+- ✅ **T43-⑦ 证据链（缺一即算交付）**：
+  - ①**浏览器门 18 条判据全绿、fails=0**（真进程 + 真 HTTP + 真 Chromium）：B1/B2(`paths=17`)/B3/B4/B5(`sha=724bd4364b84…`)/B5b/B6/B7(`series=3`)/B8(`bp_systolic/128`)/B9(`count=1`)/B11(`med_count=2`)/B12(`condition_count=4`)/B13(`count=5`) + **B14 自测值写入成功（alert `sha=af8888118ab3…`）** + **B14b 回放投影渲染出 `heart_rate=72`** + **B15 笔记写入后回放投影出现「浏览器门禁写的笔记」** + **B16 病程事件写入后回放投影出现 `profile_event` + `2026-10-01`** + B10 整页无 `[ERROR]` + B1b 无 console error ⇒ `== RESULT fails=0`。
+  - ②**负向证据（实撞 1 次）**：坏页（`tools/web_browser_broken_proxy.py`，真 API 照常反代、只把 `/` 换成坏页）⇒ **B2~B9、B11~B16 逐条红 ⇒ fails=16**、exit=1 ⇒ ⇒ 新增的四条写侧判据**随坏页变红** ⇒ 这道门**有判别力**（不是「不报错但没在核对」的假弱门）⇒ 纪律再确认（D-011 家族）。
+  - ③**Rust 侧零新依赖**：只改 `ehr-api/web/index.html`（编译期内嵌）+ 门禁侧探针 `tools/web_browser_probe.py` ⇒ `Cargo.toml`/`Cargo.lock` **未改动** ⇒ 零新依赖；重编译 debug+release 两份（local 与 shared，D-029 纪律）⇒ **产物新鲜度门 fails=0**（两份 sha256 逐字相同：debug `43221cda…`、release `830eedea…`）；页面确已进二进制（`strings` 命中 `addMeas`）⇒ 「改了没生效」这种形态被排除。
+  - ④**统一入口全量复跑：26 门全绿，总 fails=0**（`run-all-gates.sh` ⇒ 26 个 `[PASS] … fails=0`；末行「门禁数=26（本次执行 26）总 fails=0」，exit=0）⇒ 门禁数**未变**（本轮是**加判据**不是**加门**）。
+  - ⑤**后台卡死检查（D-010）**：开工时**无 cargo/rustc 残留、无 done 哨兵残留**；本轮起的临时 ehr-api（`:18790`/`:18791`/`:18697`/`:18698` 坏页反代）与探针进程**均已收割**（收割后 `ps` 只剩两个 **docker 容器**内的 ehr-api）⇒ **非卡死**。
+  - ⑥**门自身的坑（本轮实撞 1 处，是「假红」不是假绿）**：判据若**只**用 `expect_event("dialog")` 而不先 `click`（把 `expect_event` 写成一个空 `with` 块）⇒ 对话框在 `with` 之前就弹出 ⇒ 探针**超时假红** ⇒ 修法：`with page.expect_event("dialog") as di: page.click(...)`（点击必须在上下文**内**）⇒ 复跑全绿 ⇒ 纪律再确认（D-011 家族）：**门红时先问「红的是不是被测的那个东西」**。
+- 🔄 **下一步**：①**T5 第 2 小步**：把页面从**单文件内嵌**迁到**构建链**（或至少拆分为静态资源）—— 但须先报方案再动手（沿用 T41 纪律）；②**T5 后续**：写侧交互再补「档案事件/病程包」的可视化（当前只有裸 kind/package 输入），以及**上传原件后自动刷新派生读面**（用药/病程需重跑抽取才出现）；③**本轮改动尚未在真 GitHub runner 上验过**（改了编译期内嵌页面 + 门禁判据增加 ⇒ 需一次 push；runner 日志里的**门禁数必须 == 26**）；④MCP 侧 prompts 仍显式钉住「不提供」；⑤官方 SDK 的 Java 实现仍未验；⑥公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑦ghcr 包可见性仍 private；⑧`.dcm`/DICOM worker 未做；⑨上游分类缺口仍在；⑩人员域三端点仍 501 且刻意不进 OpenAPI；⑪**agent-e2e 真 agent 门**仍 SKIP（需真 agent CLI + 外部服务态）。
+
 ## 当前状态（2026-10-23 · **T42「T5 Web 管理端正式化 · 第 1 小步」——把**已毕业但页面从未接**的三个读面（用药 D-026 / 病程 D-027 / 审计 D-030）接进 Web 页面，并把浏览器门从 10 条判据扩到 **13 条（B11/B12/B13）**；同时销账 T41 的「CI 未验」未销账项（run 39849154800 全绿、门禁数=26 与本机逐字相同）· D-060 落地**）
 
 - ✅ **T42-① 先销账 T41 的未销账项（本轮第一个可验证小步）**：T41 改了 CI workflow + 增了新门 ⇒ 按 D-058 纪律必须有一次真 runner 绿。核对 GitHub API（`runs` + `jobs` + job 日志）：run **39849154800**（head_sha `2c199dc`）conclusion=**success**、job 120070364385 全 success、job 日志末行 **「门禁数=26（本次执行 26）总 fails=0」** ⇒ 与本机**逐字相同**（D-058 判据：「结论绿」+「执行条数相符」才算 CI 上全跑全绿）⇒ ⇒ **T41 的「本轮新门需在真 GitHub runner 上验过」已销账**。
