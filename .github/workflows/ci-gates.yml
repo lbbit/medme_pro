@@ -115,6 +115,33 @@ jobs:
           sha256sum "$LOCAL_TARGET/debug/ehr-api"   "$SHARED/debug/ehr-api"
           sha256sum "$LOCAL_TARGET/release/ehr-api" "$SHARED/release/ehr-api"
 
+      - name: 构建容器镜像（container-smoke 门的前置 · D-050）
+        # 为什么必须在这（D-050）：`container-smoke.sh` 从 **RUN 清单**转正为真跑的门
+        #   ⇒ runner 上必须**有**与当前 HEAD 同源的镜像，否则这道门不存在。
+        #   ⇒ 通道走 TUNA（D-007 同族），**不依赖本机代理**（runner 在境外）。
+        #   ⇒ 镜像源 URL 与 ci-image.yml 同款（同一事实一份实现）；build-args
+        #     由 Dockerfile 消费，Dockerfile 不写死 URL。
+        run: |
+          set -euo pipefail
+          docker build \
+            -t deploy-ehr-api:latest \
+            -f deploy/Dockerfile \
+            --build-arg CARGO_SPARSE_URL=https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/ \
+            --build-arg CARGO_STATIC_ROOT=https://static.crates.io \
+            --build-arg APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian \
+            .
+          echo "[证据] 镜像已构建：deploy-ehr-api:latest"
+
+      - name: 起 compose 容器（container-smoke 的被测对象）
+        run: |
+          set -euo pipefail
+          # --no-build：镜像已在上一步构建好（build-args 里含本机代理的 host.docker.internal，
+          #   在 runner 上不可解析 ⇒ 绝不能让 compose 触发重建）。
+          docker compose -f deploy/docker-compose.yml up -d --no-build ehr-api
+          sleep 5
+          docker compose -f deploy/docker-compose.yml logs ehr-api 2>&1 | grep -m1 '证据' || true
+          echo "[证据] compose 容器已起"
+
       - name: 统一门禁入口（run-all-gates.sh）
         # 产物路径由 ci/env.sh 统一决定（默认 $HOME/medme-shared-target）⇒ 单一来源
         run: ./run-all-gates.sh
