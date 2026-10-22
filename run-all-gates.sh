@@ -42,6 +42,7 @@ RUN_LIST=(
   mcp-e2e.sh                    # D-017 MCP e2e
   auth-e2e.sh                   # T4 鉴权 e2e
   entries-e2e.sh                # D-028 写侧条目
+  extraction-e2e.sh             # T31 体检报告列布局 labs=0（抽取路径能救列布局；零外部依赖）
   conds-e2e.sh                  # D-027 病程泳道
   meds-e2e.sh                   # D-026 用药
   audit-e2e.sh                  # D-030 审计

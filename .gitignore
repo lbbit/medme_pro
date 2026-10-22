@@ -21,3 +21,4 @@ docs/testres/
 #   deploy/oar-models/*.onnx      21M   PP-OCRv5 权重(构建期从 ModelScope 取,镜像内已烤入)
 deploy/ort/
 deploy/oar-models/
+__pycache__/

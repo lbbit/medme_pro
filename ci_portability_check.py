@@ -43,7 +43,9 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 # 被检查的文件：仓库根的门禁脚本 + 根的 Python 内层实现 + ci/ 下的脚本 + SKILL 随附脚本
 #   + **CI workflow**（T29：workflow 也是「一份实现」的载体，它写死产物根目录
 #     同样会让「门禁跑哪份产物」分裂成两份 —— 实测 ci-gates.yml 就写死过一份）。
-SCRIPT_GLOBS = [("", "*.sh"), ("", "*.py"), ("ci", "*.sh"), ("ci", "*.py")]
+SCRIPT_GLOBS = [("", "*.sh"), ("", "*.py"), ("ci", "*.sh"), ("ci", "*.py"),
+              # T31：tools/ 下的取证脚本也是「一份实现」的载体（它调 REST/产物）
+              ("tools", "*.py")]
 EXTRA_FILES = [os.path.join("skills", "medme-ehr", "scripts", "ehr.sh")]
 WORKFLOW_GLOB = os.path.join(".github", "workflows", "*.yml")
 
@@ -54,6 +56,8 @@ NEEDS_ENV = [
     "auth-e2e.sh", "entries-e2e.sh", "conds-e2e.sh", "meds-e2e.sh",
     "audit-e2e.sh", "api-doc-check.sh", "web-e2e.sh", "ehtest.sh",
     "rebuild-e2e.sh", "rebuild-lock-e2e.sh",
+    # T31 新增：抽取路径门禁（体检报告列布局 labs=0）也起真进程 ⇒ 同样必须经唯一来源
+    "extraction-e2e.sh",
     # T29 新增：新鲜度门要拿**两份**产物路径（local + shared）⇒ 也必须经唯一来源
     "artifact-freshness-check.sh",
 ]
@@ -160,6 +164,69 @@ def py_noncode_lines(rel):
     return skip
 
 
+def py_code_lines(rel):
+    """返回 {行号: 该行的**代码部分**}（去掉行尾注释、去掉纯注释行与 docstring 行）。
+
+    ⚠️ T31 修掉的**真缺陷**（负向实测发现）：
+      原实现（`py_noncode_lines`）用 tokenize 的 COMMENT token 行号**整行**跳过，
+      于是**代码行尾挂的注释**（`X = "/home/lbb/..."  # 负向注入`）会把**整行**标成
+      「非代码」⇒ 那一行里的机器专属路径/产物路径**逃过所有判据** ⇒ 门是空的。
+      ⇒ 改为**逐行**取「该行注释起点列之前的代码部分」：
+        · 注释在代码**之前**（整行只有注释）⇒ 该行不参与判据（纯说明，保留原语义）；
+        · 注释在代码**之后**（行尾注释）⇒ 只判**代码部分**（注释文字不算事实）；
+        · docstring 行 ⇒ 仍按 ast 精确排除（它是文档，不是可执行事实）。
+      ⇒ **判据判的是「事实」而不是「提到事实的字符串」**（D-046 纪律的延续）。
+    """
+    out = {}
+    path = os.path.join(ROOT, rel)
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    try:
+        toks = list(tokenize.tokenize(io_bytes(raw)))
+    except Exception:
+        return None
+    text = raw.decode("utf-8").split("\n")
+    # --- docstring 行（ast）---
+    doc_lines = set()
+    try:
+        tree = ast.parse(raw.decode("utf-8"))
+    except Exception:
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = getattr(node, "body", None)
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                s = body[0].value
+                for ln in range(s.lineno, (s.end_lineno or s.lineno) + 1):
+                    doc_lines.add(ln)
+    # --- 每行的注释起点列 ---
+    comment_col = {}
+    for tok in toks:
+        if tok.type == tokenize.COMMENT:
+            comment_col.setdefault(tok.start[0], tok.start[1])
+    # --- 每行第一个有效 token 的起点列（判断该行「是不是只有注释」）---
+    first_code_col = {}
+    for tok in toks:
+        if tok.type in (tokenize.COMMENT, tokenize.ENDMARKER, tokenize.NL,
+                        tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT):
+            continue
+        ln = tok.start[0]
+        if ln not in first_code_col:
+            first_code_col[ln] = tok.start[1]
+    for ln, col in first_code_col.items():
+        if ln in doc_lines:
+            continue
+        cc = comment_col.get(ln)
+        if cc is not None and cc <= col:
+            continue  # 整行只有注释 ⇒ 不参与判据
+        line = text[ln - 1] if ln - 1 < len(text) else ""
+        if cc is not None:
+            line = line[:cc]  # 去掉行尾注释 ⇒ 只判代码部分
+        out[ln] = line
+    return out
+
+
 def io_bytes(raw):
     """tokenize.tokenize 需要 readline 迭代器。"""
     import io
@@ -175,10 +242,16 @@ def main():
         lines = read(rel)
         is_py = rel.endswith(".py")
         skip = py_noncode_lines(rel) if is_py else set()
+        # T31：Python 侧改为**逐行取代码部分**（去行尾注释）⇒ 行尾注释不再让整行逃逸
+        py_code = py_code_lines(rel) if is_py else None
 
         for i, line in enumerate(lines, 1):
             if is_py:
-                if i in skip:
+                if py_code is not None:
+                    if i not in py_code:
+                        continue
+                    line = py_code[i]
+                elif i in skip:
                     continue
             else:
                 if is_comment(line):

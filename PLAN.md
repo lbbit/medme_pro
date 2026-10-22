@@ -54,6 +54,27 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
+## 当前状态（2026-10-27 · **T31「体检报告列布局 labs=0」缺口关闭：抽取路径能救（机器可判）** + **真 PDF → 真 LLM → 回写端到端跑通（labs 0 ⇒ 50 series）** + 可移植性门又补一个洞（Python 行尾注释让整行逃逸）· D-048 落地**）
+- ✅ **T31-① 缺口本体先复现（不粉饰）**：真实体检报告 `docs/testres/检查单/lbb/2021_0907.pdf`（**列布局**：项目/结果/单位/参考区间分列）入档 ⇒ **正则路径 labs series=0 / points=0** ⇒ 确认 PLAN 未销账项「体检报告 PDF 列布局 labs=0」是**真缺口**，且**不是**环境差异。
+- ✅ **T31-② 缺口关闭方式 = 补一条「可机器判定」的路，而不是放宽正则**：新增门禁 `extraction-e2e.sh`（**零外部依赖**：cargo+curl+python3，不需要 LLM 网关/key/网络）⇒ 证明「**结构化抽取路径能救列布局**」这条性质**可离线复现**。判据五条（缺一即红）：**E1** 缺口复现（正则 labs=0）→ **E2** 回写 extraction 后 labs series≥3 且落在点名的指标上 → **E3** 真相层不被污染（塞一条**原文根本没有**的伪造指标「血糖999」⇒ 逐字闸必须判假、不得进 labs）→ **E4** 持久化（换新进程读同一 `EHR_HOME`，series 数不变 ⇒ 结果落在事件日志+派生索引，不是只在内存）→ **E5** 契约一致（extraction 端点在 OpenAPI 里是**真 operation**，非 stub→501）。
+- ✅ **T31-③ 真实端到端跑通（真 PDF + 真 LLM 网关 + 真服务端，不是 fixture）**：`tools/pdf_llm_extract.py`（新增）= 「从 ehr-api 取文本层 → 用**上游同一份** system prompt（`upstream-medme/packages/deid/prompts/extract_v1_system.txt`）与**同一份** `extract_params.json` 调 LLM（OpenAI 兼容 `/chat/completions`）→ 模型输出**原样** PUT 回 `PUT /documents/{sha}/extraction`（服务端跑上游 `deid::verify` 逐字闸）→ 复跑 `GET /persons/{pid}/labs`」。**先 dry-run 后回写**（脚本内置 `--dry-run`）。
+  - **dry-run（不回写）证据**：文本层 chars=11370 ⇒ 模型输出 **labs 64 条**（含「白细胞计数 4.7 10^9/L 3.5-9.5」「血红蛋白 125.0 g/L 130-175 L」「红细胞计数 3.73 L」等，**值与参考区间逐项对齐体检单**）⇒ 打印但**不落库**。
+  - **回写（真跑）证据**：回执 `labs_count=64, diagnoses_count=9, verified=false, verify_detail={"rejected":2}` ⇒ **逐字闸判假 2 条**（模型编的/原文对不上的）⇒ 落库的是**校验后**的结果 ⇒ **labs 投影 series=0 ⇒ 50 series / 50 points**（含「中性粒细胞百分比 %」「低密度脂蛋白胆固醇 mmol/L」「尿比重」等）。
+  - ⇒ **PLAN 未销账项「缺的是『把 PDF 送进 LLM』这一步的端到端脚本」本轮关闭**（此前重复列了两次的同一条缺口）。
+- ✅ **T31-④ 可移植性门又补一个洞（实测，非推演）**：`ci_portability_check.py` 原用 tokenize 的 COMMENT token 行号**整行**跳过 ⇒ **代码行尾挂的注释**（`X = "/home/lbb/..."  # 负向注入`）会把**整行**标成「非代码」⇒ 那一行里的机器专属路径/产物路径**逃过所有判据** ⇒ **门是空的**。⇒ 改为**逐行取「该行注释起点列之前的代码部分」**（注释在代码之前⇒整行跳过；注释在代码之后⇒只判代码部分；docstring 行仍按 `ast` 精确排除）。
+- ✅ **T31-⑤ 覆盖面补到 `tools/`**：可移植性门的受检集合从 31 → **33 个**（新增 `tools/pdf_llm_extract.py`）⇒ **「一份实现」的载体**又多了一个，必须纳入门；新门 `extraction-e2e.sh` 也登记进 `NEEDS_ENV`（它起真进程 ⇒ 必须经唯一来源 `ci/env.sh`）。
+- ✅ **T31-⑥ 证据链（缺一即算交付）**：
+  - ①**新门实测全绿**：`./extraction-e2e.sh` ⇒ 8 个 PASS、**fails=0**；关键证据：E1 `series=0`（缺口复现）→ 回执 `labs_count=3`（伪造项被逐字闸清空）→ 投影 `series=3 points=3 names=['总胆固醇','白细胞','空腹血葡萄糖']` → 重启后 `series=3`（E4 持久化）→ OpenAPI 里 extraction 是真 operation。
+  - ②**门是「真门」的负向证据**：往 `ci_portability_check.py` 注入**行尾注释**里的 `/home/lbb/medme-shared-target/release/ehr-api` ⇒ **红 fails=2**（「机器专属绝对路径」+「自己拼了产物路径」）⇒ 复原 ⇒ **fails=0** ⇒ **新判据有判别力**（旧实现对同一注入是绿的）。
+  - ③**Rust 侧零破坏**：`cargo test --all-targets --locked` **83 门全绿**（`Cargo.toml`/`Cargo.lock` **未改动** ⇒ **零新依赖**；本轮**未改任何 Rust 源码**）。
+  - ④**统一入口全量复跑：19 门全绿，总 fails=0**（`run-all-gates.sh` ⇒ `门禁数=19（本次执行 19）总 fails=0`；**新门已登记进 RUN 清单** ⇒ A1 完整性仍 PASS；`extraction-e2e.sh` ⇒ `[PASS] fails=0`）。**SKIP 2 个**：`container-smoke.sh`（需先重建镜像）、`agent-e2e.sh`（需真·第三方 agent CLI）——均写明原因。
+  - ⑤**真·端到端（真 PDF + 真网关）**：见 T31-③（0 ⇒ 50 series，逐字闸判假 2 条）。
+  - ⑥**后台卡死检查（D-010）**：**无 cargo/rustc 残留**；本轮起止的临时 ehr-api（`:19041`）已收割、临时目录已清；常驻只有两个 10-21 的陈旧 `ehr-api`（`:18999`/`:18991`）、两个 10-21/10-22 的取证进程（`:19031`/`:19032`）与两个 docker 容器 ⇒ **非卡死**。
+  - ⑦**私密数据不入库**：`docs/testres/`（真体检单 + LLM key）本就在 `.gitignore` 内 ⇒ 本轮**未**把它加进任何入库文件；LLM key/网关地址**只出现在 shell 环境变量**里，**未写入仓库任何文件**。
+- ⚠️ **本轮踩坑并已修（记录在案）**：**LLM 网关对 11KB prompt + `max_tokens=16384` 直接 504**（模型 `hy3`）⇒ 换小模型 `space-bunny`（`max_tokens` 同值）**一次成功**（prompt_tokens=6811 / completion=2776 / finish_reason=stop）⇒ 教训：**「模型/参数组合」是取证链的一部分，必须在证据里记名**（本轮记了 model、usage、finish_reason）⇒ 不能只记「LLM 抽取成功」。
+- 🔄 **下一步**：①**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；②**「家庭自测趋势」专用视图仍未做**；③公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token（当前 OCR 编排 `EHR_API_TOKENS` 为空 ⇒ **放行模式**，仅本地）；④ghcr 包可见性仍 private（OCR 镜像也尚未推 GHCR）；⑤真·第三方 MCP 客户端互通仍未验；⑥`.dcm`/DICOM worker 未做（能力清单已如实标 `enabled=false`）；⑦**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在；⑧MCP 侧仍**无 resources/prompts**；⑨`docs/API.md` 是**生成物**，改接口须跑 `./api-doc-check.sh --write`；⑩人员域三端点仍 501 且刻意不进 OpenAPI；⑪**OCR 镜像未推 GHCR / 未纳入 CI**；⑫`container-smoke.sh` 仍**未跑**（须先重建镜像）；⑬**下一次 push 到 `main` 触发真 runner 第三次真跑**（验证 T31 新门在 runner 上也绿；`extraction-e2e.sh` 依赖 `python3`/`curl`/cargo，runner 已有 rust 工具链）。
+- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（编译期内嵌，无构建链）；`docs/API.md` 是**生成物**；文档覆盖 **REST 面** + **MCP 面** + **SKILL.md 面** + **CI 可移植性面**——**四份文档/契约面全部有门**；**上游分类缺口**仍在；**上游审计口径缺口**已在 D-030 如实标注（**不造事件补齐**）；**OCR 镜像尚未推 GHCR、未纳入 CI**；**「手抄实现细节」残留**已治到 **stub 清单 / REST 路径 / 响应形状 / 文档字段 / 产物新鲜度 / 门禁编排完整性 / MCP 工具契约字段 / SKILL.md 字段承诺 / CI 可移植性（含 Python 内层 + workflow + `tools/`）/ 「缺依赖不得静默跳过」** 十个面——**「体检报告列布局 labs=0」本轮关闭**（离线可判的门 + 真 PDF→真 LLM→回写 0⇒50）。
+
 ## 当前状态（2026-10-27 · **T30「CI 真 runner 首次验证」——第一次真跑就红了：Web 页面 JS 整文件是 SyntaxError，而这个洞被一道「静默 SKIP」的检查盖了几个月（真缺陷已修 + 门禁语义改「缺依赖即红」）· D-047 落地**）
 - ✅ **T30-① 本轮唯一目标：把 CI 真的跑一次**（D-046 未销账①原话：「下次 push 到 `main` 应当是第一次真跑」）。已把 T29 提交推上 `main`（sha `f5a85c0`）⇒ 触发真 GitHub runner ⇒ **run `39697214296`**。
 - ✅ **T30-② 真跑第一次就红了——红的是真缺陷，不是环境差异**：run `39697214296` 的**前 7 步全 success**（`checkout` / `装 Rust 工具链` / `拉取上游`（`ci/fetch-upstream.sh`）/ `TUNA 通道` / `构建 debug+release --locked` / `cargo test` / `同步产物`）⇒ **第一次拿到真 runner 的证据**（此前全是本机模拟）；第 8 步 `统一门禁入口` **failure** ⇒ `[FAIL] web-e2e.sh 退出码=1 fails=1 / FAIL W2 js syntax` ⇒ 总 fails=1，**17/18 门在真 runner 上绿**。
