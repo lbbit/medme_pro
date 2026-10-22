@@ -54,6 +54,24 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
+## 当前状态（2026-10-27 · **T30「CI 真 runner 首次验证」——第一次真跑就红了：Web 页面 JS 整文件是 SyntaxError，而这个洞被一道「静默 SKIP」的检查盖了几个月（真缺陷已修 + 门禁语义改「缺依赖即红」）· D-047 落地**）
+- ✅ **T30-① 本轮唯一目标：把 CI 真的跑一次**（D-046 未销账①原话：「下次 push 到 `main` 应当是第一次真跑」）。已把 T29 提交推上 `main`（sha `f5a85c0`）⇒ 触发真 GitHub runner ⇒ **run `39697214296`**。
+- ✅ **T30-② 真跑第一次就红了——红的是真缺陷，不是环境差异**：run `39697214296` 的**前 7 步全 success**（`checkout` / `装 Rust 工具链` / `拉取上游`（`ci/fetch-upstream.sh`）/ `TUNA 通道` / `构建 debug+release --locked` / `cargo test` / `同步产物`）⇒ **第一次拿到真 runner 的证据**（此前全是本机模拟）；第 8 步 `统一门禁入口` **failure** ⇒ `[FAIL] web-e2e.sh 退出码=1 fails=1 / FAIL W2 js syntax` ⇒ 总 fails=1，**17/18 门在真 runner 上绿**。
+- ✅ **T30-③ 真缺陷：Web 页面 JS 整文件是 SyntaxError ⇒ Web 管理端在浏览器里一行都跑不起来**：`ehr-api/web/index.html` 的 `j()` 里 `const t`（token）与 `const t`（响应文本）**同作用域重复声明** ⇒ 整个 `<script>` 解析失败。**为什么几个月没被发现**：`web-e2e.sh` 的 W2 用 `node --check` 校验 JS 语法，而**本机没有 node** ⇒ 原实现走 `else` 分支 `echo "SKIP W2 js syntax"` ⇒ **W2 在本机从未真正执行** ⇒ W1（HTML 200/字段）W3（业务流/字段交叉核对）全绿 ⇒ **门禁全绿而产品是坏的**。⇒ 装 node v20.18.0（TUNA 通道）后本机 `node --check` 直接报 `SyntaxError: Identifier 't' has already been declared`（第 22 行）⇒ 修复：响应文本改名 `txt` ⇒ `node --check` **rc=0**。
+- ✅ **T30-④ 门禁语义收紧：缺依赖不再「静默 SKIP」，改为红**（D-042 决策②的收紧版）：W2 的 else 分支由 `SKIP` 改为 `bad "W2 js syntax 未执行（node 不存在）"` + 打印修复路径 ⇒ **「因为缺依赖而假装通过」的检查从门禁体系里消失**。
+- ✅ **T30-⑤ CI 必须自己装 node，否则 W2 在 runner 上也会被跳过**：workflow 新增步骤「装 Node（Web 门禁 W2 的 JS 语法检查需要它）」，走 **TUNA nodejs-release**（D-007 同族），v20.18.0，`node --version` 打印留证 ⇒ **真 runner 上该步骤 success**（run `39698485007`）。
+- ✅ **T30-⑥ 顺手修掉 workflow 里一处真 bug（CI 日志抓到的）**：「门禁失败时打印每道门的原始输出」步骤原写 `ls -la "$CARGO_TARGET_DIR"/*/ehr-api` 但**没 source `ci/env.sh`** ⇒ `set -euo pipefail` 下 `CARGO_TARGET_DIR: unbound variable` ⇒ **兜底步骤自己先炸** ⇒ 门禁失败时**拿不到任何产物信息**。⇒ 改为先 `. ./ci/env.sh`（与 D-045 决策③「产物路径单一来源」一致，且满足 D-046 判据 C）。
+- ✅ **T30-⑦ 证据链（缺一即算交付）**：
+  - ①**真 runner 首次验证（run 39697214296，sha f5a85c0）**：前 7 步 success、第 8 步 failure 且失败原因**精确到判据**（`FAIL W2 js syntax`）⇒ **CI 不是摆设**（它抓到了本机抓不到的缺陷）。
+  - ②**缺陷是实测定位**：node v20.18.0 + `node --check` ⇒ `SyntaxError` 第 22 行 ⇒ 指向 `j()` ⇒ 改名 `txt` ⇒ rc=0。
+  - ③**门是真门的负向证据**：把 `txt` 故意改回 `t` ⇒ 重编译 release ⇒ `./web-e2e.sh` ⇒ **`fails=1`**（W2 红）⇒ 复原 ⇒ **`fails=0`** ⇒ W2 有判别力。
+  - ④**本机统一入口全量复跑：18 门全绿，总 fails=0**（`run-all-gates.sh` ⇒ A1 PASS + 18 个 `[PASS] … fails=0`；SKIP 2 个同前）。**覆盖面扩大**：`web-e2e.sh` 由「SKIP W2」变成「**PASS W2**」⇒ 一道从未执行的检查现在真执行。
+  - ⑤**Rust 侧零破坏**：`cargo test --all-targets --locked` **83 门全绿**；`Cargo.toml`/`Cargo.lock` **未改动** ⇒ **零新依赖**（`web/index.html` 经 `include_str!` 内嵌 ⇒ 只影响重编译，不改逻辑）。
+  - ⑥**后台卡死检查（D-010）**：**无 cargo/rustc 残留**；常驻只有两个 10-21 的陈旧 `ehr-api` 进程（`:18999`/`:18991`）与两个 docker 容器 ⇒ **非卡死**；node 装在 `~/.local/node-v20.18.0-linux-x64`（非临时进程）。
+  - ⑦**第二次真跑（run 39698485007，sha 7b0cfe6）**：推修复后触发；**`装 Node` 步骤 success**，`构建` 步骤在跑 ⇒ **全绿结论待下一轮核对**（本段落笔时未出结果）。
+- ⚠️ **本轮踩坑并已修（记录在案）**：**「本机缺依赖 ⇒ 门静默跳过」是比「门红」更坏的失败模式**（W2 跳过 ⇒ 整文件 SyntaxError 的 Web 端活了几个月）；以及**「门禁失败时的兜底步骤自己失败 ⇒ 你在最需要证据的时候没有证据」**（兜底步骤因 `CARGO_TARGET_DIR` 未绑定而炸掉）。⇒ 纪律升级两条：**① 任何检查项缺依赖时必须红或「不存在」，不允许「静默通过」；依赖必须写进 CI 安装步骤**；**② 失败兜底路径必须与主路径共享同一份事实来源**。
+- 🔄 **下一步**：①**核对第二次真跑（39698485007）结论**（应为 18/18 绿）；②**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；③「体检报告 PDF 列布局 labs=0」缺口：extraction 管线已就位，缺的是「把 PDF 送进 LLM」这一步的**端到端脚本**；④「家庭自测趋势」专用视图仍未做；⑤公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token（当前 OCR 编排 `EHR_API_TOKENS` 为空 ⇒ **放行模式**，仅本地）；⑥ghcr 包可见性仍 private（OCR 镜像也尚未推 GHCR）；⑦真·第三方 MCP 客户端互通仍未验；⑧`.dcm`/DICOM worker 未做（能力清单已如实标 `enabled=false`）；⑨**上游分类缺口**（`parser::classify` 认「出院记录」不认「出院小结」）仍在；⑩MCP 侧仍**无 resources/prompts**；⑪`docs/API.md` 是**生成物**，改接口须跑 `./api-doc-check.sh --write`；⑫人员域三端点仍 501 且刻意不进 OpenAPI；⑬**OCR 镜像未推 GHCR / 未纳入 CI**；⑭`container-smoke.sh` 仍**未跑**（须先重建镜像）。
+- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（编译期内嵌，无构建链）；**Web 端刚被 CI 抓出「整文件 SyntaxError」⇒ 说明「本机门禁全绿」曾长期不等于「页面能用」**（本轮起 W2 在本机与 CI 都真执行）；`docs/API.md` 是**生成物**；文档覆盖 **REST 面** + **MCP 面** + **SKILL.md 面** + **CI 可移植性面**——**四份文档/契约面全部有门**；**上游分类缺口**仍在；**上游审计口径缺口**已在 D-030 如实标注（**不造事件补齐**）；**OCR 镜像尚未推 GHCR、未纳入 CI**；**「手抄实现细节」残留**已治到 **stub 清单 / REST 路径 / 响应形状 / 文档字段 / 产物新鲜度 / 门禁编排完整性 / MCP 工具契约字段 / SKILL.md 字段承诺 / CI 可移植性（含 Python 内层 + workflow）/ 「缺依赖不得静默跳过」** 十个面——**「统一入口接入 CI」已落地并完成**第一次真 runner 验证**（抓出真缺陷 ⇒ 修 ⇒ 复跑中）。
 ## 当前状态（2026-10-27 · **T29「可移植性门覆盖到 Python 内层实现与 CI workflow」——T28 那道门**自己有个洞**：Python 内层实现完全在覆盖之外，实测注入机器专属路径仍绿；洞里藏着 3 类真缺陷（已修）+ 判据 C 原本判「注释里提到 source」也算数（已修）· D-046 落地**）
 - ✅ **T29-① 接手工作树的第一件事仍是「让它编译并跑一遍」（D-039 新坑② 纪律沿用）**：`cd ehr-api && cargo test --all-targets --locked` ⇒ **83 门全绿** ⇒ 确认**工作树可编译可跑**。（本轮**未改任何 Rust 代码** ⇒ `Cargo.toml`/`Cargo.lock` **未改动** ⇒ **零新依赖**。）
 - ✅ **T29-② 缺口定位（D-045 未销账项⑮「`ci-portability-check.sh` 判据**未覆盖 Python 内层实现**（当前只查 `*.sh`）」的正面处置）**：T28 那道门**只扫 `*.sh`** ⇒ **每道门的 Python 内层实现完全在覆盖之外** ⇒ 而本仓库**每道门都是「.sh 包装 + .py 内层」**（`artifact_freshness` / `doc_contract` / `mcp_contract` / `skill_doc_field`）⇒ **覆盖面比看上去小一半**。
