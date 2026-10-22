@@ -1,5 +1,24 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-051 2026-10-22 · **T34「MCP resources 面落地」——第二个协议面补齐；并用「跨面不变量」把它钉在 tools 面旁边（`resources/read` == `tools/call`，逐字相等）**
+
+**为什么做**：PLAN 从 T25 起连续多轮挂着同一条未销账项：「**MCP 侧仍无 resources/prompts**」。事实核对：此前 `initialize` 只宣告 `capabilities.tools`，`mcp.rs` 里**没有任何** `resources/*` 方法 ⇒ 该面**根本不存在**（不是「文档漏写」，是协议面缺失）⇒ 只吃 MCP 的宿主只能「调动作」，无法「按 URI 定位只读上下文」。
+**关键结构决策①：resources = 只读上下文，不是「第二套工具」**。URI 直接定位「某个东西本身」（某人档案 / 某人 labs / 审计视图 / 能力清单）⇒ **只读**：不改真相层 ⇒ **ro token 也可读**（与读侧工具同权限口径）⇒ 资源的成功响应**没有** tools 那种 `isError` 之外的差别，失败走 `isError=true` + `result._code`。
+**关键结构决策②（本轮最关键）：跨面一致性不靠「两边写得像」，靠「**共享 payload builder**」**。把 tools 面「取数 + 成形」抽成**一份** builder（`persons_payload` / `timeline_payload` / `labs_payload` / `medications_payload` / `conditions_payload` / `measurements_payload` / `audit_payload` / `capabilities_payload` / `documents_payload` / `document_detail_payload`）⇒ `tools/call` 与 `resources/read` **都调它** ⇒ D2「一个语义只允许一处实现」在**协议面之间**成立 ⇒ resources 面**不可能**与 REST 面分叉（两者都走既有领域函数 `vaults::labs_aggregate` / `entries::measurements_projection` / `audit::audit_view` / `capabilities::capability_manifest`）⇒ **零新领域逻辑、零新依赖**（`Cargo.toml`/`Cargo.lock` 未改动）。
+**关键结构决策③：新增干跑面 `--print-mcp-resources`（机器可读 stdout，证据行走 stderr）**。输出 `{count, templates, uris[], template_uris[]}` ⇒ 门禁与文档**从实现取值**（URI 表不手抄），与 T15/T16 同款纪律 ⇒ 也是 D-050「派生的期望值必须非空」的同款应用。
+**关键结构决策④：错误码必须分得开，否则 agent 只会瞎重试**。未知资源 URI ⇒ **-32005**（改 URI）；查无此人 ⇒ **-32001**（换人，与工具面同码）；缺 `uri` 参数 ⇒ **-32602**（改参数）⇒ 三码互不混用。**`prompts` 面本轮仍不提供** ⇒ 理由：本项目的 agent 用法是「查档」不是「填模板」⇒ 不宣告一个空面比宣告一个无用面更诚实（若将来要做，须像 resources 一样配门）。
+**关键结构决策⑤：门禁要有判别力 ⇒ 判据必须落在「能真分叉」的地方**。新门 `mcp-resources-e2e.sh` 七条判据：R1 公布==实现（双向，派生）· R2 **跨面不变量**（10 个域各比一次，逐字相等）· R3 只读（ro token）· R4 错误语义分得开 · R5 握手宣告 resources · R6 **每个公布的模板都真能读**（占位符用真值替换 ⇒ 堵「挂名不实现」）· R7 **文档面 == 实现**（`tool-contracts.md` 的 URI 表 vs 干跑清单 ⇒ 堵「文档变假」）。**门已登记进 RUN 清单**（A1 完整性仍 PASS，RUN=21 / SKIP=1）。
+**证据链（缺一即算交付）**：
+①**新门实测全绿**：`./mcp-resources-e2e.sh` ⇒ **fails=0**；`resources_list.uris_match_impl`（3 个具体资源）· `resources_templates.match_impl`（**11** 个模板）· `templates_readable=11/11` · 10 个 `face.*` 跨面比较全 PASS · `unknown_uri=-32005` / `unknown_person=-32001` / `missing_uri=-32602` · `ro_token.resources_read=ok`。
+②**门是「真门」的负向证据（实撞 2 次，每次复原）**：①**注入跨面分叉**（在 `resource_contents()` 里给 resources 面多加一个 `__diverge__` 键）⇒ **红 fails=10 / rc=1**（10 个 `face.*` 全红）⇒ 复原 ⇒ 绿；②**注入文档漂移**（`tool-contracts.md` 里 `ehr://audit` → `ehr://auditX`）⇒ **红 fails=1**（R7）⇒ 复原 ⇒ 绿。
+③**一次「注入无效」的诚实记录（本轮最有价值的一处观察）**：第一次注入我改的是 **builder 内部**（`persons_payload` 加字段）⇒ 门**照样绿** ⇒ 因为**两面共用它** ⇒ 这恰好**证明共享 builder 是有效的**（两面不可能分叉）⇒ 能触发分叉的注入点只可能在**面的包装层**（`resource_contents`）⇒ 门就钉在那里。⇒ **纪律升级：负向注入必须打在「该判据声称要保护的那条边界」上**；打在共享层无效**不是门的洞，而是该设计已达成的效果** —— 但**必须明说**，否则会被误读成「门不灵」。
+④**Rust 侧零破坏**：`cargo test --all-targets --locked` ⇒ **83 门全绿**；`Cargo.toml`/`Cargo.lock` **未改动** ⇒ **零新依赖**。
+⑤**统一入口全量复跑：21 门全绿，总 fails=0**（`run-all-gates.sh` ⇒ A1 PASS + 21 个 `[PASS] … fails=0`；末行「门禁数=21（本次执行 21）总 fails=0」）⇒ 覆盖面净增一道真跑的门（20 → 21）。
+⑥**产物新鲜度**：新增 CLI 面 ⇒ 需重编译 debug+release ⇒ 同步 shared-target（**`cp .new && mv` 换 inode**，绕开 D-049 记录的 `Text file busy`）⇒ `artifact-freshness-check.sh` **fails=0**（两份产物 sha256 逐字一致）。
+⑦**文档面**：`tool-contracts.md` 新增「resources 面」章节（URI 表 + 等价工具 + 形状 + 只读/同源纪律）+ 错误码表补 **-32005** ⇒ 且**由 R7 机器核对**。
+⑧**后台卡死检查（D-010）**：**无 cargo/rustc 残留**；临时 ehr-api 由门禁脚本 `trap` 自清；常驻只剩两个 docker 容器 ⇒ **非卡死**。
+**未销账/下一步**：①**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；②**MCP 侧仍无 prompts**（resources 已补；倾向**不提供**，须显式记「不提供」的理由）；③**真·第三方 MCP 客户端互通仍未验**（含 resources 面的真客户端消费）⇒ 优先级上升；④公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑤ghcr 包可见性仍 private（OCR 镜像未推 GHCR、未纳入 CI）；⑥`.dcm`/DICOM worker 未做；⑦上游分类缺口仍在；⑧`docs/API.md` 是**生成物**（本轮**未改 REST 接口** ⇒ 无需重生成）；⑨人员域三端点仍 501 且刻意不进 OpenAPI；⑩**T34 新门尚未在真 GitHub runner 上验过**（本轮含 Rust 源码改动 ⇒ 需一次 push 触发真 runner）。
+
 ## D-050 2026-10-22 · **T33「容器化门从 SKIP 转正为 RUN」——重建镜像让 `container-smoke.sh` 真正存在；并当场抓出该门自身的一个假绿洞：「派生的期望值为空 ⇒ 空==空 ⇒ 判 PASS」**
 
 **为什么做**：PLAN 连续多轮（自 T25 起）都挂着同一条未销账项：「**`container-smoke.sh` 仍**未跑**（须先重建镜像）**」。事实核对：运行中的 `deploy-ehr-api-1` 用的是 **10-21 的旧镜像**（image `a4edd6b7…`）⇒ 跑它只会红在陈旧产物 ⇒ 该门被登记进 `run-all-gates.sh` 的 **SKIP 清单**（理由写明「需要先重建镜像」）⇒ **这道门从 10-21 起就没存在过**。而「容器化 e2e」恰是目标验收①「docker-compose 一键起」的最后一道机器判据。
@@ -20,6 +39,10 @@
 ⑧**后台卡死检查（D-010）**：**无 cargo/rustc 残留**、**无 copilot 残留**；临时目录由脚本自清；常驻只剩 10-21 陈旧取证进程（`:18999`/`:18991`/`:19031`/`:19032`）、本轮新容器（`:8585`）与 10-21 的 OCR 容器 ⇒ **非卡死**。
 **新坑一则（D4 同族）**：
 ①**「派生的期望值为空」会让门同时假红与假绿**。本轮实测：同一个根因（容器内 `/tmp/h` 不存在 ⇒ 派生的路径数为空）⇒ 步骤 4 **假红**（17 vs 空）、步骤 5 **假绿**（空 vs 空）⇒ **若只看汇总的 fails=1，会以为「门红了 ⇒ 服务坏了」**；而真实病灶在**门自己**。⇒ 纪律升级（已写入代码）：**凡期望值由现场派生，必须先断言非空，再比较**。这条与 D-046 决策⑨（行尾注释让整行逃逸）、D-048 决策⑨（Python 注释判定）是**同一族第三次复发**：**「判据必须判事实」**——空值不是事实。
+**关键结构决策⑦：门转正后，CI 必须补齐前置——而不是把门退回 SKIP**。把 `container-smoke.sh` 移入 RUN 清单后的**第一次 push**（sha `33d138f`）⇒ 真 runner run `39721077890` **第 10 步「统一门禁入口」failure** ⇒ 原因**不是代码坏了**，而是 **runner 上没有镜像**（容器门的前置缺失；本机有代理 7890、runner 没有）⇒ 两条路：①把门退回 SKIP ⇒ **等于把刚发现的缺口重新藏起来**（D-047「静默 SKIP 比门红更坏」）；②**给 CI 补前置** ⇒ 采纳。`ci-gates.yml` 增两步：「构建容器镜像」（**直连 TUNA，build-args 不含本机代理**）+「起 compose 容器（`--no-build`）」——**`--no-build` 是必需的**：compose 的 build-args 指向 `host.docker.internal:7890`，在 runner 上不可解析，若让 compose 触发重建必失败。⇒ 推 `aaac47e` ⇒ run `39721697944` **全绿**。
+**证据链补充（真 runner）**：
+⑦**run `39721697944`（sha `aaac47e`）= 全绿 ✅**：13 步中 **12 步 success**（含**新增的镜像构建步**与**起容器步**）+ 步骤 13「门禁失败时打印每道门的原始输出」= **skipped** ⇒ 门全绿时兜底**正确地不跑**（与 D-047/D-048 同款对照）⇒ **20 门（含 `container-smoke.sh`）在真 runner 上全绿**。
+⑧**途中那次红是最有价值的证据**：**本机绿 ≠ runner 绿**（差异就是代理）⇒ 「把门转正」这件事**在真 runner 上同样必须补齐前置**。⇒ 纪律升级：**门禁清单的任何变化，都必须同时回答「CI 上这道门的前置存在吗」**。
 **未销账/下一步**：①**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；②MCP 侧仍无 resources/prompts；③公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token（当前 `EHR_API_TOKENS` 为空 ⇒ 放行模式，仅本地）；④ghcr 包可见性仍 private（OCR 镜像未推 GHCR、未纳入 CI）；⑤**本轮新增的 `container-smoke.sh` 门尚未在真 GitHub runner 上验过**（runner 无本机代理 7890 ⇒ 需先有 CI 侧镜像构建通道）；⑥真·第三方 MCP 客户端互通仍未验；⑦`.dcm`/DICOM worker 未做；⑧上游分类缺口（认「出院记录」不认「出院小结」）仍在；⑨`docs/API.md` 是**生成物**，改接口须跑 `./api-doc-check.sh --write`（本轮**未改接口** ⇒ 无需重生成）；⑩人员域三端点仍 501 且刻意不进 OpenAPI；⑪`agent-e2e.sh` 本轮补跑 3/3 PASS（rc=0），但仍按 D-048 分层留在 SKIP 清单作按需补跑项。
 
 ## D-049 2026-10-22 · **T32「家庭自测趋势」专用视图——把「家庭自测值 ≠ 医院指标」这条上游结构约束，在 Web 端显式做成一屏；并给它配一道「页面读的字段必须来自运行时 OpenAPI」的门（字段清单与 schema 两边都派生，不手抄）**

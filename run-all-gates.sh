@@ -40,6 +40,7 @@ RUN_LIST=(
   skill-doc-field-check.sh      # T27 SKILL.md 字段承诺面（逐命令 vs 真响应）
   skill-rest-check.sh           # T3 SKILL REST 承诺
   mcp-e2e.sh                    # D-017 MCP e2e
+  mcp-resources-e2e.sh          # T34 MCP resources 面（跨面不变量：resources/read == tools/call）
   auth-e2e.sh                   # T4 鉴权 e2e
   entries-e2e.sh                # D-028 写侧条目
   extraction-e2e.sh             # T31 体检报告列布局 labs=0（抽取路径能救列布局；零外部依赖）

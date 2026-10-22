@@ -16,6 +16,7 @@ async fn main() -> Result<()> {
     let mut print_openapi = false;
     let mut print_api_doc = false;
     let mut print_mcp_tools = false;
+    let mut print_mcp_resources = false;
     let mut print_rest_manifest = false;
     let mut print_capabilities = false;
     let mut rebuild_pid: Option<String> = None;
@@ -30,6 +31,8 @@ async fn main() -> Result<()> {
             print_api_doc = true;
         } else if a == "--print-mcp-tools" {
             print_mcp_tools = true;
+        } else if a == "--print-mcp-resources" {
+            print_mcp_resources = true;
         } else if a == "--print-rest-manifest" {
             print_rest_manifest = true;
         } else if a == "--print-capabilities" {
@@ -43,7 +46,7 @@ async fn main() -> Result<()> {
             rebuild_pid = Some(v.to_string());
         } else {
             eprintln!(
-                "[ERROR] unknown argument: {a}\nusage: ehr-api [--addr=HOST:PORT] [--print-openapi] [--print-api-doc] [--print-mcp-tools] [--print-rest-manifest] [--print-capabilities] [--rebuild-index | --rebuild-index=dry-run | --rebuild-index=PID]\n(env EHR_HOME, EHR_ADDR, EHR_API_TOKENS, EHR_API_TOKEN, RUST_LOG)"
+                "[ERROR] unknown argument: {a}\nusage: ehr-api [--addr=HOST:PORT] [--print-openapi] [--print-api-doc] [--print-mcp-tools] [--print-mcp-resources] [--print-rest-manifest] [--print-capabilities] [--rebuild-index | --rebuild-index=dry-run | --rebuild-index=PID]\n(env EHR_HOME, EHR_ADDR, EHR_API_TOKENS, EHR_API_TOKEN, RUST_LOG)"
             );
             std::process::exit(2);
         }
@@ -54,7 +57,7 @@ async fn main() -> Result<()> {
     // serve 仅在其下建派生 vaults/ 子目录，registry/persons.jsonl 首写时才建)。
     // T4：鉴权表从 env 读（EHR_API_TOKENS / EHR_API_TOKEN）。格式错误 ⇒ 启动失败（D5：配置错误不静默退化）。
     let (st, token_set) =
-        ehr_api::prepare_home_and_state_auth(&home_in, !(print_openapi || print_api_doc || print_mcp_tools || print_rest_manifest || print_capabilities))?;
+        ehr_api::prepare_home_and_state_auth(&home_in, !(print_openapi || print_api_doc || print_mcp_tools || print_mcp_resources || print_rest_manifest || print_capabilities))?;
     // D1：生效地址单点计算一次，[证据]行与实际 bind 用同一个值。
     let addr = addr_arg.or_else(|| std::env::var("EHR_ADDR").ok()).unwrap_or_else(|| "127.0.0.1:8443".into());
 
@@ -62,6 +65,8 @@ async fn main() -> Result<()> {
         "dry-run(print-openapi)"
     } else if print_api_doc {
         "dry-run(print-api-doc)"
+    } else if print_mcp_resources {
+        "dry-run(print-mcp-resources)"
     } else if print_mcp_tools {
         "dry-run(print-mcp-tools)"
     } else if print_rest_manifest {
@@ -119,6 +124,20 @@ async fn main() -> Result<()> {
             env!("CARGO_PKG_VERSION"),
             st.home.display(),
             man["count"], man["read"], man["write"]
+        );
+        return Ok(());
+    }
+
+    // T34：MCP 资源清单干跑（机器可读 stdout，证据行走 stderr）。
+    // 用途：让门禁脚本与文档**从实现取值**（资源 URI 模板不手抄）——同 T15 的纪律。
+    if print_mcp_resources {
+        let man = ehr_api::mcp::resource_manifest();
+        println!("{}", serde_json::to_string_pretty(&man)?);
+        eprintln!(
+            "[证据] ehr-api v{} | mode=dry-run(print-mcp-resources) | EHR_HOME={} | resources={} templates={}",
+            env!("CARGO_PKG_VERSION"),
+            st.home.display(),
+            man["count"], man["templates"]
         );
         return Ok(());
     }

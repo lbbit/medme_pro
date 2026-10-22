@@ -30,6 +30,8 @@ const ERR_INTERNAL: i64 = -32002;
 const ERR_UNSUPPORTED_TYPE: i64 = -32003;
 /// 权限不足（只读 token 调写侧工具）——与「参数错了」区分开，agent 据此换 token 而不是改参数。
 const ERR_FORBIDDEN: i64 = -32004;
+/// 未知资源 URI（不是「查无此人」）——与 -32001 区分，agent 据此改 URI 而不是换人。
+const ERR_UNKNOWN_RESOURCE: i64 = -32005;
 
 /// 写侧单件上限（解码后字节数）。防止 agent 一口气塞 500MB 把内存打爆。
 /// 32MB 覆盖绝大多数病历 PDF/影像元数据；超出即 -32602（改参数，不重试）。
@@ -79,10 +81,14 @@ pub fn handle_message_with_scope(
     let params = msg.get("params").cloned().unwrap_or(json!({}));
 
     let resp = match method {
-        // 握手：声明能力（tools）。不宣告 resources/prompts —— 本项目暂不提供。
+        // 握手：声明能力（tools + resources）。**resources 是只读上下文**（T34），
+        // prompts 仍不宣告 —— 本项目不提供 prompt 模板（agent 的用法是「查档」，不是「填模板」）。
         "initialize" => ok_obj(id.clone(), json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": { "tools": { "listChanged": false } },
+            "capabilities": {
+                "tools": { "listChanged": false },
+                "resources": { "subscribe": false, "listChanged": false }
+            },
             "serverInfo": { "name": "medme-ehr", "version": env!("CARGO_PKG_VERSION") },
             "instructions": "多人电子健康档案工具集。读侧：person_id 为 UUID；先用 list_persons 拿人，再用 search_records / get_labs / get_medications / get_conditions / get_measurements / get_timeline / get_audit 查档；上传前先用 get_capabilities 看本构建能吃什么文件。写侧：create_person 建档、upload_document 传原件（二进制用 base64）。所有内容来自原件 CAS+事件日志，text/extraction 透传不猜。",
         })),
@@ -104,6 +110,37 @@ pub fn handle_message_with_scope(
                 ));
             }
             call_tool(st, id.clone(), &name, &args)
+        }
+        // ---------- 读侧 resources 面（T34）----------
+        // 资源 = **按 URI 定位的只读上下文**。与 tools 的区别：tools 是「动作」，
+        // resources 是「某个东西本身」。两者读的是**同一份真相层**（同一批领域函数），
+        // 不允许出现「MCP resource 里有的、REST 里查不到」的分叉（D2 跨面不变量）。
+        "resources/list" => ok_obj(id.clone(), json!({ "resources": resource_schemas() })),
+        "resources/templates/list" => ok_obj(id.clone(), json!({ "resourceTemplates": resource_templates() })),
+        "resources/read" => {
+            let uri = params
+                .get("uri")
+                .and_then(|u| u.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    (
+                        INVALID_PARAMS,
+                        "`uri` is required and must be a non-empty string".to_string(),
+                    )
+                });
+            let uri = match uri {
+                Ok(u) => u,
+                Err((code, why)) => {
+                    return Some(tool_err(
+                        id.clone(),
+                        code,
+                        format!("invalid arguments for resources/read: {why}"),
+                    ))
+                }
+            };
+            // 资源是**只读**上下文 ⇒ ro token 也可读（与读侧工具同权限口径）。
+            read_resource(st, id.clone(), &uri)
         }
         "" => err_obj(id.clone(), INVALID_REQUEST, "missing method"),
         other => err_obj(id.clone(), METHOD_NOT_FOUND, &format!("unknown method: {other}")),
@@ -176,21 +213,11 @@ fn call_tool(st: &Arc<AppState>, id: Value, name: &str, args: &Value) -> Value {
         Err((code, why)) => return tool_err(id, code, format!("invalid arguments for tool `{name}`: {why}")),
     };
     let outcome = tokio::task::block_in_place(|| match prepared {
-        Prepared::Persons => st.store.list().map(|v| json!({ "count": v.len(), "persons": v })).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))),
-        Prepared::Timeline { ref pid } => {
-            require_person(st, pid)?;
-            let vault = vaults::open_person_vault(&st.home, pid)?;
-            let items: Vec<vaults::TimelineItem> = vault
-                .timeline()
-                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-                .into_iter()
-                .map(vaults::TimelineItem::from)
-                .collect();
-            // D-038：**复用 REST 面的同一个信封 struct**（不再手写一份 `json!` 拼装）
-            // ⇒ REST 与 MCP 两侧的形状**不可能分叉**（D2：一个语义只允许一处实现）。
-            serde_json::to_value(vaults::TimelineReply { count: items.len(), items, person_id: pid.clone() })
-                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-        }
+        Prepared::Persons => persons_payload(st),
+        // D-038：**复用 REST 面的同一个信封 struct**（不再手写一份 `json!` 拼装）
+        // ⇒ REST 与 MCP 两侧的形状**不可能分叉**（D2：一个语义只允许一处实现）。
+        // T34：tools 与 resources 读的是**同一个** payload builder（同一份真相层）。
+        Prepared::Timeline { ref pid } => timeline_payload(st, pid),
         Prepared::Search { ref pid, ref q, limit } => {
             require_person(st, pid)?;
             let vault = vaults::open_person_vault(&st.home, pid)?;
@@ -205,69 +232,14 @@ fn call_tool(st: &Arc<AppState>, id: Value, name: &str, args: &Value) -> Value {
             })
             .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
         }
-        Prepared::Labs { ref pid } => {
-            require_person(st, pid)?;
-            let vault = vaults::open_person_vault(&st.home, pid)?;
-            let reply = vaults::labs_aggregate(&vault, pid)
-                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-        }
-        Prepared::Medications { ref pid } => {
-            require_person(st, pid)?;
-            let vault = vaults::open_person_vault(&st.home, pid)?;
-            let reply = vaults::meds_aggregate(&vault, pid)
-                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-        }
-        Prepared::Conditions { ref pid } => {
-            require_person(st, pid)?;
-            let vault = vaults::open_person_vault(&st.home, pid)?;
-            let reply = vaults::conditions_aggregate(&vault, pid)
-                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-        }
-        Prepared::Measurements { ref pid, ref q } => {
-            require_person(st, pid)?;
-            let vault = vaults::open_person_vault(&st.home, pid)?;
-            let reply = entries::measurements_projection(&vault, pid, q)
-                .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
-            serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-        }
-        Prepared::Audit { ref q } => {
-            // ⚠️ 审计是**全局视图**：不按 person 判存在（问「某人有哪些审计条目」答「没有」是合法答案，
-            //    与 REST 面口径一致：未知人过滤 ⇒ 0 条，不是 404/500）。
-            let reply = audit::audit_view(&st.home, q)
-                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
-            serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-        }
-        Prepared::Capabilities => {
-            // D-034 未销账⑫：**复用同一份** `capabilities::capability_manifest()`
-            // （与 REST `GET /api/v1/capabilities` 逐字同源）⇒ 只吃 MCP 的宿主
-            // 也能判断「我的文件能不能传」，不必猜、不必看日志。
-            serde_json::to_value(capabilities::capability_manifest())
-                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-        }
-        Prepared::Documents { ref pid } => {
-            require_person(st, pid)?;
-            let vault = vaults::open_person_vault(&st.home, pid)?;
-            let items: Vec<vaults::DocumentListItem> = vaults::list_document_items(&vault)
-                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            serde_json::to_value(vaults::DocumentListReply { count: items.len(), items, person_id: pid.clone() })
-                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-        }
-        Prepared::DocumentDetail { ref pid, ref sha } => {
-            require_person(st, pid)?;
-            if !vaults::is_sha(sha) {
-                return Err(ApiError(StatusCode::BAD_REQUEST, format!("malformed sha256: {sha}")));
-            }
-            let vault = vaults::open_person_vault(&st.home, pid)?;
-            match vaults::document_detail(&vault, sha) {
-                Ok(Some(d)) => serde_json::to_value(d)
-                    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-                Ok(None) => Err(ApiError(StatusCode::NOT_FOUND, format!("no indexed document: {sha}"))),
-                Err(e) => Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))),
-            }
-        }
+        Prepared::Labs { ref pid } => labs_payload(st, pid),
+        Prepared::Medications { ref pid } => medications_payload(st, pid),
+        Prepared::Conditions { ref pid } => conditions_payload(st, pid),
+        Prepared::Measurements { ref pid, ref q } => measurements_payload(st, pid, q),
+        Prepared::Audit { ref q } => audit_payload(st, q),
+        Prepared::Capabilities => capabilities_payload(),
+        Prepared::Documents { ref pid } => documents_payload(st, pid),
+        Prepared::DocumentDetail { ref pid, ref sha } => document_detail_payload(st, pid, sha),
         // ---------- 写侧（D-019）：建档 / 传原件 ----------
         Prepared::CreatePerson { ref req } => {
             let p = st.store.create(req).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
@@ -292,6 +264,112 @@ fn call_tool(st: &Arc<AppState>, id: Value, name: &str, args: &Value) -> Value {
     match outcome {
         Ok(data) => tool_ok(id, data),
         Err(e) => tool_err(id, domain_code(&e), e.1),
+    }
+}
+
+// ---------- 共享 payload builder（T34）----------
+//
+// 为什么要有这一层（D2「一个语义只允许一处实现」的跨面应用）：
+//   tools 与 resources 是**两个协议面**，但它们读的必须是**同一份真相层**。
+//   若两边各写一份「怎么取 labs」的代码 ⇒ 迟早漂移 ⇒ 出现「MCP 里能查、REST 里查不到」
+//   的分叉（本项目 mcp.rs 文件头③的架构承诺）。⇒ 故把「取数 + 成形」抽成**一份** builder，
+//   tools/call 与 resources/read **都调它** ⇒ 一个语义只有一处实现。
+//
+// 全部 builder 复用既有领域函数（vaults::labs_aggregate / entries::measurements_projection /
+// audit::audit_view / capabilities::capability_manifest …）⇒ 与 REST 面**同源**，
+// 且**不新增**任何领域逻辑（零新判据、零新依赖）。
+
+fn persons_payload(st: &AppState) -> Result<Value, ApiError> {
+    let v = st
+        .store
+        .list()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    Ok(json!({ "count": v.len(), "persons": v }))
+}
+
+fn timeline_payload(st: &AppState, pid: &str) -> Result<Value, ApiError> {
+    require_person(st, pid)?;
+    let vault = vaults::open_person_vault(&st.home, pid)?;
+    let items: Vec<vaults::TimelineItem> = vault
+        .timeline()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .map(vaults::TimelineItem::from)
+        .collect();
+    // D-038：**复用 REST 面的同一个信封 struct**（不再手写一份 `json!` 拼装）
+    // ⇒ REST 与 MCP 两侧的形状**不可能分叉**（D2：一个语义只允许一处实现）。
+    serde_json::to_value(vaults::TimelineReply { count: items.len(), items, person_id: pid.to_string() })
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+fn labs_payload(st: &AppState, pid: &str) -> Result<Value, ApiError> {
+    require_person(st, pid)?;
+    let vault = vaults::open_person_vault(&st.home, pid)?;
+    let reply = vaults::labs_aggregate(&vault, pid)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+fn medications_payload(st: &AppState, pid: &str) -> Result<Value, ApiError> {
+    require_person(st, pid)?;
+    let vault = vaults::open_person_vault(&st.home, pid)?;
+    let reply = vaults::meds_aggregate(&vault, pid)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+fn conditions_payload(st: &AppState, pid: &str) -> Result<Value, ApiError> {
+    require_person(st, pid)?;
+    let vault = vaults::open_person_vault(&st.home, pid)?;
+    let reply = vaults::conditions_aggregate(&vault, pid)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+fn measurements_payload(st: &AppState, pid: &str, q: &entries::MeasurementsQuery) -> Result<Value, ApiError> {
+    require_person(st, pid)?;
+    let vault = vaults::open_person_vault(&st.home, pid)?;
+    let reply = entries::measurements_projection(&vault, pid, q)
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+fn audit_payload(st: &AppState, q: &audit::AuditQuery) -> Result<Value, ApiError> {
+    // ⚠️ 审计是**全局视图**：不按 person 判存在（问「某人有哪些审计条目」答「没有」是合法答案，
+    //    与 REST 面口径一致：未知人过滤 ⇒ 0 条，不是 404/500）。
+    let reply = audit::audit_view(&st.home, q)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+fn capabilities_payload() -> Result<Value, ApiError> {
+    // D-034 未销账⑫：**复用同一份** `capabilities::capability_manifest()`
+    // （与 REST `GET /api/v1/capabilities` 逐字同源）⇒ 只吃 MCP 的宿主
+    // 也能判断「我的文件能不能传」，不必猜、不必看日志。
+    serde_json::to_value(capabilities::capability_manifest())
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+fn documents_payload(st: &AppState, pid: &str) -> Result<Value, ApiError> {
+    require_person(st, pid)?;
+    let vault = vaults::open_person_vault(&st.home, pid)?;
+    let items: Vec<vaults::DocumentListItem> = vaults::list_document_items(&vault)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    serde_json::to_value(vaults::DocumentListReply { count: items.len(), items, person_id: pid.to_string() })
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+fn document_detail_payload(st: &AppState, pid: &str, sha: &str) -> Result<Value, ApiError> {
+    require_person(st, pid)?;
+    if !vaults::is_sha(sha) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("malformed sha256: {sha}")));
+    }
+    let vault = vaults::open_person_vault(&st.home, pid)?;
+    match vaults::document_detail(&vault, sha) {
+        Ok(Some(d)) => serde_json::to_value(d)
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        Ok(None) => Err(ApiError(StatusCode::NOT_FOUND, format!("no indexed document: {sha}"))),
+        Err(e) => Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))),
     }
 }
 
@@ -461,6 +539,226 @@ pub fn tool_manifest() -> Value {
         "read_names": read,
         "write_names": write,
     })
+}
+
+// ---------- resources 面（T34） ----------
+//
+// 语义：resource = **按 URI 定位的只读上下文**。与 tools 的区别：
+//   · tools 是「动作」（search_records / get_labs …）——需要参数、需要 agent 决策；
+//   · resources 是「某个东西本身」（某人档案、某人指标、审计视图）——由 URI 直接定位。
+//
+// 设计不变量：
+//   ① **只读**：resources 一律不改真相层 ⇒ ro token 也能读（与读侧工具同权限口径）。
+//   ② **同源**：每个 resource 的内容都由**上面的共享 payload builder**产出
+//      ⇒ 与 tools/call、与 REST 面读的是同一份真相层（D2：一个语义只允许一处实现）。
+//   ③ **URI 是可判据的**：模板列表与实现同源（`resource_templates()`），
+//      门禁据此核对「公布的模板 == 实现的模板」，不手抄。
+//
+// URI 方案：`ehr://<kind>[/<person_id>[/<sub>...]]`
+//   ehr://persons                         人员列表
+//   ehr://persons/{person_id}             某人档案（person 记录）
+//   ehr://persons/{person_id}/timeline    某人时间线
+//   ehr://persons/{person_id}/labs        某人指标趋势
+//   ehr://persons/{person_id}/medications 某人用药跨度
+//   ehr://persons/{person_id}/conditions  某人病程泳道
+//   ehr://persons/{person_id}/measurements 某人手动条目回放
+//   ehr://persons/{person_id}/documents   某人文档清单
+//   ehr://persons/{person_id}/documents/{sha256}  某份文档详情
+//   ehr://audit                           审计视图（全局）
+//   ehr://capabilities                    ingest 能力清单
+
+/// URI 前缀（方案名）。**单一事实来源**：模板、读路由、门禁都从这里派生。
+pub const RESOURCE_SCHEME: &str = "ehr";
+
+/// 资源模板清单（`resources/templates/list` 的内容）。
+/// 每个模板：uriTemplate + name + description + mimeType。
+/// **实现即真源**（门禁从本函数派生期望值，不手抄 URI 模板表）。
+fn resource_templates() -> Vec<Value> {
+    let pid = "{person_id}";
+    vec![
+        json!({
+            "uriTemplate": format!("{RESOURCE_SCHEME}://persons"),
+            "name": "人员列表",
+            "description": "全部在档人员（不含已归档）。与 REST GET /api/v1/persons 同源。",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uriTemplate": format!("{RESOURCE_SCHEME}://persons/{pid}"),
+            "name": "人员档案",
+            "description": "某人的档案主数据（id/name/birthday/gender/id_note）。",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uriTemplate": format!("{RESOURCE_SCHEME}://persons/{pid}/timeline"),
+            "name": "健康事件时间线",
+            "description": "某人的健康事件时间线（文档级：日期/类型/标题），与 get_timeline 同源。",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uriTemplate": format!("{RESOURCE_SCHEME}://persons/{pid}/labs"),
+            "name": "检验指标趋势",
+            "description": "某人的检验指标跨文档趋势，与 get_labs 同源。",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uriTemplate": format!("{RESOURCE_SCHEME}://persons/{pid}/medications"),
+            "name": "用药跨度",
+            "description": "某人的用药跨度，与 get_medications 同源。",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uriTemplate": format!("{RESOURCE_SCHEME}://persons/{pid}/conditions"),
+            "name": "病程泳道",
+            "description": "某人的病程泳道，与 get_conditions 同源。",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uriTemplate": format!("{RESOURCE_SCHEME}://persons/{pid}/measurements"),
+            "name": "手动条目回放",
+            "description": "某人的自测值/笔记/动作日志回放投影，与 get_measurements 同源。",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uriTemplate": format!("{RESOURCE_SCHEME}://persons/{pid}/documents"),
+            "name": "文档清单",
+            "description": "某人的文档清单（docref=原件 sha256），与 list_documents 同源。",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uriTemplate": format!("{RESOURCE_SCHEME}://persons/{pid}/documents/{{sha256}}"),
+            "name": "文档详情",
+            "description": "某份文档详情（OCR 文本层 + 抽取结果，原样透传），与 get_document_detail 同源。",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uriTemplate": format!("{RESOURCE_SCHEME}://audit"),
+            "name": "审计视图",
+            "description": "审计视图（发生过什么，不是现在是什么），与 get_audit 同源。",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uriTemplate": format!("{RESOURCE_SCHEME}://capabilities"),
+            "name": "ingest 能力清单",
+            "description": "本构建真能吃哪些文件类型（从实现派生），与 get_capabilities 同源。",
+            "mimeType": "application/json"
+        }),
+    ]
+}
+
+/// 具体资源清单（`resources/list` 的内容）。
+/// 只列**不依赖 person_id 的**那些（人员相关的靠 templates 定位）——
+/// 这不是「少给」：MCP 规范里 resources/list 就是「当前可枚举的具体资源」。
+fn resource_schemas() -> Vec<Value> {
+    vec![
+        json!({
+            "uri": format!("{RESOURCE_SCHEME}://persons"),
+            "name": "人员列表",
+            "description": "全部在档人员（不含已归档）。",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uri": format!("{RESOURCE_SCHEME}://audit"),
+            "name": "审计视图",
+            "description": "审计视图（发生过什么，不是现在是什么）。",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uri": format!("{RESOURCE_SCHEME}://capabilities"),
+            "name": "ingest 能力清单",
+            "description": "本构建真能吃哪些文件类型。",
+            "mimeType": "application/json"
+        }),
+    ]
+}
+
+/// resources 清单的机器可读形态（干跑用；门禁从它派生期望值）。
+///
+/// 形状：`{"count":N,"templates":M,"uris":[...],"template_uris":[...],"kinds":[...]}`
+pub fn resource_manifest() -> Value {
+    let resources = resource_schemas();
+    let templates = resource_templates();
+    json!({
+        "count": resources.len(),
+        "templates": templates.len(),
+        "uris": resources.iter().filter_map(|r| r.get("uri").and_then(|u| u.as_str()).map(|s| s.to_string())).collect::<Vec<_>>(),
+        "template_uris": templates.iter().filter_map(|r| r.get("uriTemplate").and_then(|u| u.as_str()).map(|s| s.to_string())).collect::<Vec<_>>(),
+    })
+}
+
+/// 资源内容 → MCP `contents[]` 形状（`{uri, mimeType, text}`；text 是 JSON 文本）。
+fn resource_contents(uri: &str, data: &Value) -> Value {
+    json!({
+        "contents": [{
+            "uri": uri,
+            "mimeType": "application/json",
+            "text": serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string())
+        }]
+    })
+}
+
+/// `resources/read` 的执行体。
+///
+/// 解析顺序（**先判形态，再判事实**）：
+///   ① URI 形态不合法（不是 ehr://…）⇒ -32005（未知资源）；
+///   ② person_id 不存在 ⇒ -32001（查无此人，与工具面同码）——**与「URI 写错了」区分开**；
+///   ③ 其余错误（内部）⇒ -32002。
+fn read_resource(st: &Arc<AppState>, id: Value, uri: &str) -> Value {
+    let outcome = tokio::task::block_in_place(|| resource_payload(st, uri));
+    match outcome {
+        Ok(data) => ok_obj(id, resource_contents(uri, &data)),
+        Err((code, msg)) => tool_err(id, code, msg),
+    }
+}
+
+/// 资源 URI → payload。**读的是同一批领域函数**（与 tools 面共享 builder）。
+fn resource_payload(st: &AppState, uri: &str) -> Result<Value, (i64, String)> {
+    let prefix = format!("{RESOURCE_SCHEME}://");
+    let rest = uri
+        .strip_prefix(&prefix)
+        .ok_or((ERR_UNKNOWN_RESOURCE, format!("unknown resource uri: {uri} (expected {prefix}…)")))?;
+    let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
+    match parts.as_slice() {
+        // ehr://capabilities
+        ["capabilities"] => capabilities_payload().map_err(|e| (domain_code(&e), e.1)),
+        // ehr://audit
+        ["audit"] => audit_payload(st, &audit::AuditQuery { person: None, op: None })
+            .map_err(|e| (domain_code(&e), e.1)),
+        // ehr://persons
+        ["persons"] => persons_payload(st).map_err(|e| (domain_code(&e), e.1)),
+        // ehr://persons/{pid}
+        ["persons", pid] => person_payload(st, pid).map_err(|e| (domain_code(&e), e.1)),
+        // ehr://persons/{pid}/<sub>
+        ["persons", pid, sub] => {
+            let q = entries::MeasurementsQuery { kind: None, from: None, to: None };
+            match *sub {
+                "timeline" => timeline_payload(st, pid).map_err(|e| (domain_code(&e), e.1)),
+                "labs" => labs_payload(st, pid).map_err(|e| (domain_code(&e), e.1)),
+                "medications" => medications_payload(st, pid).map_err(|e| (domain_code(&e), e.1)),
+                "conditions" => conditions_payload(st, pid).map_err(|e| (domain_code(&e), e.1)),
+                "measurements" => measurements_payload(st, pid, &q).map_err(|e| (domain_code(&e), e.1)),
+                "documents" => documents_payload(st, pid).map_err(|e| (domain_code(&e), e.1)),
+                other => Err((ERR_UNKNOWN_RESOURCE, format!("unknown resource kind: {other}"))),
+            }
+        }
+        // ehr://persons/{pid}/documents/{sha}
+        ["persons", pid, "documents", sha] => {
+            document_detail_payload(st, pid, sha).map_err(|e| (domain_code(&e), e.1))
+        }
+        _ => Err((ERR_UNKNOWN_RESOURCE, format!("unknown resource uri: {uri}"))),
+    }
+}
+
+/// 单人档案主数据（registry 折叠后的当前态）。
+fn person_payload(st: &AppState, pid: &str) -> Result<Value, ApiError> {
+    require_person(st, pid)?;
+    let p = st
+        .store
+        .list()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?
+        .into_iter()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no such person (or archived): {pid}")))?;
+    serde_json::to_value(p).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 /// tools/list 的 schema。**与 prepare() 一一对应**：新增工具必须同时改两处，

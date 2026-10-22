@@ -44,6 +44,38 @@
 - `upload_document` 走与 REST 上传**同一把「每人写锁」与同一条 ingest 路径** ⇒ 同人并发写不会互相踩。
 - 幂等：同 person + 同字节重传 ⇒ `deduped=true`、`content_hash` 不变，**不重复建索引**。
 
+## resources 面（读侧只读上下文）
+
+MCP 的**第二个协议面**：tools 是「动作」，resources 是「某个东西本身」（由 URI 直接定位）。
+- 传输同 tools：`POST /mcp`，JSON-RPC 2.0。方法：`resources/list` / `resources/templates/list` / `resources/read`。
+- `initialize` 的 `capabilities` 现在**宣告 `resources`**（`subscribe:false` / `listChanged:false`）。
+- **只读**：resources 一律不改真相层 ⇒ ro token 也能读（与读侧工具同权限口径）。
+- **同源**：每个 resource 的内容由**与 tools 面完全相同**的 payload builder 产出 ⇒
+  「一个语义只允许一处实现」（D2）⇒ resources 面**不可能**与 REST 面分叉。
+- 成功响应形状：`result.contents[0] = {uri, mimeType:"application/json", text:<JSON 文本>}`；
+  失败时 `result.isError=true` + `result._code`（与 tools 面同款，非规范字段）。
+
+**URI 清单的真源是实现**：`ehr-api --print-mcp-resources`（干跑，stdout 为 JSON）输出
+`{count, templates, uris[], template_uris[]}`。下表由 `mcp-resources-e2e.sh` 的 R7 判据
+**与该输出逐项核对**（不一致 ⇒ 门禁红）——不是手抄快照。
+
+| resource URI | 等价工具（同一份 payload） |
+|---|---|
+| `ehr://persons` | `list_persons` |
+| `ehr://persons/{person_id}` | —（人员档案主数据，无对应工具） |
+| `ehr://persons/{person_id}/timeline` | `get_timeline` |
+| `ehr://persons/{person_id}/labs` | `get_labs` |
+| `ehr://persons/{person_id}/medications` | `get_medications` |
+| `ehr://persons/{person_id}/conditions` | `get_conditions` |
+| `ehr://persons/{person_id}/measurements` | `get_measurements` |
+| `ehr://persons/{person_id}/documents` | `list_documents` |
+| `ehr://persons/{person_id}/documents/{sha256}` | `get_document_detail` |
+| `ehr://audit` | `get_audit` |
+| `ehr://capabilities` | `get_capabilities` |
+
+`resources/list` 只列**当前可枚举的具体资源**（`ehr://persons` / `ehr://audit` / `ehr://capabilities`），
+按人定位的那几个在 `resources/templates/list` 里以**模板**公布（`{person_id}` / `{sha256}` 占位）。
+
 ## 错误码
 
 | 码 | 含义 | agent 应对 |
@@ -53,3 +85,4 @@
 | `-32001` | 查无此人（与 REST 404 语义对齐） | 换人或向用户确认 |
 | `-32002` | 内部错误 | 告知用户稍后再试，别重试打转 |
 | `-32003` | 不支持的文件类型（需 worker） | 换 txt/pdf，别原样重试 |
+| `-32005` | **未知资源 URI**（形状不对/种类不存在）——与「查无此人」(`-32001`) 区分 | 改 URI，不要重试 |

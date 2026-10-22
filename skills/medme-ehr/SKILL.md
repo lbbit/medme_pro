@@ -148,3 +148,8 @@ REST 命令 ↔ MCP 工具一一对应（同一真相层，任选其一）：
 | `upload PID FILE` | `upload_document` | 写 |
 
 MCP 错误码：`-32602` 参数非法 / `-32601` 未知工具 / `-32001` 查无此人 / `-32002` 内部错误 / `-32003` 文件类型不支持。
+
+MCP 另有 **resources 面**（只读上下文，按 URI 定位；`resources/list` / `resources/templates/list` / `resources/read`）：
+内容与上表的**读侧工具同源同值**（`ehr://persons/{person_id}/labs` ≡ `get_labs`）⇒ 宿主想「把某人的某项指标当上下文挂载」时用 resources 面即可。
+URI 清单的真源是实现（`ehr-api --print-mcp-resources`），由门禁 `mcp-resources-e2e.sh` 核对。
+resources 错误码：`-32005` 未知资源 URI（改 URI）/ `-32001` 查无此人（换人）/ `-32602` 缺 `uri` 参数（改参数）。
