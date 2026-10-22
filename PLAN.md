@@ -54,6 +54,23 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
+## 当前状态（2026-10-22 · **T37「T35/T36 两道第三方互通门在**真 GitHub runner** 上验过」——把「本机绿」升级为「CI 上也绿」，并首次在真 runner 上实测 **npm(npmmirror) / pip(TUNA) 两条依赖通道**（此前只在配方里，未实测）· D-054 落地**）
+
+- ✅ **T37-① 缺口定位（PLAN/T36 未销账项④原话）**：「**T35/T36 两道新门尚未在真 GitHub runner 上验过**（含 **npm 通道** —— npmmirror 已在配方内但**未在真 runner 上实测**）；Python 面的 venv 退化路径同」。事实核对：T35/T36 两道门**已入库**（`mcp-interop-e2e.sh` / `mcp-interop-ts-e2e.sh`，均进 RUN 清单），但**从未被真 runner 执行过** ⇒ 「官方 SDK 能吃」这条结论**目前只有本机证据**（本机有代理 7890、有 TUNA 直连、有已缓存的 venv/node_modules）⇒ **CI 上很可能因通道/缺包而红**，而**本地绿 ≠ CI 绿**正是 D-033/T33 记录过的同族坑（「把门转正却没给 CI 补前置」）。
+- ✅ **T37-② 结构决策：本轮**不改任何产品代码**，只做「把已入库的门推到真 runner 上跑」**。理由：本轮的验收目标是**通道与门在真环境下的可复现性**（第三方 SDK 依赖面），而**不是**产品行为 ⇒ 改 Rust 源码会引入**与目标无关的变量**（还会强制重建产物、拉长 runner 时间）⇒ 纪律：**验证类的小步优先选「零代码改动」的那一步**，让失败原因唯一（要么通道红，要么门红）。
+- ✅ **T37-③ 干跑在前（本地先绿，再上真 runner）**：本地复跑两道门 ⇒ **Python 面 17 条判据全 PASS、fails=0**（`I1`~`I6`，含 `I5.read_resource_equals_call_tool` 跨面逐字相等、`I6` 两码 `-32005`/`-32001` 为 `McpError`）⇒ **TS 面 16 条判据全 PASS、fails=0**（`T1`~`T6`，含 `T5` 逐字相等、`T6` 两码）⇒ 确认「门本身可跑通」后，才把**同一份 commit**推上去 ⇒ 真 runner 上的红，就只能是**通道/环境**问题，不是**门本身**问题。
+- ✅ **T37-④ 真·runner 验证（run `39767572283`，sha `2803f54`）= 全绿 ✅**：13 个 step **全部 success**（`checkout`/装 Rust/装 Node/拉上游/依赖通道/构建 debug+release/`cargo test`/同步产物/构建容器镜像/起 compose 容器/统一门禁入口），末步「门禁失败时打印每道门的原始输出」= **skipped** ⇒ 门全绿时兜底步**正确地不跑**（D-047/D-048 同款对照）。日志实锤：
+  - `== A1 登记表完整性 ==` ⇒ **`[PASS] A1 登记表完整（RUN=23 SKIP=1）`**（新门确实进了 RUN 清单，不是漏跑）；
+  - `---- mcp-interop-e2e.sh` ⇒ **`[PASS] mcp-interop-e2e.sh fails=0`**（runner 上从零装 TUNA pypi 的 `mcp==1.30.0` ⇒ **TUNA pypi 通道实测可用**；该步耗时 51s）；
+  - `---- mcp-interop-ts-e2e.sh` ⇒ **`[PASS] mcp-interop-ts-e2e.sh fails=0`**（runner 上从零装 npmmirror 的 `@modelcontextprotocol/sdk@1.32.1` ⇒ **npmmirror 通道实测可用**；该步耗时 29s）；
+  - 末行 ⇒ **`[证据] run-all-gates.sh 门禁数=23（本次执行 23）总 fails=0`** ⇒ 23 门在真 runner 上全绿。
+- ✅ **T37-⑤ 通道结论升级为「实测」而非「配方」**：D-004~D-007 的通道配方此前**从未在真 runner 上跑过**（PLAN 反复写「未在真 runner 上实测」）⇒ 本轮起，**npmmirror（TS SDK）与 TUNA pypi（Python SDK）两条通道在真 runner 上各实测成功一次**（门自带 fallback：主通道失败退官方 registry/pypi ⇒ 通道单点失效不会把门打红）。
+- ✅ **T37-⑥ Rust 侧零破坏**：本轮**未改任何 Rust 源码**、**未改 `Cargo.toml`/`Cargo.lock`** ⇒ 零新依赖；runner 上 `cargo test --all-targets --locked` 步 **success**（含 84 门）。
+- ✅ **T37-⑦ 产物新鲜度与同步**：runner 的「同步产物（local target ⇄ shared target）」步 **success** ⇒ `artifact-freshness-check.sh` 在 runner 上绿 ⇒ 两份产物 sha256 逐字一致这条纪律**在真环境成立**。
+- ✅ **T37-⑧ 后台卡死检查（D-010）**：**无 cargo/rustc 残留**；本地跑完两道门后临时 ehr-api 由脚本 `trap` 自清（`mcp-interop-e2e.sh` 起 `:18695`、`mcp-interop-ts-e2e.sh` 起 `:18696`，均已收割）⇒ 常驻只剩两个 **docker 容器**内的 ehr-api（`:8443` 端口侧）⇒ **非卡死**；无 done 哨兵残留、无 log 错误行。
+- 🔄 **下一步**：①**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；②**官方 SDK 的 Java 实现仍未验**（按 D-053 新坑①，≥2 个实现这条已达成，但「全部官方实现」尚未）；③**写侧（`create_person`/`upload_document`）两轮各只调 1 次** ⇒ 未做多轮/并发/大载荷；④公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token（当前 compose 容器日志 `auth=open(tokens=0) ⚠️未配置 token，所有请求放行` —— **仅本地**）；⑤ghcr 包可见性仍 private（OCR 镜像未推 GHCR、未纳入 CI）；⑥`.dcm`/DICOM worker 未做；⑦上游分类缺口仍在；⑧`docs/API.md` 是**生成物**（本轮**未改 REST 接口** ⇒ 无需重生成）；⑨人员域三端点仍 501 且刻意不进 OpenAPI；⑩MCP 侧**仍无 prompts**（已显式钉住「不提供」——两套官方 SDK 上都是机器判据）。
+- ⚠️ 未销账：目标验收①**Web 管理端仍是单文件最小版**（编译期内嵌，无构建链）；`docs/API.md` 是**生成物**；文档覆盖 **REST 面** + **MCP 面** + **SKILL.md 面** + **CI 可移植性面** + **Web 页面 JS 读面** + **第三方客户端消费面（两个官方实现）** 六份面全部有门；**「手抄实现细节」残留**已治到十四个面；**「只被自家 curl 覆盖的协议面」已升级为「必须被官方 SDK 消费才算验收」（且从 1 个实现扩到 2 个官方实现）**（D-052 新坑① + D-053 新坑①）；**T35/T36 两道门的「真 runner 可复现」本轮关闭**（D-054）。
+
 ## 当前状态（2026-10-22 · **T36「真·第三方 MCP 客户端互通（TypeScript 官方 SDK 面）」——把「官方 SDK 能吃」从一个实现的结论升级为**两个官方实现的结论**（Python pydantic + TS zod/v4 两个独立解析器），并给 TS 面补一道同形门；实测**两侧判据都抓得住**同一个真缺陷（TS 侧报 `$ZodError`、Python 侧报 `ValidationError`）· D-053 落地**）
 
 - ✅ **T36-① 缺口定位（D-052 未销账项③的原话）**：「**真·第三方 MCP 互通本轮只覆盖 Python SDK**（官方另有 TypeScript/Java 实现 ⇒ 未验）」。事实核对：官方 SDK 有 **两个独立实现**（Python `mcp` / TS `@modelcontextprotocol/sdk`）⇒ **解析器不同**（Python=pydantic v2，TS=zod/v4）⇒ 「服务端形状不合规范」这件事，**一个实现拒收、另一个实现可能放行**是可能的 ⇒ 只验一个实现 ⇒ **不能声称「协议面合规」**，只能说「Python 面合规」。

@@ -1,5 +1,23 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-054 2026-10-22 · **T37「T35/T36 两道第三方互通门在真 GitHub runner 上验过」——把「本机绿」升级为「CI 上也绿」；并首次在真 runner 上实测 npmmirror / TUNA pypi 两条依赖通道（此前只在配方里）**
+
+**为什么做**：PLAN/T36 未销账项④原话：「**T35/T36 两道新门尚未在真 GitHub runner 上验过**（含 **npm 通道** —— npmmirror 已在配方内但**未在真 runner 上实测**）；Python 面的 venv 退化路径同」。事实核对：T35/T36 两道门**已入库**（`mcp-interop-e2e.sh` / `mcp-interop-ts-e2e.sh`，均登记进 `run-all-gates.sh` 的 RUN 清单），但**从未被真 runner 执行过** ⇒ 「官方 SDK 能吃」这条结论**此前只有本机证据**（本机有代理 7890、有 TUNA 直连、且 `~/.cache/` 下**已有缓存好的 venv 与 node_modules** ⇒ 门在本机上甚至没走安装路径）⇒ **CI 上很可能因通道/缺包而红**，而「本地绿 ≠ CI 绿」正是 D-033/T33 记录过的同族坑（「把门转正却没给 CI 补前置」⇒ run `39721077890` 在门禁步红）。
+**关键结构决策①：本轮**不改任何产品代码**，只做「把已入库的门推到真 runner 上跑」**。理由：本轮的验收目标是**通道与门在真环境下的可复现性**（第三方 SDK 依赖面），而**不是**产品行为 ⇒ 改 Rust 源码会引入**与目标无关的变量**（并强制重建产物、拉长 runner 时间，且可能引入与通道无关的失败）⇒ 纪律（新增，记入 PLAN/DECISIONS）：**验证类的小步优先选「零代码改动」的那一步** ⇒ 让真 runner 上的失败原因**唯一**（要么通道红，要么门红），不混杂。
+**关键结构决策②：干跑在前（本地先绿，再上真 runner）**。本地先复跑两道门，确认「门本身可跑通」后才把**同一份 commit**推上去 ⇒ 真 runner 上的红就只能是**通道/环境**问题，不是门本身的问题。⇒ 顺序纪律：**本地绿 → 推 → runner 绿**，中间任何一步红了都能定位到具体一层。
+**关键结构决策③：门自带 fallback 是「通道单点失效不把门打红」的正确形态，本轮实测它成立**。TS 面：`npmmirror` 失败退 `registry.npmjs.org`；Python 面：`TUNA pypi` 失败退官方 pypi，且 venv 建不起来（runner 常见缺 `python3-venv`）时**退化到 `--target` 目录 + `PYTHONPATH`**（D-050 家族）⇒ 通道面**有三条**可复现路径 ⇒ 通道单点失效**降级**而不是**变红**。
+**证据链（缺一即算交付）**：
+①**本地干跑（动手前）**：`./mcp-interop-e2e.sh` ⇒ **17 条判据全 PASS、fails=0**（`I1`~`I6`；含 `I5.read_resource_equals_call_tool` 跨面逐字相等、`I6.unknown_uri.code = -32005` / `I6.unknown_person.code = -32001`，均为 `McpError` 而非崩溃）；`./mcp-interop-ts-e2e.sh` ⇒ **16 条判据全 PASS、fails=0**（`T1`~`T6`，含 `T5` 逐字相等、`T6` 两码）⇒ 门本身可跑通。
+②**真·runner 验证（run `39767572283`，sha `2803f54`）= 全绿 ✅**：13 个 step **全部 success**（`checkout`/装 Rust/装 Node/拉上游/依赖通道/构建 debug+release/`cargo test`/同步产物/构建容器镜像/起 compose 容器/统一门禁入口），末步「门禁失败时打印每道门的原始输出」= **skipped** ⇒ 门全绿时兜底步**正确地不跑**（D-047/D-048 同款对照）。
+③**日志实锤（不是「推断绿」）**：`== A1 登记表完整性 ==` ⇒ **`[PASS] A1 登记表完整（RUN=23 SKIP=1）`**（新门确实在 RUN 清单里，不是漏跑）；`---- mcp-interop-e2e.sh` ⇒ **`[PASS] mcp-interop-e2e.sh fails=0`**（runner 上**从零**装 TUNA pypi 的 `mcp==1.30.0`，该步耗时 51s ⇒ **TUNA pypi 通道实测可用**）；`---- mcp-interop-ts-e2e.sh` ⇒ **`[PASS] mcp-interop-ts-e2e.sh fails=0`**（runner 上**从零**装 npmmirror 的 `@modelcontextprotocol/sdk@1.32.1`，该步耗时 29s ⇒ **npmmirror 通道实测可用**）；末行 ⇒ **`[证据] run-all-gates.sh 门禁数=23（本次执行 23）总 fails=0`**。
+④**Rust 侧零破坏**：本轮**未改任何 Rust 源码**、**未改 `Cargo.toml`/`Cargo.lock`** ⇒ 零新依赖；runner 上 `cargo test --all-targets --locked` 步 **success**（含 84 门）。
+⑤**产物新鲜度在真环境成立**：runner 的「同步产物（local target ⇄ shared target）」步 **success** ⇒ `artifact-freshness-check.sh` 在 runner 上绿 ⇒ 「两份产物 sha256 逐字一致」这条纪律在真环境被验证。
+⑥**后台卡死检查（D-010）**：**无 cargo/rustc 残留**；本地跑完两道门后临时 ehr-api（`:18695` / `:18696`）由脚本 `trap` 自清 ⇒ 常驻只剩两个 **docker 容器**内的 ehr-api ⇒ **非卡死**；无 done 哨兵残留、无 log 错误行。
+**新坑一则（D-033/T33 同族的第三版）**：
+①**「门在本机绿」可能只是因为**本机把依赖**早就缓存好了**⇒ 门在真 runner 上第一次真正走安装路径之前，**本机绿不构成「门在 CI 上可复现」的证据**。本轮的具体形态：TS 门的 `ensure_sdk()` 见到 `~/.cache/medme-ehr-mcp-ts/node_modules/...` 存在就**直接复用、跳过安装**；Python 门同理复用 `~/.cache/medme-ehr-mcp-venv` ⇒ 本地跑这道门**根本没碰通道** ⇒ 通道在配方里存在 ≠ 通道可用。⇒ 纪律升级（已写入本决策与 PLAN）：**凡门禁侧依赖有「本机缓存可复用」路径的，其「通道可用性」必须单独在**真 runner**（或干净 HOME）上验一次**⇒ 一次性证据 = 真 runner 上该门**从零安装**并 fails=0。
+②**推论**：本仓库里凡是「门禁侧依赖」类的门（官方 MCP Python SDK / TS SDK / 未来的 agent CLI），**其「可复现性」是两件事**：①门逻辑对不对（本机可验）；②通道在干净环境能不能拿到（**只能**在真 runner/干净 HOME 验）⇒ 两者**必须分别取证**，且 ② **不通过时 ① 再绿也不算这道门成立**。
+**未销账/下一步**：①**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；②**官方 SDK 的 Java 实现仍未验**（按 D-053 新坑①，≥2 个独立实现这条已达成，但「全部官方实现」尚未）；③**写侧（`create_person`/`upload_document`）两轮各只调 1 次** ⇒ 未做多轮/并发/大载荷；④公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token（compose 容器日志实锤 `auth=open(tokens=0) ⚠️未配置 token，所有请求放行` —— **仅本地**）；⑤ghcr 包可见性仍 private（OCR 镜像未推 GHCR、未纳入 CI）；⑥`.dcm`/DICOM worker 未做；⑦上游分类缺口仍在；⑧`docs/API.md` 是**生成物**（本轮**未改 REST 接口** ⇒ 无需重生成）；⑨人员域三端点仍 501 且刻意不进 OpenAPI；⑩MCP 侧**仍无 prompts**（已显式钉住「不提供」——两套官方 SDK 上都是机器判据）；⑪**CI 里 `agent-e2e.sh` 仍 SKIP**（依赖外部 agent 引擎 ⇒ 按 D-048 分层，不并入例行入口）。
+
 ## D-053 2026-10-22 · **T36「真·第三方 MCP 客户端互通（TypeScript 官方 SDK 面）」——把「官方 SDK 能吃」从一个实现的结论升级为**两个官方实现的结论**（两套独立解析器：Python pydantic v2 / TS zod v4），并给 TS 面补一道同形门；实测**两侧判据都独立地抓得住**同一个真缺陷**
 
 **为什么做**：D-052 未销账项③原话：「**真·第三方客户端互通本轮只覆盖 Python SDK**（官方另有 TypeScript/Java 实现 ⇒ 未验；且写侧仅各调 1 次，未做多轮/并发/大载荷）」。事实核对：官方 MCP SDK 有 **两个独立实现** —— Python `mcp`（pydantic v2 校验响应形状）与 TypeScript `@modelcontextprotocol/sdk`（zod/v4 校验响应形状）⇒ 二者**解析器不同、宽松度可能不同** ⇒ 「服务端形状不合规范」这件事，**一个实现拒收、另一个实现可能放行**是完全可能的 ⇒ 只验一个实现 ⇒ 最多只能说「Python 面合规」，**不能声称「协议面合规」**。这正是 D-052 新坑①（「自家 curl 门全绿 ≠ 协议面合规」）的**同族第二版**：D-052 把判别力从「自家约定」换成「第三方权威」；本轮把第三方权威**从一个实现扩到两个**。
