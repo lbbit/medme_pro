@@ -98,24 +98,47 @@ curl -sf "127.0.0.1:$PORT/api/v1/healthz" >/dev/null 2>&1 || {
   echo "FAIL 服务未起来"; cat "$H/serve.log"; echo "fails=1"; exit 1; }
 note "server up pid=$SRV home=$H port=$PORT"
 
-# ---- 样本：上游 sample-records 的血常规报告（缺失就现造一份等价样本）----
-SAMPLE=$(ls "$ROOT"/upstream-medme/examples/sample-records/*血常规*.txt 2>/dev/null | head -1)
-if [ -z "$SAMPLE" ]; then
-  SAMPLE="$H/血常规报告.txt"
-  cat >"$SAMPLE" <<'EOF'
-XX医院检验科检验报告单
+# ---- 样本：上游 sample-records 的三份原件（缺失就现造等价样本）----
+#   为什么是三份：浏览器门要覆盖**用药/病程/审计**三个读面（T42），
+#   它们分别需要「处方」「出院记录」两类原文；只有血常规样本的话 meds/conds 必为空。
+mk_sample() { # $1=glob  $2=文件名  $3=内容
+  local f
+  f=$(ls "$ROOT"/upstream-medme/examples/sample-records/"$1" 2>/dev/null | head -1)
+  if [ -z "$f" ]; then
+    f="$H/$2"; cat >"$f" <<EOF
+$3
+EOF
+    note "上游样本 $1 缺失，改用脚本内造的等价样本（$f）" >&2
+  fi
+  echo "$f"
+}
+SAMPLE=$(mk_sample '*血常规*.txt' '血常规报告.txt' 'XX医院检验科检验报告单
 姓名:门禁  性别:女  年龄:37岁   样本编号:20251015-A042
 检验项目          结果      参考区间     标志
 白细胞计数        11.8      3.5--9.5     H
 血红蛋白          139       130--175     /
 血小板计数        203       125--350     /
-报告日期:2025年10月15日
-EOF
-  note "上游样本缺失，改用脚本内造的等价血常规样本"
-fi
+报告日期:2025年10月15日')
+SAMPLE_MEDS=$(mk_sample '*处方*.txt' '处方.txt' 'XX医院 门诊处方笺 (prescription)
+姓名:门禁  性别:女  年龄:37岁  科室:心血管内科
+处方日期:2024-06-10    诊断:高血压 3 级(很高危)
+Rp.
+1. 苯磺酸氨氯地平片 Amlodipine  5mg × 14 片
+   用法:口服,一次 1 片,一日 1 次(晨服)
+2. 阿司匹林肠溶片 Aspirin  100mg × 30 片
+   用法:口服,一次 1 片,一日 1 次(餐后)
+医师:陈志强')
+SAMPLE_CONDS=$(mk_sample '*出院记录*.txt' '出院记录.txt' 'XX医院 出院记录
+姓名:门禁  性别:女  年龄:37岁  住院号:0628841
+入院日期:2023-04-24    出院日期:2023-05-01    科室:神经内科
+入院诊断:急性脑梗死(左侧基底节区)
+既往史:高血压 10 年;2 型糖尿病 5 年。
+出院诊断:1. 急性脑梗死  2. 高血压 3 级(很高危)  3. 2 型糖尿病
+出院医嘱:继续口服阿司匹林 100mg qd、氨氯地平 5mg qd、二甲双胍 0.5g bid;门诊随访。')
 
 PROBE_BASE="${EHR_BROWSER_PROBE_BASE:-http://127.0.0.1:$PORT}"
 BASE="$PROBE_BASE" PERSON_NAME="浏览器冒烟·门禁" SAMPLE="$SAMPLE" \
+  SAMPLE_MEDS="$SAMPLE_MEDS" SAMPLE_CONDS="$SAMPLE_CONDS" \
   $PY "$ROOT/tools/web_browser_probe.py"
 RC=$?
 [ "$RC" -ne 0 ] && fails=$((fails+1))

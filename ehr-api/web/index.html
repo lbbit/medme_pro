@@ -82,9 +82,9 @@ async function loadPersons() {
   [...pl.children].forEach(li => li.onclick = () => { cur = li.dataset.id; loadPersons(); render(); });
 }
 function tabs() {
-  const t = ["timeline","documents","labs","home","search"];
+  const t = ["timeline","documents","labs","home","search","meds","conds","audit"];
   document.getElementById("tabs").innerHTML = t.map(x =>
-    `<button data-t="${x}" class="${tab===x?"on":""}">${{timeline:"时间线",documents:"文档",labs:"指标",home:"自测趋势",search:"检索"}[x]}</button>`).join("");
+    `<button data-t="${x}" class="${tab===x?"on":""}">${{timeline:"时间线",documents:"文档",labs:"指标",home:"自测趋势",search:"检索",meds:"用药",conds:"病程",audit:"审计"}[x]}</button>`).join("");
   [...document.getElementById("tabs").children].forEach(b => b.onclick = () => { tab = b.dataset.t; render(); });
 }
 function out(html) { document.getElementById("pane").innerHTML = html; }
@@ -129,6 +129,29 @@ async function render() {
           `<h3>${esc(s.group_name||s.analyte_key||"未命名序列")} <span class="mut">${esc(s.unit_canonical||"")} · n=${(s.points||[]).length}${s.any_abnormal?" · 异常":""}</span></h3><table><tr><th>日期</th><th>值</th><th>flag</th><th>证据</th></tr>` +
           (s.points||[]).map(pt => `<tr><td>${esc(pt.date||"—")}</td><td>${esc(pt.value)}${esc(s.unit_canonical?" "+s.unit_canonical:"")}</td><td>${esc(pt.flag||"")}</td><td class="mut">${esc((pt.docref||"").slice(0,12))}</td></tr>`).join("") + `</table>`).join("")
           : '<p class="mut">无已解析指标。上传含检验数据的 txt 报告后重试。</p>'));
+    } else if (tab === "meds") {
+      // 用药跨度（D-026 读面已毕业，此前页面未接）——与指标同源：同一次 parser::aggregate 的另一块输出。
+      const d = await j(`/persons/${cur}/medications`);
+      out(`<h2>${esc(p.name)} · 用药 <span class="mut">med_count=${(d.med_count!=null?d.med_count:0)} · mention_count=${(d.mention_count!=null?d.mention_count:0)} · docs=${(d.documents_scanned!=null?d.documents_scanned:0)}</span></h2>` +
+        ((d.medications||[]).length ? (d.medications||[]).map(m =>
+          `<h3>${esc(m.name||"—")} <span class="mut">${esc(m.atc||"")} · ${esc(m.status||"")}${m.latest_dose?" · "+esc(m.latest_dose):""}${m.unverified?" · 未核对":""}</span></h3>` +
+          `<table><tr><th>起</th><th>止</th><th>剂型/原文名</th><th>证据</th></tr>` +
+          (m.docrefs||[]).map(s => `<tr><td>${esc(m.start||"—")}</td><td>${esc(m.end||"—")}</td><td class="mut">${esc((m.raw_names||[]).join(" / "))}</td><td class="mut">${esc(s.slice(0,12))}</td></tr>`).join("") + `</table>`).join("")
+          : '<p class="mut">无可解析的用药记录。上传含处方/药品的 txt 原件后重试。</p>'));
+    } else if (tab === "conds") {
+      // 病程泳道（D-027 读面已毕业，此前页面未接）——诊断原文原样透传，不做术语归一。
+      const d = await j(`/persons/${cur}/conditions`);
+      out(`<h2>${esc(p.name)} · 病程 <span class="mut">condition_count=${(d.condition_count!=null?d.condition_count:0)} · docs=${(d.documents_scanned!=null?d.documents_scanned:0)}</span></h2>` +
+        ((d.conditions||[]).length ? `<table><tr><th>诊断原文</th><th>首现</th><th>ICD</th><th>证据</th></tr>` +
+          (d.conditions||[]).map(c => `<tr><td>${esc(c.raw_text||"—")}</td><td>${esc(c.onset||"—")}</td><td class="mut">${esc(c.icd_code||"—")}</td><td class="mut">${esc((c.docrefs||[]).map(s=>s.slice(0,12)).join(" "))}</td></tr>`).join("") + `</table>`
+          : '<p class="mut">无可解析的诊断记录。上传含诊断的 txt 原件后重试。</p>'));
+    } else if (tab === "audit") {
+      // 审计视图（D-030 读面已毕业，此前页面未接）——真相层事件日志的投影，只读。
+      const d = await j(`/audit?person=${encodeURIComponent(cur)}`);
+      out(`<h2>审计 · ${esc(p.name)} <span class="mut">count=${(d.count!=null?d.count:0)}</span></h2>` +
+        ((d.entries||[]).length ? `<table><tr><th>时刻</th><th>来源</th><th>动作</th><th>概要</th><th>sha256</th></tr>` +
+          (d.entries||[]).map(e => `<tr><td class="mut">${esc((e.ts||"").slice(0,19))}</td><td>${esc(e.source||"")}</td><td>${esc(e.op||"")}</td><td>${esc(e.detail||"—")}</td><td class="mut">${esc((e.sha256||"").slice(0,12))}</td></tr>`).join("") + `</table>`
+          : '<p class="mut">该人员暂无审计条目。</p>'));
     } else if (tab === "home") {
       // 家庭自测趋势（T32）：**只**读 /measurements?kind=self_measurement。
       // ⚠️ 与「指标」页**刻意分开展示**：家庭自测值与医院指标参考区间不同，

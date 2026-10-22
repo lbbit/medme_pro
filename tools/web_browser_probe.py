@@ -224,11 +224,73 @@ def main():
             else:
                 bad("B9 检索无结果渲染: %r" % res[:200])
 
+        # ---- B11/B12/B13 用药 / 病程 / 审计 三个读面（T42：读面已毕业但页面此前未接）----
+        def upload_to_cur(path):
+            """把样本经**真 API** 传进页面上正选着的那个人（与 B8 同款纪律：不靠同名匹配去猜人）。"""
+            cur = page.get_attribute("#plist li.on", "data-id")
+            if not cur:
+                return None
+            boundary = "----probe%s" % os.getpid()
+            with open(path, "rb") as f:
+                body = b"".join([
+                    ("--%s\r\n" % boundary).encode(),
+                    b'Content-Disposition: form-data; name="file"; filename="probe.txt"\r\n',
+                    b"Content-Type: text/plain\r\n\r\n", f.read(), b"\r\n",
+                    ("--%s--\r\n" % boundary).encode(),
+                ])
+            req = urllib.request.Request(
+                BASE + "/api/v1/persons/%s/documents" % cur, data=body,
+                headers={"content-type": "multipart/form-data; boundary=%s" % boundary},
+                method="POST")
+            urllib.request.urlopen(req).read()
+            return cur
+
+        @step("B11")
+        def _b11():
+            meds = os.environ.get("SAMPLE_MEDS", "")
+            if not meds or not os.path.exists(meds):
+                bad("B11 没有处方样本可上传（SAMPLE_MEDS=%r）" % meds)
+                return
+            upload_to_cur(meds)
+            page.click('button[data-t="meds"]')
+            page.wait_for_timeout(1200)
+            pane = page.inner_text("#pane")
+            if "med_count=" in pane and "氨氯地平" in pane:
+                ok("B11 用药页渲染出 med_count 与药名: %s" % pane.split("\n")[0][:80])
+            else:
+                bad("B11 用药页未渲染出药品: %r" % pane[:200])
+
+        @step("B12")
+        def _b12():
+            conds = os.environ.get("SAMPLE_CONDS", "")
+            if not conds or not os.path.exists(conds):
+                bad("B12 没有出院记录样本可上传（SAMPLE_CONDS=%r）" % conds)
+                return
+            upload_to_cur(conds)
+            page.click('button[data-t="conds"]')
+            page.wait_for_timeout(1200)
+            pane = page.inner_text("#pane")
+            if "condition_count=" in pane and "脑梗死" in pane:
+                ok("B12 病程页渲染出 condition_count 与诊断: %s" % pane.split("\n")[0][:80])
+            else:
+                bad("B12 病程页未渲染出诊断: %r" % pane[:200])
+
+        @step("B13")
+        def _b13():
+            page.click('button[data-t="audit"]')
+            page.wait_for_timeout(1200)
+            pane = page.inner_text("#pane")
+            if "count=" in pane and ("导入" in pane or "create" in pane):
+                ok("B13 审计页渲染出条目: %s" % pane.split("\n")[0][:80])
+            else:
+                bad("B13 审计页未渲染出条目: %r" % pane[:200])
+
         # ---- B10 页面不得把错误当内容渲染出来 ----
         @step("B10")
         def _b10():
-            pane = page.inner_text("#pane")
-            if "[ERROR]" in pane:
+            # 判据落在**整页**而不是 #pane：pane 会被后一步的视图替换 ⇒ 只看 pane 会漏判
+            body = page.inner_text("body")
+            if "[ERROR]" in body:
                 bad("B10 页面渲染出 [ERROR]（错误被当成内容显示）")
             else:
                 ok("B10 页面无 [ERROR] 残留")
