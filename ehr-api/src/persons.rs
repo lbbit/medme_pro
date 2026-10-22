@@ -8,6 +8,31 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 
+/// **进程内**的 registry 追加锁（全局一把，不是每文件一把）。
+///
+/// 为什么需要它（T38 实测抓到的真缺陷）：
+///   `append()` 原先用 `serde_json::to_writer(&mut f, ev)` 往文件里写 —— 那**不是一次写**，
+///   而是**几十次小 write syscall**（键、值、逗号逐段吐）⇒ 两个并发建档请求的这些小写
+///   会**交错落盘** ⇒ 真相层 `registry/persons.jsonl` 里出现「半行 + 半行」的交错垃圾。
+///   实测：60 个并发 `POST /persons` ⇒ **59 行里 29 行是交错垃圾** ⇒ 此后
+///   `GET /persons`、`/timeline`、审计视图等**所有**读面永久 500（真相层被写坏且不可自愈）。
+///   ⇒ 这不是「抖动」，是**真相层可被并发写打坏** ⇒ 必须机制化。
+///
+/// 为什么是「单次 write_all + 锁」两件事（缺一不可）：
+///   ① 锁 ⇒ 同一进程内的并发 append 互斥（临界区覆盖「序列化 + 写入」整段）；
+///   ② **先序列化成整行 String，再一次性 `write_all`** ⇒ 即使有**跨进程**并发
+///      （锁只管本进程），O_APPEND 模式下**一次 write syscall** 的内容也不会与别家交错
+///      （内核在同一次写入里把整段字节追加到文件尾）⇒ 行不再破碎。
+///   ⇒ 只加锁不改写粒度：锁能防住本进程，但「一把锁只护住一个 write_all」这件事
+///      仍需由「整行一次写」保证 ⇒ 两者是**不同**的失效模式，必须都治。
+static APPEND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 取 registry 追加锁。poison 时**取回内部值**继续用（ poisons 只说明「曾有线程在锁里 panic」，
+/// 追加临界区里没有不变量会被破坏 ⇒ 不该让一次 panic 把 registry 永久写死）。
+fn append_lock() -> std::sync::MutexGuard<'static, ()> {
+    APPEND_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Op {
@@ -86,15 +111,51 @@ impl PersonStore {
         if let Some(dir) = self.file.parent() {
             std::fs::create_dir_all(dir).context("mkdir registry dir")?;
         }
+        // ① 先把整行序列化好（**不**直接 to_writer 到文件：那会变成几十次小 write ⇒ 并发交错）
+        let mut line = serde_json::to_vec(ev).context("serialize registry event")?;
+        line.push(b'\n');
+        // ② 进程内互斥（覆盖「写」整段）
+        let _guard = append_lock();
+        // ③ O_APPEND + **一次 write_all** ⇒ 跨进程并发也不会把行写碎
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.file)
             .with_context(|| format!("open {}", self.file.display()))?;
-        serde_json::to_writer(&mut f, ev).context("serialize registry event")?;
-        f.write_all(b"\n").context("write newline")?;
+        f.write_all(&line).context("write registry line")?;
         f.flush().context("flush")?; // 低频写，每次同步落盘：真相层宁慢勿丢
         Ok(())
+    }
+
+    /// 读出 registry 文件的**完整行**。
+    ///
+    /// 为什么要有这个函数（T38）：
+    ///   写侧现在是「整行一次 write_all」⇒ **行内**不会破碎；但**跨进程**并发时，
+    ///   读侧仍可能正好读到「写了一半的最后一行」（末尾没有换行符）。
+    ///   ⇒ **「末行不完整」≠「真相层被写坏」** ⇒ 两者必须**分开判**：
+    ///     · 末行不完整（无结尾 `\n`）⇒ 说明有并发写在途 ⇒ **跳过该行**（它还没写完）
+    ///       并打 warn（可观测，不静默）；
+    ///     · **完整行**解析失败 ⇒ 那是真的坏了（历史遗留的交错垃圾 / 磁盘损坏）⇒ **必须红**，
+    ///       绝不「跳过坏行」——否则真相层坏了却装作没事（D-050「派生期望值不得为空」同族：
+    ///       掩盖比报错更坏）。
+    ///   ⇒ 判据落点：**只有「最后一行且不完整」可豁免**，其它任何一行坏 ⇒ 一律报错。
+    fn complete_lines<'a>(&self, contents: &'a str) -> Vec<&'a str> {
+        let mut out = Vec::new();
+        let mut rest = contents;
+        while let Some(idx) = rest.find('\n') {
+            let (line, tail) = rest.split_at(idx);
+            out.push(line);
+            rest = &tail[1..];
+        }
+        // 剩下的尾巴：非空 ⇒ 说明最后一次写还没写完（末尾无 '\n'）⇒ 跳过（并留 warn）
+        if !rest.is_empty() {
+            tracing::warn!(
+                file = %self.file.display(),
+                tail_bytes = rest.len(),
+                "registry 末行不完整（有并发写在途）⇒ 本次读跳过该行（真相层未受损）"
+            );
+        }
+        out
     }
 
     /// 折叠全量事件 → 当前态列表（按创建序）。MVP 规模假设<千级人·万级事件，直读足够；
@@ -108,7 +169,7 @@ impl PersonStore {
         };
         let mut order: Vec<String> = vec![];
         let mut cur: std::collections::HashMap<String, Cur> = Default::default();
-        for (ln, line) in contents.lines().enumerate() {
+        for (ln, line) in self.complete_lines(&contents).into_iter().enumerate() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -161,7 +222,7 @@ impl PersonStore {
             Err(e) => return Err(e).with_context(|| format!("read {}", self.file.display())),
         };
         let mut out = Vec::new();
-        for (ln, line) in contents.lines().enumerate() {
+        for (ln, line) in self.complete_lines(&contents).into_iter().enumerate() {
             let line = line.trim();
             if line.is_empty() {
                 continue;

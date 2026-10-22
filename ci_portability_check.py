@@ -64,6 +64,8 @@ NEEDS_ENV = [
     "mcp-interop-e2e.sh",
     # T36 新增：TS 面第三方互通门也起真进程（要产物路径）⇒ 同样必须经唯一来源
     "mcp-interop-ts-e2e.sh",
+    # T38 新增：registry 并发写门也起真进程（要产物路径）⇒ 同样必须经唯一来源
+    "registry-concurrency-e2e.sh",
 ]
 
 # 产物路径的「自己拼」形态：含 debug/ehr-api 或 release/ehr-api 的**路径 token**
