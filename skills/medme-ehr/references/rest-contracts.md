@@ -15,7 +15,7 @@ Base：`$EHR_API_BASE/api/v1`（默认 `http://127.0.0.1:8585/api/v1`）。
 | 方法+路径 | 作用 | 返回关键字段 |
 |---|---|---|
 | `GET /healthz` | 健康检查 | `status`(`ok`/`no-home`)、`home` |
-| `GET /capabilities` | **ingest 能力清单**（D-034；从实现派生，非手抄）：本构建真能吃哪些文件类型、哪种接不了、怎么开 | `ocr_available`(bool)/`ocr_engine`(null 或引擎名)/`routes[]`：`id`/`name`/`exts[]`/`enabled`/`reject_reason`/`accepted_exts[]`/`rejected_exts[]` |
+| `GET /capabilities` | **ingest 能力清单**（D-034；从实现派生，非手抄）：本构建真能吃哪些文件类型、哪种接不了、怎么开 | `ocr_available`(bool)/`ocr_engine`(null 或引擎名)/`routes[]`：`id`/`name`/`exts[]`/`enabled`/`reject_reason`/`accepted_exts[]`/`rejected_exts[]`/`max_upload_bytes`(**写侧单件上传上限，字节；REST 与 MCP **同一份**判据，超限报 **413**) |
 | `GET /persons` | 人员列表 | 数组：`id`/`name`/`birthday`/`gender`/`id_note`/`created_at`/`updated_at` |
 | `POST /persons` | 建档（body: `name` 必填；`birthday`/`gender`/`id_note` 选填） | 201 + 同上字段（`id` = person_id） |
 | `GET /persons/{pid}/timeline` | 健康事件时间线（文档级，`doc_date` 倒序） | `person_id`/`count`/`items[]`：`document_id`/`doc_date`/`doc_date_end`/`doc_type`/`title` |

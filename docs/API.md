@@ -664,6 +664,7 @@ ingest 能力清单（**从 `route_for_ext` 派生**，不是手抄表）。
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `accepted_exts` | array<string> | 是 | **本构建真能吃**的扩展名 |
+| `max_upload_bytes` | integer | 是 | **写侧单件上传上限**（字节）——REST 与 MCP **同一份**判据（单一事实来源）。 ⚠️ 此前 REST 实际卡在 **axum 默认 ~2.1MB**（隐式、未公布），MCP 卡 32MB   ⇒ 同一动作两个上限（跨面不一致）⇒ 本字段公布**当前真实生效值**，   调用方不必猜、也不必自己传超限文件再看 413。 |
 | `ocr_available` | boolean | 是 | 本二进制是否**链接了** OCR 引擎（feature `ocr` 派生）。 ⚠️ 只说明「链了」，**不保证模型权重已就绪**（诚实边界见模块头注释）。 |
 | `ocr_engine` | object | 否 | OCR 引擎名（没链接时为 null） |
 | `rejected_exts` | array<string> | 是 | **已知但本构建接不了**的扩展名（原因在 `routes[].reject_reason` 里） |
@@ -671,7 +672,7 @@ ingest 能力清单（**从 `route_for_ext` 派生**，不是手抄表）。
 
 ### `CapabilityRouteOut`
 
-一条 ingest 路由在能力清单里的对外形状（**显式建模**，D-038）。
+某条 ingest 路由在能力清单里的对外形状（**显式建模**，D-038）。
 
 为什么要有这个 struct：此前整份清单是 `json!` 拼出来的 `Value`
 ⇒ **OpenAPI 里根本没有它的形状**（`GET /capabilities` 的 200 无 body 声明）

@@ -39,7 +39,7 @@ fn capability_manifest_agrees_with_actual_ingest_behavior() {
     use ehr_api::capabilities::*;
     let home = tmp_home("agree");
     let vault = ehr_api::vaults::open_person_vault(&home, "p1").unwrap();
-    let man = capability_manifest();
+    let man = capability_manifest(max_upload_bytes_from_env());
 
     // 取一个**假的** png 字节（不是真图）：默认构建应在**扩展名判据**处就拒，
     // 不该走到解码（那会给出与能力无关的错误）。⇒ 判据是「能力」，不是「内容」。
@@ -105,7 +105,10 @@ async fn capabilities_endpoint_matches_library_manifest() {
     // D-038：清单已是**显式建模的 struct**（不再是 `json!` 拼的 `Value`）
     // ⇒ 比较方式改为「两者都序列化成 Value 再比」——仍是**逐字相等**的判据，
     //    但不再依赖「Value 能和 struct 比」这种不存在的 trait 实现。
-    let man = serde_json::to_value(ehr_api::capabilities::capability_manifest()).unwrap();
+    let man = serde_json::to_value(ehr_api::capabilities::capability_manifest(
+        ehr_api::capabilities::max_upload_bytes_from_env(),
+    ))
+    .unwrap();
     assert_eq!(v, man);
     // 关键事实对调用方可见：ocr 引擎有没有、哪些类型被拒。
     assert!(v["ocr_available"].is_boolean());

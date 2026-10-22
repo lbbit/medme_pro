@@ -35,6 +35,16 @@ pub struct AppState {
     pub store: PersonStore,
     /// T4：token 表。空表 = open 模式（未配置 token ⇒ 放行，但启动 [证据] 行显式标 auth=open）
     pub auth: auth::TokenSet,
+    /// **写侧单件上传上限**（字节）——REST / MCP / 能力清单**三处共用的唯一一份**（T39-④）。
+    ///
+    /// ⚠️ 为什么**存在状态里**而不是各处各读 env：
+    ///   上限被**三处**读（①路由的 body limit（建路由时）、②handler/MCP 工具的判据（请求时）、
+    ///   ③能力清单的公布值）⇒ 若各读各的 env，则「启动后改了 env」会让三处看到**不同的值**
+    ///   ⇒ 清单可能**说谎**（说 64MB，实际 32MB 就 413）⇒ 又一处「同一事实多份实现」。
+    ///   ⇒ 纪律：**env 是启动期配置**——解析一次存进状态，之后**全进程读这一处**；
+    ///     要改就**重启**（部署语义清晰，且不制造「半程改参」这种无法被测到的分叉）。
+    ///   ⇒ 附带好处：**门禁可在进程内用小上限构造状态来测**（不必起子进程、不必手工编 rustc）。
+    pub max_upload_bytes: usize,
 }
 
 impl AppState {
@@ -45,6 +55,7 @@ impl AppState {
             store: PersonStore::new(home.clone()),
             home,
             auth: auth::TokenSet::default(),
+            max_upload_bytes: capabilities::max_upload_bytes_from_env(),
         })
     }
 
@@ -54,7 +65,30 @@ impl AppState {
         auth: auth::TokenSet,
     ) -> Arc<AppState> {
         let home = home.into();
-        Arc::new(AppState { store: PersonStore::new(home.clone()), home, auth })
+        Arc::new(AppState {
+            store: PersonStore::new(home.clone()),
+            home,
+            auth,
+            max_upload_bytes: capabilities::max_upload_bytes_from_env(),
+        })
+    }
+
+    /// **带显式上传上限**构造（门禁/测试用）。
+    ///
+    /// ⚠️ 存在的理由（T39-④）：要在**不启动子进程**的前提下测「大载荷」这一维
+    ///   （传 32MB 真文件既慢又占内存）⇒ 允许**注入一个小上限**（如 1024 字节）。
+    ///   ⇒ 注意：**只有上限**可注入，其它行为不变 ⇒ 这条构造**不会**掩盖别的缺陷。
+    pub fn from_home_with_limit(
+        home: impl Into<std::path::PathBuf>,
+        max_upload_bytes: usize,
+    ) -> Arc<AppState> {
+        let home = home.into();
+        Arc::new(AppState {
+            store: PersonStore::new(home.clone()),
+            home,
+            auth: auth::TokenSet::default(),
+            max_upload_bytes,
+        })
     }
 }
 
@@ -112,8 +146,12 @@ async fn healthz(State(st): State<Arc<AppState>>) -> Result<Json<HealthzReply>, 
 /// `stored_raw_only=true` + messages，不假装识别成功。
 #[utoipa::path(get, path = "/api/v1/capabilities", tag = "meta",
     responses((status = 200, description = "ingest capability manifest (accepted/rejected file types, ocr engine availability)", body = capabilities::CapabilityManifest)))]
-async fn get_capabilities() -> Result<Json<capabilities::CapabilityManifest>, ApiError> {
-    Ok(Json(capabilities::capability_manifest()))
+async fn get_capabilities(
+    State(st): State<Arc<AppState>>,
+) -> Result<Json<capabilities::CapabilityManifest>, ApiError> {
+    // T39-④：清单里的上限 == `st.max_upload_bytes` == 本进程真正生效的值
+    // ⇒ 调用方看到的永远是**真实**上限（不是「env 此刻的值」）。
+    Ok(Json(capabilities::capability_manifest(st.max_upload_bytes)))
 }
 
 /// 人员列表（读 registry/persons.jsonl 全量折叠；MVP 规模足够，规模化后换派生索引——真相层不变）
@@ -281,17 +319,44 @@ async fn upload_document(
     mp: axum::extract::Multipart,
 ) -> Result<(StatusCode, Json<vaults::UploadReply>), ApiError> {
     // 先在 async 侧收齐字节(axum multipart 是 Future 世界的事)，再进同步临界区。
+    let max_bytes = st.max_upload_bytes;
     let mut file_field: Option<(String, Vec<u8>)> = None;
     let mut count_files = 0usize;
     let mut mp = mp;
     while let Some(part) = mp.next_field().await.map_err(|e| {
-        ApiError(StatusCode::BAD_REQUEST, format!("bad multipart: {e}"))
+        // T39：**超限**与**格式坏**必须分开说。此前两者都报 400「bad multipart: Error parsing
+        // `multipart/form-data` request」⇒ 调用方以为是自己 multipart 写错了（去改格式），
+        // 实际是**文件太大**（该去压缩/分片）⇒ **错误语义误导**（D5：状态码不许粉饰）。
+        // ⇒ 判据：axum 的 `MultipartError::status()` 把 body-limit 命中映射为 413 ⇒ 直接采信它。
+        let st = e.status();
+        ApiError(
+            st,
+            format!(
+                "bad multipart: {e}{}",
+                if st == StatusCode::PAYLOAD_TOO_LARGE {
+                    format!("（上传超出单件上限 {max_bytes} 字节；上限见 GET /api/v1/capabilities 的 max_upload_bytes）")
+                } else {
+                    String::new()
+                }
+            ),
+        )
     })? {
         if part.name() == Some("file") {
             count_files += 1;
             let name = part.file_name().unwrap_or("upload.bin").to_string();
             let bytes = part.bytes().await.map_err(|e| {
-                ApiError(StatusCode::PAYLOAD_TOO_LARGE, format!("read field failed (size cap?): {e}"))
+                let st = e.status();
+                ApiError(
+                    st,
+                    format!(
+                        "read field failed: {e}{}",
+                        if st == StatusCode::PAYLOAD_TOO_LARGE {
+                            format!("（上传超出单件上限 {max_bytes} 字节；上限见 GET /api/v1/capabilities 的 max_upload_bytes）")
+                        } else {
+                            String::new()
+                        }
+                    ),
+                )
             })?;
             file_field = Some((name, bytes.to_vec()));
         }
@@ -303,6 +368,20 @@ async fn upload_document(
     let Some((filename, bytes)) = file_field else {
         return Err(ApiError(StatusCode::BAD_REQUEST, "multipart must carry a `file` field".into()));
     };
+    // T39：**自己判单件上限**（判据与 MCP 同一处：`st.max_upload_bytes`）。
+    // 路由上的 body limit 只比这个值**略宽**（留给 multipart 头部开销）⇒ 命中 body limit 时
+    // 是「确实超了」，而**恰好超一点点**的情形由本行判据给出**精确**的 413（说明超了多少、
+    // 上限是多少）⇒ 不再依赖「axum 默认 2MB」那个隐式上限。
+    if bytes.len() > max_bytes {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "upload too large: {} bytes exceeds limit {} bytes（上限见 GET /api/v1/capabilities 的 max_upload_bytes）",
+                bytes.len(),
+                max_bytes
+            ),
+        ));
+    }
 
     tokio::task::block_in_place(|| {
         require_person(&st, &pid)?;
@@ -984,7 +1063,27 @@ async fn mcp_endpoint(
     )
     .await
     .map_err(|e| {
-        ApiError(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}"))
+        // T39：**超限**必须报 413，不能混进 400。
+        //   实测缺陷：MCP 面 `upload_document` 宣称可传 32MB（工具自己的判据），
+        //   但 JSON body 仍走 **axum 默认 2MB** ⇒ 实测 base64 长度 2_666_668 字节时
+        //   HTTP 层直接 400「length limit exceeded」⇒ **宣称的上限根本不可达**
+        //   （而且 400 会让 agent 以为是自己 JSON 写错了 ⇒ 改参数重试 ⇒ 永远失败）。
+        //   ⇒ 判据：axum 的 `JsonRejection::status()` 对「body 超长」给 413（LengthLimitError）
+        //   ⇒ 采信它；其余（语法错/缺 content-type）仍按 400（保持既有语义不变）。
+        // ⚠️ 局部名用 `code`（不是 `st`）——`st` 已被 `State(st)` 占用（同名会遮蔽状态）。
+        let code = e.status();
+        if code == StatusCode::PAYLOAD_TOO_LARGE {
+            let max_bytes = st.max_upload_bytes;
+            ApiError(
+                code,
+                format!(
+                    "request body too large（单件上传上限 {max_bytes} 字节；base64 编码后约 {} 字节；上限见 GET /api/v1/capabilities 的 max_upload_bytes）",
+                    max_bytes * 4 / 3 + 1024 * 1024
+                ),
+            )
+        } else {
+            ApiError(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}"))
+        }
     })?;
     // JSON 解析失败由 axum 的 Json 拒绝器回 400（非 JSON-RPC 形状）——协议层与 REST 层边界诚实：
     // 客户端发错 content-type/体时，2025-06-18 允许 HTTP 层先行拒绝。
@@ -992,6 +1091,9 @@ async fn mcp_endpoint(
 }
 
 pub fn router(st: Arc<AppState>) -> Router {
+    // T39-④：body limit **从状态里取**（不自己读 env）⇒ 路由层与 handler 层
+    //   看到的**必然是同一个值** ⇒ 「清单说 32MB、实际 2MB 就 413」这种分叉**不可能发生**。
+    let max_upload_bytes = st.max_upload_bytes;
     let api = Router::new()
         .route("/healthz", get(healthz))
         .route("/capabilities", get(get_capabilities)) // D-034：ingest 能力清单（真源=实现，从它派生）
@@ -999,7 +1101,16 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/persons/{pid}", get(stub_person_detail)).route("/persons/{pid}", patch(stub_person_update)).route("/persons/{pid}", delete(stub_person_delete)) // 人员详情/修订/归档: pending(stage-2后半)——契约以路由为准(见 tests/contract.rs MOUNTED)
         .route("/persons/{pid}/timeline", get(get_timeline))
         .route("/persons/{pid}/search", get(get_search))
-        .route("/persons/{pid}/documents", get(list_documents).post(upload_document))
+        .route(
+            "/persons/{pid}/documents",
+            get(list_documents).post(upload_document).layer(
+                // T39：**显式**放宽 axum 默认的 ~2MB body limit（那不是本项目的上限，
+                // 只是一个隐式默认值，且比 MCP 侧严 15 倍 ⇒ 同一动作两个上限）。
+                // 这里设 = 单件上限 + multipart 头部开销余量；真正的**判据**仍是
+                // `st.max_upload_bytes`（handler 内那行）⇒ 一处判据。
+                axum::extract::DefaultBodyLimit::max(max_upload_bytes + 64 * 1024),
+            ),
+        )
         // hash docref 域已实装(从 CONTRACT stub 毕业)。两条显式路由，不用前缀通配(D7:多余后缀应404而非静默命中)。
         .route("/persons/{pid}/documents/{sha}", get(get_document_detail))
         .route("/persons/{pid}/documents/{sha}/original", get(get_document_original))
@@ -1020,7 +1131,16 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/", get(web_index)) // Web 管理端最小版：同源零依赖，避免跨域反代；刷新任意路由均回首页(D-016)
         // ⚠️ /mcp 必须挂在 nest("/api/v1") 之外：它是 MCP 协议面（客户端按规范打 /mcp），
         //   塞进 REST 命名空间会让 clients 走 /api/v1/mcp 找不到——本轮 404 实证。
-        .route("/mcp", post(mcp_endpoint))
+        .route("/mcp", post(mcp_endpoint).layer(
+            // T39：MCP 面要传 base64 化的原件（≈ 原始字节 × 4/3）⇒ body limit 必须
+            // **按 base64 后的大小**给，否则「宣称 32MB 的上限」在 HTTP 层根本到不了
+            // （实测：base64 长度 2_666_668 字节 ⇒ 400 length limit exceeded）。
+            // ⇒ 这里给 = 单件上限的 base64 膨胀 + 余量；**判据**仍是
+            // `st.max_upload_bytes`（工具层那行）⇒ 一处判据。
+            axum::extract::DefaultBodyLimit::max(
+                max_upload_bytes * 4 / 3 + 1024 * 1024,
+            ),
+        ))
         // 顶层 Router 无 state 参数 ⇒ 挂 /mcp 时须显式 with_state（内层 api 已消费 st，这里 clone 一个 Arc）
         .with_state(st.clone())
         // D-024：重建守卫层（重建进行中 ⇒ 业务路径 503）。放在鉴权层**内侧**：
@@ -1042,7 +1162,12 @@ pub fn prepare_home_and_state(home_in: &std::path::Path, mkdir_vaults: bool) -> 
     if mkdir_vaults {
         std::fs::create_dir_all(home.join("vaults")).context("mkdir vaults")?;
     }
-    Ok(Arc::new(AppState { store: PersonStore::new(home.clone()), home, auth: auth::TokenSet::default() }))
+    Ok(Arc::new(AppState {
+        store: PersonStore::new(home.clone()),
+        home,
+        auth: auth::TokenSet::default(),
+        max_upload_bytes: capabilities::max_upload_bytes_from_env(),
+    }))
 }
 
 /// serve 用：home 校验 + 注入 env 里的 token 表。token 表格式错误 ⇒ 直接启动失败
@@ -1057,6 +1182,7 @@ pub fn prepare_home_and_state_auth(
         home: st.home.clone(),
         store: PersonStore::new(st.home.clone()),
         auth: set.clone(),
+        max_upload_bytes: capabilities::max_upload_bytes_from_env(),
     });
     Ok((st, set))
 }

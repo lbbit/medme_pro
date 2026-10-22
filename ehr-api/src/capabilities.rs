@@ -86,7 +86,67 @@ pub fn route_enabled(route: Route) -> bool {
     }
 }
 
-/// 一条 ingest 路由在能力清单里的对外形状（**显式建模**，D-038）。
+/// **写侧单件上传上限**（解码/落盘前的**字节数**）——**单一事实来源**。
+///
+/// 为什么要有这个常量（T39 实测抓到的**跨面不一致**）：
+///   此前**同一个动作**（上传一份原件）在两个面上有**两个不同的上限**：
+///     · REST `POST /persons/{pid}/documents`（multipart）⇒ 落进 **axum 默认 body limit
+///       ≈ 2.1MB**（`DEFAULT_LIMIT = 2_097_152`，见 axum-core `ext_traits/request.rs`）
+///       ⇒ **隐式**、**未公布**、调用方无法预知；
+///     · MCP `upload_document`（base64）⇒ 自己判 **32MB**。
+///   ⇒ 同一个业务动作，REST 拒得比 MCP 严 15 倍 ⇒ 换个协议就传不上去 ⇒ **跨面不一致**
+///     （D2 家族：「一个语义只允许一处实现」的**数值**版本）。
+///   ⇒ 实测证据：REST 传 2_097_200 字节 → **200**；传 2_200_000 字节 → **413**
+///     （且报文说「multipart 解析失败」，把「超限」误述为「格式坏」——见 T39-③）。
+///
+/// 取值理由：32MB 覆盖绝大多数病历 PDF / 影像元数据；与 MCP 侧原值一致 ⇒ 两面同参。
+/// **可被环境变量覆盖**（`EHR_MAX_UPLOAD_BYTES`）⇒ 部署方能按需调整，而**判据仍只有一处**
+/// （覆盖后清单里公布的数字会随之变化 ⇒ 调用方看到的永远是真实生效值）。
+pub const DEFAULT_MAX_UPLOAD_BYTES: usize = 32 * 1024 * 1024;
+
+/// 环境变量名（覆盖上传上限）。
+pub const MAX_UPLOAD_BYTES_ENV: &str = "EHR_MAX_UPLOAD_BYTES";
+
+/// 解析上传上限的**纯函数**（便于单测直接覆盖各种输入）。
+///
+/// ⚠️ 纪律（D5「不静默」）：环境变量**非法**时不报错、而是回落缺省 ⇒ 调用方以为自己改成功了。
+///   ⇒ 回落时打一条 `warn`，让「生效值 != 我设的值」这件事**可观测**。
+pub fn parse_max_upload_bytes(raw: Option<&str>) -> usize {
+    let Some(v) = raw else {
+        return DEFAULT_MAX_UPLOAD_BYTES;
+    };
+    let t = v.trim();
+    match t.parse::<usize>() {
+        Ok(n) if n > 0 => n,
+        _ => {
+            tracing::warn!(
+                env = MAX_UPLOAD_BYTES_ENV,
+                value = %v,
+                "上传上限环境变量非法（非正整数）⇒ 回落到缺省 {} 字节",
+                DEFAULT_MAX_UPLOAD_BYTES
+            );
+            DEFAULT_MAX_UPLOAD_BYTES
+        }
+    }
+}
+
+/// **从环境变量**解析当前生效的上传上限（字节）。
+///
+/// ⚠️ T39-④ 纪律：**env 是启动期配置**——这个函数只在**进程启动**时调用一次，
+///   结果存进 `AppState.max_upload_bytes` ⇒ 之后**全进程只读这一份**。
+///   ⇒ 为什么不缓存成 `LazyLock`（曾这么写过，后改掉）：缓存会让「进程内改 env」不生效
+///     ⇒ 门禁只能靠「起子进程 + 手工编 rustc」才能测（实测踩到：`rustc` 缺 `--extern tokio`
+///     ⇒ 子进程编译失败 ⇒ 门红，且红的原因与被测行为**无关**——典型的**假红来源**）。
+///   ⇒ 为什么不每次读 env（也曾这么写，后改掉）：那样「路由的 body limit」（建路由时取值）
+///     与「handler 的判据」（请求时取值）**可能看到不同的值** ⇒ 又一处「同一事实两份实现」
+///     ⇒ 且这种分叉**无法被测到**（因为它只在「中途改 env」时发生）。
+///   ⇒ 现在的形态：**启动时解析一次 → 存进状态 → 全进程读同一处**。
+///     门禁要测「小上限」⇒ 直接构造带小上限的状态，**不需要子进程**。
+pub fn max_upload_bytes_from_env() -> usize {
+    parse_max_upload_bytes(std::env::var(MAX_UPLOAD_BYTES_ENV).ok().as_deref())
+}
+
+/// 某条 ingest 路由在能力清单里的对外形状（**显式建模**，D-038）。
 ///
 /// 为什么要有这个 struct：此前整份清单是 `json!` 拼出来的 `Value`
 /// ⇒ **OpenAPI 里根本没有它的形状**（`GET /capabilities` 的 200 无 body 声明）
@@ -125,9 +185,24 @@ pub struct CapabilityManifest {
     pub accepted_exts: Vec<String>,
     /// **已知但本构建接不了**的扩展名（原因在 `routes[].reject_reason` 里）
     pub rejected_exts: Vec<String>,
+    /// **写侧单件上传上限**（字节）——REST 与 MCP **同一份**判据（单一事实来源）。
+    /// ⚠️ 此前 REST 实际卡在 **axum 默认 ~2.1MB**（隐式、未公布），MCP 卡 32MB
+    ///   ⇒ 同一动作两个上限（跨面不一致）⇒ 本字段公布**当前真实生效值**，
+    ///   调用方不必猜、也不必自己传超限文件再看 413。
+    pub max_upload_bytes: usize,
 }
 
-pub fn capability_manifest() -> CapabilityManifest {
+/// **能力清单**（上传上限由调用方**显式给出**）。
+///
+/// ⚠️ 为什么上限是**必填参数**而不是清单自己读 env（T39-④）：
+///   清单公布的 `max_upload_bytes` 必须**等于同一个进程里真正生效的那个值**。
+///   若清单自己去读 env，而 handler 读的是 `AppState` 里的值，则两者在
+///   「env 与状态不一致」时会**分叉** ⇒ 调用方看到的清单**在说谎**
+///   （说能传 64MB，实际 32MB 就 413）。
+///   ⇒ 纪律：**清单的值 = 状态里的值**，由同一个持有者传入（D2 的数值版本）。
+///   ⇒ 后果：**没有「无参版」** ⇒ 任何新增调用点都必须**显式**决定用哪个上限
+///     ⇒ 「忘了传」会编译不过，而不是静默用错值。
+pub fn capability_manifest(max_upload_bytes: usize) -> CapabilityManifest {
     let all_known = [
         "txt", "pdf", "png", "jpg", "jpeg", "tiff", "tif", "dcm",
     ];
@@ -167,6 +242,7 @@ pub fn capability_manifest() -> CapabilityManifest {
         routes,
         accepted_exts: accepted,
         rejected_exts: rejected,
+        max_upload_bytes,
     }
 }
 
@@ -189,7 +265,7 @@ mod tests {
     #[test]
     fn manifest_is_derived_from_the_same_judgement_as_ingest() {
         // 判据与清单同源：清单里的 accepted_exts 逐个必须被 `route_for_ext` 判成 enabled 的路由。
-        let man = capability_manifest();
+        let man = capability_manifest(max_upload_bytes_from_env());
         for e in man.accepted_exts.iter() {
             let r = route_for_ext(e);
             assert!(route_enabled(r), "accepted ext {e} but route {:?} not enabled", r);

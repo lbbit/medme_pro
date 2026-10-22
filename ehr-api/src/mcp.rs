@@ -33,9 +33,14 @@ const ERR_FORBIDDEN: i64 = -32004;
 /// 未知资源 URI（不是「查无此人」）——与 -32001 区分，agent 据此改 URI 而不是换人。
 const ERR_UNKNOWN_RESOURCE: i64 = -32005;
 
-/// 写侧单件上限（解码后字节数）。防止 agent 一口气塞 500MB 把内存打爆。
+/// **写侧单件上限**（解码后字节数）。防止 agent 一口气塞 500MB 把内存打爆。
 /// 32MB 覆盖绝大多数病历 PDF/影像元数据；超出即 -32602（改参数，不重试）。
-const MAX_UPLOAD_BYTES: usize = 32 * 1024 * 1024;
+///
+/// ⚠️ T39-④：判据**不再**是一份独立的常量，也**不**自己读 env ——
+///   而是**由调用方（`AppState`）传入** ⇒ 与 REST 面、路由 body limit、能力清单
+///   **读同一个值** ⇒ 四个面**不可能分叉**。
+///   （此前这里是独立一份 32MB 常量，而 REST 面实际卡在 axum 默认 ~2.1MB
+///   ⇒ 同一动作两个上限 ⇒ 跨面不一致，见 D-055/T39-①。）
 
 fn err_obj(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
@@ -213,7 +218,7 @@ fn domain_code(e: &ApiError) -> i64 {
 fn call_tool(st: &Arc<AppState>, id: Value, name: &str, args: &Value) -> Value {
     // 参数校验放在 async 之外，先于任何 IO —— 非法参数不该打开任何文件。
     // 校验失败必须**带原因**（agent 要知道是名字空、base64 坏、还是超限），不能只丢一个码（D5）。
-    let prepared = match prepare(name, args) {
+    let prepared = match prepare(name, args, st.max_upload_bytes) {
         Ok(p) => p,
         Err((code, why)) => return tool_err(id, code, format!("invalid arguments for tool `{name}`: {why}")),
     };
@@ -242,7 +247,7 @@ fn call_tool(st: &Arc<AppState>, id: Value, name: &str, args: &Value) -> Value {
         Prepared::Conditions { ref pid } => conditions_payload(st, pid),
         Prepared::Measurements { ref pid, ref q } => measurements_payload(st, pid, q),
         Prepared::Audit { ref q } => audit_payload(st, q),
-        Prepared::Capabilities => capabilities_payload(),
+        Prepared::Capabilities => capabilities_payload(st.max_upload_bytes),
         Prepared::Documents { ref pid } => documents_payload(st, pid),
         Prepared::DocumentDetail { ref pid, ref sha } => document_detail_payload(st, pid, sha),
         // ---------- 写侧（D-019）：建档 / 传原件 ----------
@@ -347,11 +352,12 @@ fn audit_payload(st: &AppState, q: &audit::AuditQuery) -> Result<Value, ApiError
     serde_json::to_value(reply).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
-fn capabilities_payload() -> Result<Value, ApiError> {
+fn capabilities_payload(max_upload_bytes: usize) -> Result<Value, ApiError> {
     // D-034 未销账⑫：**复用同一份** `capabilities::capability_manifest()`
     // （与 REST `GET /api/v1/capabilities` 逐字同源）⇒ 只吃 MCP 的宿主
     // 也能判断「我的文件能不能传」，不必猜、不必看日志。
-    serde_json::to_value(capabilities::capability_manifest())
+    // ⚠️ T39-④：上限**从状态传入**（不是自己读 env）⇒ 与 REST 面**逐字相等**。
+    serde_json::to_value(capabilities::capability_manifest(max_upload_bytes))
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
@@ -435,7 +441,11 @@ fn opt_str_arg(args: &Value, k: &str) -> Result<Option<String>, ArgErr> {
     }
 }
 
-fn prepare(name: &str, args: &Value) -> Result<Prepared, ArgErr> {
+/// 工具参数校验（**在任何 IO 之前**完成——非法参数不该打开任何文件）。
+///
+/// ⚠️ `max_upload_bytes` 是**必填参数**（T39-④）：它由 `AppState` 持有并传进来
+///   ⇒ 与 REST 面、路由 body limit、能力清单**读同一个值** ⇒ 不会分叉。
+fn prepare(name: &str, args: &Value, max_upload_bytes: usize) -> Result<Prepared, ArgErr> {
     Ok(match name {
         "list_persons" => Prepared::Persons,
         "get_timeline" => Prepared::Timeline { pid: str_arg(args, "person_id")?.to_string() },
@@ -495,10 +505,14 @@ fn prepare(name: &str, args: &Value) -> Result<Prepared, ArgErr> {
             if bytes.is_empty() {
                 return Err((INVALID_PARAMS, "`content_base64` decoded to 0 bytes".into()));
             }
-            if bytes.len() > MAX_UPLOAD_BYTES {
+            if bytes.len() > max_upload_bytes {
                 return Err((
                     INVALID_PARAMS,
-                    format!("decoded size {} exceeds limit {} bytes", bytes.len(), MAX_UPLOAD_BYTES),
+                    format!(
+                        "decoded size {} exceeds limit {} bytes",
+                        bytes.len(),
+                        max_upload_bytes
+                    ),
                 ));
             }
             Prepared::UploadDocument { pid, filename, bytes }
@@ -731,7 +745,7 @@ fn resource_payload(st: &AppState, uri: &str) -> Result<Value, (i64, String)> {
     let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
     match parts.as_slice() {
         // ehr://capabilities
-        ["capabilities"] => capabilities_payload().map_err(|e| (domain_code(&e), e.1)),
+        ["capabilities"] => capabilities_payload(st.max_upload_bytes).map_err(|e| (domain_code(&e), e.1)),
         // ehr://audit
         ["audit"] => audit_payload(st, &audit::AuditQuery { person: None, op: None })
             .map_err(|e| (domain_code(&e), e.1)),

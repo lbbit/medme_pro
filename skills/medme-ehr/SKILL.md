@@ -57,7 +57,7 @@ metadata:
 | 命令 | 字段 |
 |---|---|
 | `ehr.sh health` | `status` `home` |
-| `ehr.sh capabilities` | `ocr_available` `ocr_engine` `routes[]`：`id` `name` `exts[]` `enabled` `reject_reason` `accepted_exts[]` `rejected_exts[]` |
+| `ehr.sh capabilities` | `ocr_available` `ocr_engine` `routes[]`：`id` `name` `exts[]` `enabled` `reject_reason` `accepted_exts[]` `rejected_exts[]` `max_upload_bytes` |
 | `ehr.sh persons` | `id` `name` `birthday` `gender` `id_note` `created_at` `updated_at` |
 | `ehr.sh timeline PID` | `person_id` `count` `items[]`：`document_id` `doc_date` `doc_date_end` `doc_type` `title` |
 | `ehr.sh search PID Q` | `person_id` `q` `count` `items[]`：`document_id` `title` `snippet` |

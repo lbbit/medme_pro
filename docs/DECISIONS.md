@@ -1,5 +1,62 @@
 # 决策记录（ADR-lite，新决策在上）
 
+## D-056 2026-10-22 · **T39「写侧大载荷」——同一个动作（上传一份原件）在 REST 与 MCP 两个面上有两个不同的上限，且 MCP 宣称的那个上限根本不可达；把「上限」收成一份事实存进 `AppState`，并把超限的语义从 400 改成 413**
+
+**为什么做**：PLAN 从 T35 起连续多轮挂着同一条未销账项：「**写侧（`create_person`/`upload_document`）两轮各只调 1 次** ⇒ 未做多轮/并发/大载荷」。T38 关掉了「**并发**」那一维；本轮关「**大载荷**」那一维。
+**干跑在前（先抓缺陷，再改代码）**：动手前先用一次性干跑量出两个面的**真实**上限 ⇒ **当场抓到三个真缺陷，不是推演**。
+
+**真缺陷①：跨面不一致——同一个动作，两个上限**。
+- REST `POST /api/v1/persons/{pid}/documents`（multipart）⇒ 落进 **axum 默认 body limit ≈ 2.1MB**（`DEFAULT_LIMIT = 2_097_152`，见 axum-core `ext_traits/request.rs`）⇒ **隐式**、**未公布**、调用方无法预知；
+- MCP `upload_document`（base64）⇒ 工具层**自己判 32MB**（`mcp.rs` 里一份独立的常量）；
+- ⇒ 同一个业务动作，**REST 拒得比 MCP 严 15 倍** ⇒ 换个协议就传不上去 ⇒ 又一处「同一事实两份实现」（D2 的**数值**版本）。
+
+**真缺陷②：MCP 宣称的那个上限（32MB）根本不可达**。
+- 实测：base64 长度 2_666_668 字节 ⇒ HTTP 层直接 **400「length limit exceeded」** ⇒ 那个 32MB 是**假的**（差 15 倍）；
+- ⇒ 根因与①同源：MCP 的 **JSON body** 仍走 axum 默认 2MB ⇒ 工具层的判据（32MB）与传输层的上限（2MB）**互相不知情**。
+
+**真缺陷③：超限的错误语义误导**。
+- 实测：REST 传 2_200_000 字节 ⇒ 报 **400「bad multipart: Error parsing `multipart/form-data` request」**；MCP 侧同样报 400「invalid JSON body / length limit exceeded」；
+- ⇒ 调用方（人或 agent）会以为自己**格式写错了** ⇒ 去改格式 / 改参数重试 ⇒ **永远失败**；
+- ⇒ 正确语义是 **413（Payload Too Large）** + **说清上限是多少**（D5：状态码不许粉饰，错误消息要能指导下一步）。
+
+**关键结构决策①：上限收成「一份事实」，且住在 `AppState` 里（不是全局、不是各处各读 env）**。
+- 上限被**四处**读：①路由的 body limit（**建路由时**取值）· ②REST handler 的判据（**请求时**取值）· ③MCP 工具层的判据 · ④能力清单的公布值；
+- ⇒ 若各处各读一次 env，则「启动后改了 env」会让这四处看到**不同的值** ⇒ 清单可能**说谎**（说 64MB，实际 32MB 就 413）⇒ 又一处「同一事实多份实现」，且这种分叉**无法被测到**（它只在「中途改 env」时发生）；
+- ⇒ 修法：**启动时解析一次 → 存进 `AppState.max_upload_bytes` → 全进程读这一处**。四处的值**由构造保证相等**，不靠「大家记得读同一个地方」；
+- ⇒ 纪律（新增）：**env 是启动期配置**——要改就**重启**（部署语义清晰，且不制造「半程改参」这种无法被测到的分叉）。
+- ⇒ 派生纪律：**清单的构造改成「上限必填参数」**（`capability_manifest(max_upload_bytes)`）⇒ **没有无参版** ⇒ 任何新增调用点**忘了传**会**编译不过**，而不是静默用错值。
+
+**关键结构决策②：能力清单**新增 `max_upload_bytes` 字段**——公布「当前真实生效值」**。
+- 此前 REST 的上限**既没代码常量、也没公布给调用方** ⇒ 调用方只能「先传一个超限文件、再看 413」才知道自己的边界；
+- ⇒ 现在清单里**直接公布** ⇒ 调用方不必猜。**这是本轮对调用方最实际的改善**。
+
+**关键结构决策③：超限的**错误形状**必须分得开**（与 T39-③ 同款纪律，但落到了两个面）。
+- axum 的 `MultipartError::status()` 把 body-limit 命中映射为 **413**、`JsonRejection::status()` 对「body 超长」给 **413**（`LengthLimitError`）⇒ **直接采信框架的判据**（不自己猜）；
+- 其余（multipart 语法错 / JSON 语法错 / 缺 content-type）**仍按 400**（保持既有语义不变 ⇒ 不误伤别的错）。
+
+**关键结构决策④：门禁**必须能在**不传 32MB 真文件**的前提下测这一维** ⇒ 把上限做成**可注入**（`AppState::from_home_with_limit`）。
+- ⚠️ 本轮**先撞了一次假红**再修好：前一版门禁的形态是「起子进程 + 手工 `rustc` 编译一段内联断言」⇒ 实测**因缺 `--extern tokio` 而编译失败** ⇒ 门红，但**红的原因与被测行为完全无关**（被测的「上限判据」根本没跑到）⇒ 典型的**假红来源**（D-011 家族：门红了不是环境问题，是门自己的问题）；
+- ⇒ 修法：**把上限做成状态的一个字段** ⇒ 门禁**在进程内**用小上限（如 1024 字节）构造状态 ⇒ **不必起子进程、不必手工编 rustc** ⇒ 门从「依赖外部工具链」变成「纯库级判据」⇒ 跑得**快**（0.58s）且**不会假红**。
+
+**证据链（缺一即算交付）**：
+①**干跑抓缺陷（动手前）**：REST 实测 2_097_200 字节 → **200**、2_200_000 字节 → **413**（且报文说「multipart 解析失败」，把「超限」误述为「格式坏」）；MCP 实测 base64 长度 2_666_668 字节 → **400「length limit exceeded」**（宣称 32MB 不可达）。
+②**修后复跑（真进程 · 真 HTTP · 环境变量生效）**：`EHR_MAX_UPLOAD_BYTES=4096` 起真服务 ⇒ `GET /api/v1/capabilities` ⇒ **`max_upload_bytes = 4096`**（**参数确实生效**，且被公布）⇒ 传 1KB `.txt` ⇒ **200** 且回执含**真 CAS 哈希** `2edc9868…`（原件真进 CAS）⇒ 传 8KB ⇒ **413**「upload too large: 8192 bytes exceeds limit 4096 bytes（上限见 GET /api/v1/capabilities 的 max_upload_bytes）」⇒ 读面 `GET /api/v1/persons` 仍 **200**（超限**不污染**服务）。
+③**旧默认不再误伤**：默认上限 32MB 下传 **3MB** 文本 ⇒ **200**（此前被 axum 默认 2.1MB 卡成 413 ⇒ 这就是「跨面不一致」被消掉的直接证据）。
+④**MCP 面同参**（同一份状态、同一份上限）：`get_capabilities` 工具返回 **`max_upload_bytes = 4096`**（与 REST 面**逐字相等**）⇒ 传 8KB ⇒ `isError=true`，消息「decoded size 8192 exceeds limit 4096 bytes」（**带出上限数值**）⇒ **两面同参**成立。
+⑤**库级门 `ehr-api/tests/upload_limits.rs`（6 条判据全绿）**：`manifest_publishes_the_effective_upload_limit`（清单 == 状态值 == 注入值，三重相等）· `http_capabilities_publish_the_state_limit`（HTTP 面 == 库级清单**逐字相等**，且公布的是**生效值**）· `rest_upload_respects_limit_and_reports_413`（低于上限真落地 + 真 CAS；超限 **413** + 报文带出上限数值）· `mcp_upload_over_limit_returns_413_not_400`（MCP 面**不是** 400）· `rest_and_mcp_share_one_upload_limit`（**两面同参**的核心跨面不变量）· `invalid_limit_env_falls_back_to_default`（非法 env ⇒ 如实回落缺省，且**缺省非零够大**，防「回落=全线拒收」的假绿）⇒ **fails=0**，且**全程 0.58s、无子进程、无外部工具链依赖**。
+⑥**Rust 侧零破坏**：`cargo test --all-targets --locked` ⇒ **94 门全绿**（原 88 门 + 本轮新 6 门）；`Cargo.toml`/`Cargo.lock` **未改动** ⇒ **零新依赖**。
+⑦**产物新鲜度**：改了 Rust 源码 ⇒ 重编译 debug+release（**local target 与 shared target 两份**，D-029 纪律）⇒ 同步（`cp .new && mv` 换 inode，绕开 D-049 的 `Text file busy`）⇒ `artifact-freshness-check.sh` **fails=0**（两份产物 sha256 逐字一致：debug `7682ee88…` / release `c26bc78c…`）。
+⑧**文档面同步**：`docs/API.md` 是**生成物**（本轮**改了 REST 契约面**——能力清单多一个字段）⇒ 已用 `./api-doc-check.sh --write` **重生成** ⇒ 清单表里出现 `max_upload_bytes` 一行 ⇒ **由 `api-doc-check.sh` 的漂移门**继续守住。
+⑨**本轮「写侧上限」在真进程下复验（环境变量确实生效）**：`EHR_MAX_UPLOAD_BYTES=4096` 起真服务 ⇒ `GET /api/v1/capabilities` ⇒ `max_upload_bytes = 4096`（**参数生效**）⇒ 传 1KB `.txt` ⇒ **200** 且回执含真 CAS 哈希 `f77f722d…`（原件真进 CAS）⇒ 传 8KB ⇒ **413**「upload too large: 8192 bytes exceeds limit 4096 bytes（上限见 GET /api/v1/capabilities 的 max_upload_bytes）」⇒ 读面 `GET /api/v1/persons` 仍 **200**（超限不污染服务）⇒ MCP `get_capabilities` 同样返回 **4096**（两面逐字相等）⇒ MCP `upload_document` 传 8KB ⇒ `isError=true` + 「decoded size 8192 exceeds limit 4096 bytes」（带出上限数值）。
+⑩**本轮撞到并修好的三处「文档面漂移」（真缺口，非笔误）**：能力清单多一个字段 ⇒ **三道文档面门同时红**（`mcp-contract-check` / `skill-doc-field-check` / `doc-contract-check`，各报「真响应有但文档未提及的字段: ['max_upload_bytes']」）⇒ 补齐三处文档（`references/tool-contracts.md` 的 `get_capabilities` 行 · `SKILL.md` 的 `ehr.sh capabilities` 字段表 · `references/rest-contracts.md` 的 `GET /capabilities` 行）⇒ 三门转绿 ⇒ ⇒ **纪律**：「改了一个共享响应结构 ⇒ **所有**承诺该结构的文档面都要同步」⇒ 而这件事**已由门机器守住**（三门同时红 ⇒ 不会漏）。⇒ 附带结论：**能力清单新增字段的成本 = 三个文档面 + 三道门**，不是一处。
+⑪**统一入口全量复跑：24 门全绿，总 fails=0**（`run-all-gates.sh` ⇒ A1 PASS + 24 个 `[PASS] … fails=0`）⇒ 覆盖面**不变**（本轮是**加固**既有面，不是新面）；**期间真撞到三处文档面漂移**（见⑩）⇒ 补齐后全绿。
+⑫**后台卡死检查（D-010）**：开工时发现**上一轮遗留的 10 个孤儿 ehr-api 手工干跑进程**（`:18793`~`:18806`，手工 `setsid` 起的，脚本 `trap` 收不到）⇒ **已全部收割**；无 cargo/rustc 残留；无 done 哨兵残留。**本轮自验**：真进程复验用的临时 ehr-api（`:18777`）与两次全量门禁跑完后的临时进程**均已收割** ⇒ 常驻只剩两个 **docker 容器**内的 ehr-api ⇒ **非卡死**。
+
+**新坑一则（门自身的坑，本轮撞到并修好）**：
+①**门禁若依赖「手工编一个子进程」来构造测试环境，它自己就会成为假红来源**。本轮前一版门禁为了测「小上限」而去**手工 `rustc` 编译**一段内联程序 ⇒ 编译命令漏了 `--extern tokio` ⇒ 门红、而**被测行为压根没跑** ⇒ 「红」与「被测的东西」**无关**。⇒ 纪律升级（与 D-011 同族，但方向相反）：**门的失败必须与被测行为相关** —— 凡「门红」时**先确认红的是不是被测的那个东西**；而**根因**是「测试环境难构造」⇒ 修法是**把那个难点挪进产品代码的可注入点**（本轮：上限进 `AppState` + `from_home_with_limit`）⇒ 而不是**在门里手搓编译环境**。⇒ 附带收益：门禁**变快**（0.58s）、**不再依赖外部工具链** ⇒ 在 CI 上也更不易因环境而红。
+
+**未销账/下一步**：①**写侧剩余一维仍未做**：**「多轮」**（同一会话连续多次建档/上传 ⇒ 本轮只关掉「并发」（T38）与「大载荷」（T39）两维）⇒ 下一轮可关它；②**MCP 写侧的「并发」门**仍未做（T38 修了 `store.create()` ⇒ MCP 面**同时**被修好，但**没有门**钉住它）；③**官方 SDK 的 Java 实现仍未验**（按 D-053 新坑①，≥2 个实现这条已达成，但「全部官方实现」尚未）；④**T5 Web 管理端正式化**（目标验收①最后一块，**选型先报方案再动手**）；⑤公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑥ghcr 包可见性仍 private；⑦`.dcm`/DICOM worker 未做；⑧上游分类缺口仍在；⑨人员域三端点仍 501 且刻意不进 OpenAPI；⑩MCP 侧**仍无 prompts**（已显式钉住「不提供」）；⑪**本轮改动尚未在真 GitHub runner 上验过**（改了 Rust 源码 + 改了 REST 契约面 ⇒ 需一次 push；**注意**：`docs/API.md` 是生成物，CI 上需重生成并跑漂移门）。
+
 ## D-055 2026-10-22 · **T38「person registry 并发写会把真相层打坏」——真抓到并修掉一个**不可自愈**的真相层缺陷；确立「锁」与「写粒度」是两个独立的失效模式；确立读侧必须能区分「在途的半行」与「真坏的行」**
 
 **为什么做**：PLAN 从 T35 起连续多轮挂着同一条未销账项：「**写侧（`create_person`/`upload_document`）两轮各只调 1 次** ⇒ 未做多轮/并发/大载荷」。事实核对：写侧确实**从未被并发打过** ⇒ 门禁覆盖面有洞。⇒ 本轮按 PLAN 的方向先关「**并发**」这一维。

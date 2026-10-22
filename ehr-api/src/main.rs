@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
     // 用途：让门禁脚本与文档**从实现取值**——「本构建能吃哪些类型」此前是
     // ingest_upload 里的 if/ensure + OpenAPI 文案 + 门禁手写文案**三份实现**。
     if print_capabilities {
-        let man = ehr_api::capabilities::capability_manifest();
+        let man = ehr_api::capabilities::capability_manifest(st.max_upload_bytes);
         println!("{}", serde_json::to_string_pretty(&man)?);        eprintln!(
             "[证据] ehr-api v{} | mode=dry-run(print-capabilities) | EHR_HOME={} | ocr_available={} | accepted={} | rejected={}",
             env!("CARGO_PKG_VERSION"),
