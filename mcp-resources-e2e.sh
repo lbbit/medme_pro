@@ -163,6 +163,11 @@ echo "== R3 只读：ro token 也能读资源 =="
 PORT2=$((PORT+1)); HOME2="$(mktemp -d)"; mkdir -p "$HOME2/vaults"
 EHR_HOME="$HOME2" EHR_API_TOKENS="rwsecret:rw,rosecret:ro" "$BIN" --addr="127.0.0.1:$PORT2" 2>"$HOME2/serve.log" &
 SRV2=$!
+# ⚠️ T35：第二个服务（ro token 那台）**必须也进 trap**。
+#   此前只 kill 了主服务 ⇒ 若脚本在中途被打断（超时/被取消），**ro token 那台会变孤儿**
+#   ⇒ 实测踩到过：留下一个常驻 ehr-api（:18694），且它持有旧产物 inode（D-032 纪律：
+#   「跑的是哪份产物」）。⇒ 孤儿进程 = 资源泄漏 + 端口占用 + 潜在的第二份真相。
+trap 'kill $SRV2 2>/dev/null; kill $SRV 2>/dev/null; rm -rf "$HOME2" "$H"' EXIT
 for i in $(seq 1 40); do curl -sf "127.0.0.1:$PORT2/healthz" >/dev/null 2>&1 && break; sleep 0.5; done
 V=$(curl -s -X POST "127.0.0.1:$PORT2/mcp" -H 'content-type: application/json' -H 'Authorization: Bearer rosecret' \
      -d '{"jsonrpc":"2.0","id":16,"method":"resources/list"}' | jq_ 'print(len(d["result"]["resources"]))')
