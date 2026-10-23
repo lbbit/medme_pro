@@ -393,6 +393,45 @@ def main():
             else:
                 bad("B16 病程事件未出现在回放投影: %r" % pane[:300])
 
+        # ---- B18 病程包页：按病种包分组渲染（T45）----
+        # 判据落在**分组标题 + 事件行**上：必须出现包名（sle）、kind（enable）、
+        #   以及事件日期（2026-10-01）——这三样都是服务端回放投影里已有的字段，
+        #   页面若把它们丢了/没分组，这三条都红。
+        @step("B18")
+        def _b18():
+            page.click('button[data-t="packages"]')
+            page.wait_for_timeout(1200)
+            pane = page.inner_text("#pane")
+            if "packages=" in pane and "sle" in pane and "enable" in pane and "2026-10-01" in pane:
+                ok("B18 病程包页渲染出包/kind/事件日期: %s" % pane.split("\n")[0][:80])
+            else:
+                bad("B18 病程包页未渲染出分组事件: %r" % pane[:300])
+
+        # ---- B19 病程包页：**每条事件都在某个包标题下**（分组真的发生了）----
+        # 只验「有包名」不够：整页平铺也能满足 B18 ⇒ 这里要求包里那行事件的
+        #   **表头**存在（分组渲染成表），且事件行的 kind/日期确实在表内。
+        @step("B19")
+        def _b19():
+            page.click('button[data-t="packages"]')
+            page.wait_for_timeout(1200)
+            heads = page.query_selector_all("#pane h3")
+            tables = page.query_selector_all("#pane table")
+            if not heads:
+                bad("B19 病程包页没有包分组标题（未分组？）")
+                return
+            htext = " ".join(h.inner_text() for h in heads)
+            if "sle" not in htext:
+                bad("B19 包分组标题里没有 sle: %r" % htext[:200])
+                return
+            if not tables:
+                bad("B19 包分组下没有事件表")
+                return
+            body = page.inner_text("#pane")
+            if "enable" not in body or "2026-10-01" not in body:
+                bad("B19 事件行未渲染 kind/事件日期")
+                return
+            ok("B19 病程事件按包分组渲染: groups=%d tables=%d" % (len(heads), len(tables)))
+
         # ---- B10 页面不得把错误当内容渲染出来 ----
         @step("B10")
         def _b10():

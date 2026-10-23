@@ -54,6 +54,28 @@
 5. 中文全文检索(FTS5 分词器)可否直接用于跨人查询层
 6. OCR pipeline 作为服务端异步任务的可行性（长任务队列怎么表达）
 
+## 当前状态（2026-10-23 · **T45「T5 Web 管理端正式化 · 第 5 小步」——「病程包」页：把写侧**裸 kind/package 输入**变成**按病种包分组的可读事件列表**（只读回放投影、原样透传、**不推断**开关状态）；浏览器门新增 **B18/B19**（21 条判据）；同时销账 T44 的「CI 未验」未销账项（run 39871161284 / run 28 全绿、runner 门禁数=26 与本机逐字相同）· D-063 落地**）
+
+- ✅ **T45-① 先销账 T44 的「CI 未验」未销账项（本轮第一个可验证小步）**：T44 改了编译期内嵌页面 + 增了门禁判据 ⇒ 按 D-058 纪律必须有一次真 runner 绿。核对 GitHub API：`runs` ⇒ run **39871161284**（run_number **28**、head_sha `0c5ac16`）conclusion=**success**；拉 runner 日志（`runs/{id}/logs` + `Authorization: token $GH_TOKEN`）⇒ 末行 **「[证据] run-all-gates.sh 门禁数=26（本次执行 26）总 fails=0」** ⇒ 与本机**逐字相同** ⇒ ⇒ **T44 的「本轮改动需在真 GitHub runner 上验过」已销账**。
+- ✅ **T45-② 干跑在前（量接口语义而不是推演）**：先用一次性真进程干跑（自起临时 ehr-api `:18760`、真 HTTP 写两条 `profile_event`：`enable/sle@2026-10-01` 与 `flare/sle@2026-10-05`）量真实回放投影字段 ⇒ `GET /measurements?kind=profile_event` 返回 `count=2`，每条带 **`event_kind` / `event_package` / `event_at` / `event_payload` / `title` / `docref` / `payload_readable`** ⇒ ⇒ 页面**不需要**新接口、**不需要**新语义，只要把这批**已存在的字段**按包分组渲染出来。
+  - ⇒ 顺带量到一条**必须遵守的边界**：上游 `profile::is_enabled` 的语义是「只看 `enable`/`disable` 两种 kind，取最新那条」⇒ 页面若自己写一份「已开启/已关闭」判断，就是**同一语义两份实现**（D2 家族）⇒ 本轮**刻意不做**这个判断（见 T45-④）。
+- ✅ **T45-③ 结构决策①：本轮交付形态 = 「把已有读面按包分组渲染 + 把分组钉成门」，仍然**不新增后端接口**、**不改聚合语义**、**零新 Rust 代码**（只改 `ehr-api/web/index.html` 编译期内嵌字符串 + 门禁侧探针 `tools/web_browser_probe.py`）⇒ 与 T32/T42/T43/T44 同款口径。
+- ✅ **T45-④ 口径纪律（页面侧，全部原样透传、不推断）**：
+  - ① **kind 原样印**（认不出的印 kind 本身，**不编**中文标签——上游 `kind_label` 只认 `enable`/`disable`，页面不重写那份映射）；
+  - ② **payload 原样 JSON 字符串化**展示，**不解析、不归一**；
+  - ③ **事件日期 = `event_at`（事件发生的那天）**，与 `taken_at`（记录时刻）**分列两栏**（上游明确区分这两个概念，页面不混用）；
+  - ④ **不给「包已开启/已关闭」标签**——那是上游 `profile::is_enabled` 的语义，页面**不重写**（D2：一个语义只允许一处实现）；
+  - ⑤ 只读投影，**不写**任何数据。
+- ✅ **T45-⑤ 页面改动**（`ehr-api/web/index.html`）：①新增第 10 个 tab「病程包」⇒ 数据源 `GET /persons/{pid}/measurements?kind=profile_event`，按 `event_package` 分组、组内按 `event_at` 升序，每组渲染「包名 + events=N + kinds=…」标题 + 事件表（事件日期/kind/payload/记录时刻/证据 docref）；②「记录」页的 kind / 病种包输入框加 **`datalist` 候选**，候选**从该人员已写入事件派生**（`event_kind`/`event_package` 去重排序）⇒ **不硬编码**语义表，也不引入新语义。
+- ✅ **T45-⑥ 证据链（缺一即算交付）**：
+  - ①**浏览器门 21 条判据全绿、fails=0**（真进程 + 真 HTTP + 真 Chromium）：B1/B2(`paths=17`)/B3/B4/B5(`sha=724bd4364b84…`)/B5b/B6/B7(`series=3`)/B8(`bp_systolic/128`)/B9/B11(`med_count=2`)/B12(`condition_count=4`)/B13(`count=5`)/B14/B14b/B15/B16/**B18(`packages=1 · events=1`)**/**B19(`groups=1 tables=1`)**/B17(`med_count 0 -> 2`)/B10/B1b ⇒ `== RESULT fails=0`。
+  - ②**负向证据（实撞 1 次）**：坏页（`tools/web_browser_broken_proxy.py`，真 API 照常反代、只把 `/` 换成坏页）⇒ **B18/B19 随坏页变红**、整门 `fails=19`、rc=1 ⇒ ⇒ 新判据**有判别力**，不是假弱门。
+  - ③**Rust 侧零新依赖**：只改 `web/index.html` + 门禁侧探针 ⇒ `Cargo.toml`/`Cargo.lock` **未改动**；重编译 debug+release 两份（local 与 shared，D-029 纪律）⇒ **产物新鲜度门 fails=0**（两份 sha256 逐字相同：release `20e00e93…`、debug `9a3bf99d…`）。
+  - ④**统一入口全量复跑：26 门全绿，总 fails=0**（`run-all-gates.sh` ⇒ 末行「门禁数=26（本次执行 26）总 fails=0」，exit=0）⇒ 门禁数**未变**（**加判据**不是**加门**）。
+  - ⑤**后台卡死检查（D-010）**：开工时**无 cargo/rustc 残留、无 done 哨兵残留**；本轮起的临时 ehr-api（`:18760` 干跑、`:18699` 正/负向）、反代、探针进程**均已收割** ⇒ 常驻只剩两个 **docker 容器**内的 ehr-api ⇒ **非卡死**。
+  - ⑥**门自身的坑（本轮实撞 1 处，是「假红」不是假绿）**：负向跑时探针逐条 `TimeoutError`（坏页**根本没有** `button[data-t="packages"]` ⇒ `page.click` 6s 超时）⇒ 判据**变红是对的**，但**红的原因是「元素根本不存在」而不是「B18/B19 的语义不成立」** ⇒ ⇒ 纪律再确认（D-011 家族）：**门红时先问「红的是不是被测的那个东西」**——本轮把「红的原因」区分开（坏页 ⇒ 元素缺失 ⇒ 超时红）才敢据此宣称 B18/B19 有判别力。
+- 🔄 **下一步**：①**T5 第 2 小步**：把页面从**单文件内嵌**迁到**构建链**（或至少拆为静态资源）——须**先报方案再动手**（沿用 T41/T43 纪律）；②**T5 后续**：派生读面速览进一步下钻到具体条目；病程包页目前**只读**——若要「从页面直接开启/关闭病程档案」，那会触及上游 `is_enabled` 语义（D2），**须先报方案**；③**本轮改动尚未在真 GitHub runner 上验过**（改了编译期内嵌页面 + 门禁判据增加 ⇒ 需一次 push；runner 日志的**门禁数必须 == 26**）；④MCP 侧 prompts 仍显式钉住「不提供」；⑤官方 SDK 的 Java 实现仍未验；⑥公网暴露前 `EHR_BIND_ADDR` 改 `0.0.0.0` 前**必须**先设 token；⑦ghcr 包可见性仍 private；⑧`.dcm`/DICOM worker 未做；⑨上游分类缺口仍在；⑩人员域三端点仍 501 且刻意不进 OpenAPI；⑪**agent-e2e 真 agent 门**仍 SKIP。
+
 ## 当前状态（2026-10-23 · **T44「T5 Web 管理端正式化 · 第 4 小步」——「文档」页加**派生读面速览**，上传原件后**自动刷新**（指标/用药/病程三面即时可见）；干跑证明**服务端聚合本来就是实时的**（上传后 `med_count` 立刻=2）⇒ 缺口在**页面没把新状态取回来**；浏览器门新增 **B17**（19 条判据）；同时销账 T43 的「CI 未验」未销账项（run 39863362668 / run 27 全绿、runner 门禁数=26 与本机逐字相同）· D-062 落地**）
 
 - ✅ **T44-① 先销账 T43 的「CI 未验」未销账项（本轮第一个可验证小步）**：T43 改了编译期内嵌页面 + 增了门禁判据 ⇒ 按 D-058 纪律必须有一次真 runner 绿。核对 GitHub API：`runs` ⇒ run **39863362668**（run_number **27**、head_sha `5d309bf`）conclusion=**success**；拉 runner 日志（`runs/{id}/logs` + `Authorization: token $GH_TOKEN`，无 admin 时 403 ⇒ 必须带 token）⇒ 末行 **「[证据] run-all-gates.sh 门禁数=26（本次执行 26）总 fails=0」** ⇒ 与本机**逐字相同** ⇒ ⇒ **T43 的「本轮改动需在真 GitHub runner 上验过」已销账**。

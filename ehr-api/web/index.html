@@ -82,9 +82,9 @@ async function loadPersons() {
   [...pl.children].forEach(li => li.onclick = () => { cur = li.dataset.id; loadPersons(); render(); });
 }
 function tabs() {
-  const t = ["timeline","documents","labs","home","search","meds","conds","audit","records"];
+  const t = ["timeline","documents","labs","home","search","meds","conds","audit","records","packages"];
   document.getElementById("tabs").innerHTML = t.map(x =>
-    `<button data-t="${x}" class="${tab===x?"on":""}">${{timeline:"时间线",documents:"文档",labs:"指标",home:"自测趋势",search:"检索",meds:"用药",conds:"病程",audit:"审计",records:"记录"}[x]}</button>`).join("");
+    `<button data-t="${x}" class="${tab===x?"on":""}">${{timeline:"时间线",documents:"文档",labs:"指标",home:"自测趋势",search:"检索",meds:"用药",conds:"病程",audit:"审计",records:"记录",packages:"病程包"}[x]}</button>`).join("");
   [...document.getElementById("tabs").children].forEach(b => b.onclick = () => { tab = b.dataset.t; render(); });
 }
 function out(html) { document.getElementById("pane").innerHTML = html; }
@@ -194,16 +194,29 @@ async function render() {
           `<button id="addMeas">记一条</button></div>` +
         `<h3>笔记</h3><div class="row"><input id="nText" placeholder="原文即内容"><button id="addNote">记一条</button></div>` +
         `<h3>病程事件</h3><div class="row">` +
-          `<input id="pKind" placeholder="kind，如 enable" value="enable">` +
-          `<input id="pPkg" placeholder="病种包，如 sle" value="sle">` +
+          `<input id="pKind" placeholder="kind，如 enable" value="enable" list="peKinds">` +
+          `<input id="pPkg" placeholder="病种包，如 sle" value="sle" list="pePkgs">` +
           `<input id="pAt" placeholder="事件那天 YYYY-MM-DD">` +
           `<input id="pPayload" placeholder="payload JSON 对象" value="{}">` +
           `<button id="addPe">记一条</button></div>` +
+        `<datalist id="peKinds"></datalist><datalist id="pePkgs"></datalist>` +
         `<h3>已写入的记录（回放投影）</h3><div id="recList"><p class="mut">加载中…</p></div>`);
       const refresh = async () => {
         const d = await j(`/persons/${cur}/measurements`);
         const el = document.getElementById("recList");
         if (!el) return;
+        // T45：kind / 病种包的候选项**从这个人已写入的事件里派生**（不硬编码语义表），
+        //   且只作为**输入建议**（datalist）——候选来源是回放投影里的 event_kind/event_package。
+        const kinds = [...new Set((d.measurements || [])
+          .filter(m => m.kind === "profile_event" && m.event_kind)
+          .map(m => m.event_kind))].sort();
+        const pkgs = [...new Set((d.measurements || [])
+          .filter(m => m.kind === "profile_event" && m.event_package)
+          .map(m => m.event_package))].sort();
+        const dk = document.getElementById("peKinds");
+        if (dk) dk.innerHTML = kinds.map(k => `<option value="${esc(k)}"></option>`).join("");
+        const dp = document.getElementById("pePkgs");
+        if (dp) dp.innerHTML = pkgs.map(k => `<option value="${esc(k)}"></option>`).join("");
         el.innerHTML = (d.measurements||[]).length
           ? `<p class="mut">count=${d.count}</p><table><tr><th>时刻</th><th>类型</th><th>内容</th><th>证据</th></tr>` +
             d.measurements.map(m => `<tr><td class="mut">${esc((m.taken_at||"").slice(0,19))}</td>` +
@@ -250,6 +263,39 @@ async function render() {
         }, "病程事件");
       };
       try { await refresh(); } catch (e) { fail(e); }
+    } else if (tab === "packages") {
+      // 病程包视图（T45）：把「病程事件」按**病种包**分组列出来。
+      // 数据源 = 写侧三类条目的回放投影（GET /measurements?kind=profile_event），
+      //   字段全是服务端已经给好的：event_kind / event_package / event_at / event_payload。
+      // 口径纪律（D-060 家族）：
+      //   ① **原样透传** —— kind 印 kind 本身，payload 原样 JSON 字符串化，**不归一**；
+      //   ② **不推断开关状态** —— 「这个包现在开没开」是上游 `profile::is_enabled`
+      //      的语义（取最新 enable/disable）；本页**不重写那条规则**（D2：一个语义只允许一处实现），
+      //      所以只按时间列出事件，**不**给「已开启/已关闭」标签；
+      //   ③ 事件日期 = **事件发生的那天**（event_at），与记录时刻（taken_at）分开展示。
+      const d = await j(`/persons/${cur}/measurements?kind=profile_event`);
+      const evs = (d.measurements || []).filter(m => m.payload_readable);
+      const byPkg = {};
+      for (const m of evs) {
+        const p = m.event_package || "?";
+        (byPkg[p] = byPkg[p] || []).push(m);
+      }
+      const pkgs = Object.keys(byPkg).sort();
+      out(`<h2>${esc(p.name)} · 病程包 <span class="mut">packages=${pkgs.length} · events=${evs.length}</span></h2>` +
+        (pkgs.length ? pkgs.map(p => {
+          const list = byPkg[p].slice().sort((a, b) =>
+            String(a.event_at || "").localeCompare(String(b.event_at || "")));
+          const kinds = [...new Set(list.map(m => m.event_kind || ""))].filter(Boolean);
+          return `<h3>${esc(p)} <span class="mut">events=${list.length} · kinds=${esc(kinds.join(", "))}</span></h3>` +
+            `<table><tr><th>事件日期</th><th>kind</th><th>payload</th><th>记录时刻</th><th>证据</th></tr>` +
+            list.map(m => `<tr><td>${esc(m.event_at || "—")}</td>` +
+              `<td>${esc(m.event_kind || "")}</td>` +
+              `<td class="mut">${esc(m.event_payload ? JSON.stringify(m.event_payload) : "")}</td>` +
+              `<td class="mut">${esc((m.taken_at || "").slice(0, 19))}</td>` +
+              `<td class="mut">${esc((m.docref || "").slice(0, 12))}</td></tr>`).join("") + `</table>`;
+        }).join("")
+        : `<p class="mut">该人员还没有病程事件。在「记录」页写一条（kind / 病种包 / 事件日期）后此处出现。</p>`) +
+        `<p class="mut">只读投影：事件与 payload 原样透传，<b>不推断</b>包的开关状态（那是上游 <code>profile::is_enabled</code> 的语义，不在本页重写）。</p>`);
     } else if (tab === "home") {
       // 家庭自测趋势（T32）：**只**读 /measurements?kind=self_measurement。
       // ⚠️ 与「指标」页**刻意分开展示**：家庭自测值与医院指标参考区间不同，
