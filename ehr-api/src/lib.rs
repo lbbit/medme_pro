@@ -33,8 +33,8 @@ use axum::extract::FromRequest; // mcp_endpoint 手动解 Json 以便先取 scop
 pub struct AppState {
     pub home: std::path::PathBuf,
     pub store: PersonStore,
-    /// T4：token 表。空表 = open 模式（未配置 token ⇒ 放行，但启动 [证据] 行显式标 auth=open）
-    pub auth: auth::TokenSet,
+    /// T4+T46：token 管理面（env 种子 + registry/tokens.jsonl 回放，运行期可变——Web 端生成/吊销）
+    pub auth: Arc<auth::TokenManager>,
     /// **写侧单件上传上限**（字节）——REST / MCP / 能力清单**三处共用的唯一一份**（T39-④）。
     ///
     /// ⚠️ 为什么**存在状态里**而不是各处各读 env：
@@ -54,21 +54,29 @@ impl AppState {
         Arc::new(AppState {
             store: PersonStore::new(home.clone()),
             home,
-            auth: auth::TokenSet::default(),
+            auth: Arc::new(auth::TokenManager::empty()),
             max_upload_bytes: capabilities::max_upload_bytes_from_env(),
         })
     }
 
     /// 带鉴权表构造（测试/门禁用）。非空 token 表 ⇒ 开启鉴权。
+    /// T46：TokenSet 经 in-memory manager 包一层（不落文件——测试表不持久化）。
     pub fn from_home_with_auth(
         home: impl Into<std::path::PathBuf>,
         auth: auth::TokenSet,
     ) -> Arc<AppState> {
         let home = home.into();
+        let mgr = if auth.is_open() {
+            auth::TokenManager::empty()
+        } else {
+            // 把测试表转成 manager：借 load() 的合成路径但喂内存——直接构造（字段私有⇒走 load 空文件+env 注入等价）
+            auth::TokenManager::load(&home.join(".test-tokens"), auth)
+                .unwrap_or_else(|_| auth::TokenManager::empty())
+        };
         Arc::new(AppState {
             store: PersonStore::new(home.clone()),
             home,
-            auth,
+            auth: Arc::new(mgr),
             max_upload_bytes: capabilities::max_upload_bytes_from_env(),
         })
     }
@@ -86,7 +94,7 @@ impl AppState {
         Arc::new(AppState {
             store: PersonStore::new(home.clone()),
             home,
-            auth: auth::TokenSet::default(),
+            auth: Arc::new(auth::TokenManager::empty()),
             max_upload_bytes,
         })
     }
@@ -707,6 +715,100 @@ async fn put_document_extraction(
 }
 // 人员域三 stub：路由即契约(tests MOUNTED 表守卫)。刻意不进 CONTRACT/openapi——{pid} 模板与已文档化的
 // /persons(get+post)同 path 不同 op，utoipa derive 无法拆分挂载；待 GET/PATCH/DELETE 实装时一并入文档。
+// ---- T46：token 管理面（Web 端生成/查询/吊销）——整体要求 rw scope（ro 管理 token = 提权）----
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct TokenCreateReq {
+    pub name: String,
+    #[serde(default = "default_rw")]
+    pub scope: String, // "ro"|"rw"
+}
+fn default_rw() -> String { "rw".into() }
+
+fn extract_bearer(headers: &axum::http::HeaderMap) -> String {
+    headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).unwrap_or("").to_string()
+}
+
+fn require_rw(st: &AppState, bearer: &str) -> Result<(), ApiError> {
+    let Some((_name, scope)) = st.auth.authenticate(bearer) else {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid bearer token".into()));
+    };
+    if scope != auth::Scope::Rw {
+        return Err(ApiError(StatusCode::FORBIDDEN, "token management requires rw scope".into()));
+    }
+    Ok(())
+}
+
+#[utoipa::path(post, path = "/api/v1/tokens", tag = "tokens",
+    request_body = TokenCreateReq, responses(
+        (status = 200, description = "token created; 明文只在本次回执出现", body = TokenCreated),
+        (status = 401), (status = 403, description = "ro token cannot manage tokens")))]
+async fn create_token(
+    State(st): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> Result<Json<TokenCreated>, ApiError> {
+    let bearer = extract_bearer(&headers);
+    require_rw(&st, &bearer)?;
+    let req: TokenCreateReq = serde_json::from_str(&body)
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("bad json: {e}")))?;
+    let name = req.name.trim();
+    if name.is_empty() || name.len() > 64 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "name must be 1..=64 chars".into()));
+    }
+    let scope = auth::Scope::parse(&req.scope)
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+    if st.auth.list().iter().any(|t| t.name == name) {
+        return Err(ApiError(StatusCode::CONFLICT, format!("token name {name:?} already exists")));
+    }
+    let (token, entry) = st.auth.create(name, scope)
+        .map_err(|e| ApiError(StatusCode::CONFLICT, e))?;
+    tracing::info!(token_name = %name, "token created via API");
+    Ok(Json(TokenCreated { token, name: entry.name, scope: entry.scope, at: entry.at }))
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct TokenCreated {
+    pub token: String,
+    pub name: String,
+    pub scope: auth::Scope,
+    pub at: String,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct TokenListReply { pub tokens: Vec<auth::TokenListEntry> }
+
+#[utoipa::path(get, path = "/api/v1/tokens", tag = "tokens", responses(
+    (status = 200, body = TokenListReply),
+    (status = 401), (status = 403, description = "ro token cannot list tokens")))]
+async fn list_tokens(
+    State(st): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<TokenListReply>, ApiError> {
+    let bearer = extract_bearer(&headers);
+    require_rw(&st, &bearer)?;
+    Ok(Json(TokenListReply { tokens: st.auth.list() }))
+}
+
+#[utoipa::path(delete, path = "/api/v1/tokens/{name}", tag = "tokens",
+    params(("name" = String, Path, description = "token name")),
+    responses((status = 200, description = "revoked (or already absent)"),
+        (status = 401), (status = 403)))]
+async fn revoke_token(
+    State(st): State<Arc<AppState>>,
+    AxPath(name): AxPath<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let bearer = extract_bearer(&headers);
+    let (_caller, scope) = st.auth.authenticate(&bearer)
+        .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "invalid bearer token".into()))?;
+    if scope != auth::Scope::Rw {
+        return Err(ApiError(StatusCode::FORBIDDEN, "token management requires rw scope".into()));
+    }
+    let existed = st.auth.revoke(&name).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    tracing::info!(token_name = %name, existed, "token revoked via API");
+    Ok(Json(serde_json::json!({"revoked": existed, "name": name})))
+}
+
 not_implemented!(stub_person_detail, "person detail+profile summary: pending profile::materialize wiring");
 not_implemented!(stub_person_update, "PATCH person: pending registry update event flow (same JSONL envelope, op=update)");
 not_implemented!(stub_person_delete, "archive person(tombstone): pending registry delete event flow(op=delete)+purge二次确认");
@@ -726,7 +828,7 @@ not_implemented!(stub_person_delete, "archive person(tombstone): pending registr
         (name = "entries", description = "写侧：append-only 条目与文档上传（未实现端点先挂契约，现返回501）")
     ),
     paths(healthz, get_capabilities, list_persons, create_person, get_timeline, get_search, get_labs, get_medications, get_conditions, upload_document, list_documents,
-          get_document_detail, get_document_original, put_document_extraction,
+          get_document_detail, get_document_original, put_document_extraction, create_token, list_tokens, revoke_token,
           get_measurements, post_self_measurement, post_note, post_profile_event,
           get_audit),
     components(schemas(Person, PersonNew, HealthzReply, capabilities::CapabilityManifest, capabilities::CapabilityRouteOut,
@@ -1122,6 +1224,8 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/persons/{pid}/entries/note", post(post_note)) // D-028 实装毕业(此前 stub→501)
         .route("/persons/{pid}/entries/profile-event", post(post_profile_event)) // D-028 实装毕业(此前 stub→501)
         .route("/persons/{pid}/documents/{sha}/extraction", put(put_document_extraction)) // D-023 实装毕业(API-DESIGN 全路径含 pid)
+        .route("/tokens", post(create_token).get(list_tokens)) // T46 token 管理面
+        .route("/tokens/{name}", delete(revoke_token))
         .route("/audit", get(get_audit)) // D-030 实装毕业(此前 stub→501；vault 侧复用上游 audit_log()，registry 侧读原始事件)
         .with_state(st.clone());
 
@@ -1165,7 +1269,7 @@ pub fn prepare_home_and_state(home_in: &std::path::Path, mkdir_vaults: bool) -> 
     Ok(Arc::new(AppState {
         store: PersonStore::new(home.clone()),
         home,
-        auth: auth::TokenSet::default(),
+        auth: Arc::new(auth::TokenManager::empty()),
         max_upload_bytes: capabilities::max_upload_bytes_from_env(),
     }))
 }
@@ -1178,10 +1282,13 @@ pub fn prepare_home_and_state_auth(
 ) -> Result<(Arc<AppState>, auth::TokenSet)> {
     let st = prepare_home_and_state(home_in, mkdir_vaults)?;
     let set = auth::TokenSet::from_env().map_err(|e| anyhow::anyhow!("bad token config: {e}"))?;
+    // T46：env 种子 + registry/tokens.jsonl 回放（文件为准，运行期 Web 可变）
+    let manager = auth::TokenManager::load(&st.home, set.clone())
+        .map_err(|e| anyhow::anyhow!("token registry load: {e}"))?;
     let st = Arc::new(AppState {
         home: st.home.clone(),
         store: PersonStore::new(st.home.clone()),
-        auth: set.clone(),
+        auth: Arc::new(manager),
         max_upload_bytes: capabilities::max_upload_bytes_from_env(),
     });
     Ok((st, set))

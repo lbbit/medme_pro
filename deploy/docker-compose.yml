@@ -39,7 +39,9 @@ services:
     depends_on:
       boot: { condition: service_completed_successfully }
     ports:
-      - "127.0.0.1:8585:8443"                       # 本机已有服务占默认 8443；暂绑 loopback（阶段5认证后再暴露）
+      # T4+LAN(2026-10-27 用户令):绑定地址走 .env(默认改 0.0.0.0=局域网可访问;token 必配)。
+      # 写侧语义不变:token 未配时服务端 open 模式照旧,但 [证据] 行警示。
+      - "${EHR_BIND_ADDR:-0.0.0.0}:${EHR_BIND_PORT:-8585}:8443"
     environment:
       EHR_HOME: /home/ehr                           # uid=appuser(非 root),由 boot 预建属主 —— 见上 E6/P2
       RUST_LOG: info

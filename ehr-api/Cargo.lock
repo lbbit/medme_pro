@@ -1065,6 +1065,7 @@ dependencies = [
  "ocr",
  "parser",
  "pipeline",
+ "rand 0.10.3",
  "serde",
  "serde_json",
  "tokio",

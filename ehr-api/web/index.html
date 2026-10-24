@@ -82,9 +82,9 @@ async function loadPersons() {
   [...pl.children].forEach(li => li.onclick = () => { cur = li.dataset.id; loadPersons(); render(); });
 }
 function tabs() {
-  const t = ["timeline","documents","labs","home","search","meds","conds","audit","records","packages"];
+  const t = ["timeline","documents","labs","home","search","meds","conds","audit","records","packages","tokens"];
   document.getElementById("tabs").innerHTML = t.map(x =>
-    `<button data-t="${x}" class="${tab===x?"on":""}">${{timeline:"时间线",documents:"文档",labs:"指标",home:"自测趋势",search:"检索",meds:"用药",conds:"病程",audit:"审计",records:"记录",packages:"病程包"}[x]}</button>`).join("");
+    `<button data-t="${x}" class="${tab===x?"on":""}">${{timeline:"时间线",documents:"文档",labs:"指标",home:"自测趋势",search:"检索",meds:"用药",conds:"病程",audit:"审计",records:"记录",packages:"病程包",tokens:"令牌"}[x]}</button>`).join("");
   [...document.getElementById("tabs").children].forEach(b => b.onclick = () => { tab = b.dataset.t; render(); });
 }
 function out(html) { document.getElementById("pane").innerHTML = html; }
@@ -296,6 +296,49 @@ async function render() {
         }).join("")
         : `<p class="mut">该人员还没有病程事件。在「记录」页写一条（kind / 病种包 / 事件日期）后此处出现。</p>`) +
         `<p class="mut">只读投影：事件与 payload 原样透传，<b>不推断</b>包的开关状态（那是上游 <code>profile::is_enabled</code> 的语义，不在本页重写）。</p>`);
+    } else if (tab === "tokens") {
+      // 令牌管理（T46）：列出/生成/吊销 API token。**整体要求 rw**（ro 管理令牌=提权）。
+      // 列表只给 token 前 10 位指纹（明文只在创建回执出现一次——页面从不存明文）。
+      const me = tok();
+      let listHtml = "";
+      try {
+        const d = await j("/tokens");
+        listHtml = `<table><tr><th>名称</th><th>scope</th><th>token 指纹</th><th>来源</th><th></th></tr>` +
+          (d.tokens || []).map(t =>
+            `<tr><td>${esc(t.name)}</td><td>${esc(t.scope)}</td>` +
+            `<td><code>${esc(t.token_prefix)}…</code></td><td>${esc(t.source)}</td>` +
+            `<td><button data-revoke="${esc(t.name)}" ${t.scope==="rw"&&t.name==="main"?"":"class='danger'"}>吊销</button></td></tr>`).join("") +
+          `</table><p class="mut">提示：当前浏览器使用的 token 显示在右上角输入框（存 localStorage，不上传）。rw=读写，ro=只读。</p>`;
+      } catch (e) {
+        listHtml = `<p class="err">${esc(e.message)}</p><p class="mut">需要 <b>rw</b> 权限的 token（ro 无法管理令牌）。</p>`;
+      }
+      out(`<h2>API 令牌管理</h2>` +
+        `<h3>生成新令牌</h3>` +
+        `<p>名称: <input id="tk_name" placeholder="如 mobile-app" style="width:160px"> ` +
+        `scope: <select id="tk_scope"><option value="ro">ro（只读）</option><option value="rw">rw（读写）</option></select> ` +
+        `<button id="tk_create">生成</button></p><div id="tk_new"></div>` +
+        `<h3>现有令牌</h3>` + listHtml);
+      const btn = document.getElementById("tk_create");
+      if (btn) btn.onclick = async () => {
+        const name = (document.getElementById("tk_name").value||"").trim();
+        const scope = document.getElementById("tk_scope").value;
+        if (!name) { alert("请输入名称"); return; }
+        try {
+          const r = await j("/tokens", {method:"POST", headers:{"Content-Type":"application/json"},
+            body: JSON.stringify({name, scope})});
+          document.getElementById("tk_new").innerHTML =
+            `<p class="ok">✅ 令牌已生成（<b>仅此一次显示明文</b>，请立即复制保存）：</p>` +
+            `<p><code style="user-select:all">${esc(r.token)}</code></p>`;
+          setTimeout(()=>location.reload(), 100);
+        } catch (e) { alert("生成失败: " + e.message); }
+      };
+      document.querySelectorAll("[data-revoke]").forEach(b => b.onclick = async () => {
+        const name = b.dataset.revoke;
+        if (!confirm(`确定吊销 ${name}？使用该 token 的客户端将立即 401。`)) return;
+        try { await j(`/tokens/${encodeURIComponent(name)}`, {method:"DELETE"}); location.reload(); }
+        catch (e) { alert("吊销失败: " + e.message); }
+      });
+
     } else if (tab === "home") {
       // 家庭自测趋势（T32）：**只**读 /measurements?kind=self_measurement。
       // ⚠️ 与「指标」页**刻意分开展示**：家庭自测值与医院指标参考区间不同，

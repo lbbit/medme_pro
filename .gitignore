@@ -22,3 +22,4 @@ docs/testres/
 deploy/ort/
 deploy/oar-models/
 __pycache__/
+deploy/.env.tokens

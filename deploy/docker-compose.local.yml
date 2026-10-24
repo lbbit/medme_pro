@@ -17,11 +17,13 @@ services:
       - ehr-home:/home/ehr
 
   ehr-api:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"         # 宿主 mihomo(allow-lan 后监听 *:7890)，docker0 网关可达
     build:
       context: ..                                   # 仓库根（含 ehr-api + upstream-medme/packages/*）
       dockerfile: deploy/Dockerfile
+      # ⚠️ extra_hosts 必须放在 **build** 下（透传给 buildkit 的 RUN 层）；
+      #   只放服务级时 RUN 里 resolve 不了 host.docker.internal（D-016 教训，buildx --add-host 的 compose 等价物）。
+      extra_hosts:
+        - "host.docker.internal:host-gateway"       # 宿主 mihomo(allow-lan 后监听 *:7890)，docker0 网关可达
       args:                                         # D1：镜像源 URL 唯一定义处，Dockerfile 只做拼装模板
         CARGO_SPARSE_URL: ${CARGO_SPARSE_URL:-https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/}
         CARGO_STATIC_ROOT: ${CARGO_STATIC_ROOT:-https://static.crates.io}

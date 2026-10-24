@@ -59,7 +59,7 @@ services:
       # ⚠️ 端口变量用 **OCR 专属** 名（不读共享 .env 的 EHR_BIND_PORT）：共享 .env 里是 8585
       #   （默认编排在用）⇒ 若复用同一变量名，OCR 编排会抢默认编排的端口 ⇒
       #   docker 报 "Bind for 127.0.0.1:8585 failed: port is already allocated"（本轮实撞）。
-      - "${EHR_OCR_BIND_ADDR:-127.0.0.1}:${EHR_OCR_BIND_PORT:-8587}:8443"
+      - "${EHR_OCR_BIND_ADDR:-0.0.0.0}:${EHR_OCR_BIND_PORT:-8587}:8443"
     environment:
       EHR_HOME: ${EHR_HOME:-/home/ehr}
       EHR_ADDR: ${EHR_CONTAINER_ADDR:-0.0.0.0:8443}

@@ -20,7 +20,8 @@
 use std::collections::HashMap;
 
 /// token 权限级别
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
 pub enum Scope {
     /// 只读：GET/HEAD 放行，写操作 403
     Ro,
@@ -36,6 +37,13 @@ impl Scope {
         }
     }
     /// 该 scope 是否允许某个 HTTP 方法
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "ro" => Ok(Scope::Ro),
+            "rw" => Ok(Scope::Rw),
+            other => Err(format!("unknown scope {other:?} (expected ro|rw)")),
+        }
+    }
     pub fn allows(self, method: &str) -> bool {
         match self {
             Scope::Rw => true,
@@ -211,5 +219,158 @@ mod tests {
         assert!(!const_eq(b"abc", b"abd"));
         assert!(!const_eq(b"abc", b"abcd"));
         assert!(const_eq(b"", b""));
+    }
+}
+
+// ---- T46：token 持久化管理面（Web 端生成/查询）----
+//
+// 设计（D-064）：
+// ① **文件是真相**：`{EHR_HOME}/registry/tokens.jsonl`（append-only，与 persons.jsonl 同哲学——
+//    整行一次写 + 进程内互斥）。每行 {"op":"add","name":..,"token":..,"scope":"ro|rw","at":..}
+//    或 {"op":"revoke","name":..,"at":..}（revoke 按 name 判，token 本身不再落日志）。
+// ② **启动期合成**：env `EHR_API_TOKENS`（启动种子，兼容既有部署）+ 文件回放 ⇒ 运行期 TokenSet。
+//    文件里 add 与 env 重复 token ⇒ 文件为准（env 是种子不是上限）。
+// ③ **运行期可变**：Web 端「生成 token」= append 一行 + 内存表即时生效；「查询」= 列出 name/scope/at
+//    （**token 明文只在创建回执里返回一次**，列表只给前 6 位指纹——防页面泄露）。
+//    revoke 按 name ⇒ 内存表移除 + 文件留痕。
+// ④ **读写分权**：管理面本身要求 rw scope（ro token 不能管理 token——防只读 token 提权）。
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct TokenListEntry {
+    pub name: String,
+    pub scope: Scope,
+    pub token_prefix: String, // 前 10 位（指纹），明文不回传
+    pub source: &'static str, // "env" | "file"
+    #[serde(rename = "at")]
+    pub at: String,
+}
+
+pub struct TokenManager {
+    file: PathBuf, // {home}/registry/tokens.jsonl
+    inner: Mutex<HashMap<String, (String, Scope)>>, // token → (name, scope) 运行期权威表
+}
+
+impl TokenManager {
+    /// env 种子 + 文件回放 → 运行期表。文件坏行（非末行）按 D-050 红脸。
+    pub fn load(home: &std::path::Path, env_set: TokenSet) -> Result<Self, String> {
+        let file = home.join("registry").join("tokens.jsonl");
+        let mut map = env_set.map.clone();
+        if let Ok(content) = std::fs::read_to_string(&file) {
+            let lines: Vec<&str> = content.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let last = i == lines.len() - 1;
+                let ev: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+                    if last && !content.ends_with('\n') {
+                        format!("tokens.jsonl 末行在途（并发写在途，跳过）: {e}")
+                    } else {
+                        format!("tokens.jsonl 完整行解析失败（真相层坏，必须红）: {e}")
+                    }
+                })?;
+                match ev.get("op").and_then(|o| o.as_str()) {
+                    Some("add") => {
+                        let (token, name, scope) = (
+                            ev.get("token").and_then(|t| t.as_str()).unwrap_or(""),
+                            ev.get("name").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                            ev.get("scope").and_then(|t| t.as_str()).unwrap_or("rw"),
+                        );
+                        if token.is_empty() {
+                            return Err(format!("tokens.jsonl 行 {} 空 token", i + 1));
+                        }
+                        let scope = Scope::parse(scope).map_err(|e| format!("行 {} scope: {e}", i + 1))?;
+                        map.insert(token.to_string(), (name, scope));
+                    }
+                    Some("revoke") => {
+                        if let Some(name) = ev.get("name").and_then(|t| t.as_str()) {
+                            map.retain(|_, (n, _)| n != name);
+                        }
+                    }
+                    other => return Err(format!("tokens.jsonl 行 {} 未知 op: {other:?}", i + 1)),
+                }
+            }
+        }
+        Ok(Self { file, inner: Mutex::new(map) })
+    }
+
+    fn append_line(&self, ev: &serde_json::Value) -> Result<(), String> {
+        if let Some(dir) = self.file.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        let mut line = serde_json::to_vec(ev).map_err(|e| e.to_string())?;
+        line.push(b'\n');
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&self.file)
+            .map_err(|e| e.to_string())?;
+        f.write_all(&line).map_err(|e| e.to_string())?;
+        f.flush().map_err(|e| e.to_string())
+    }
+
+    /// 空表构造（tests/dry-run）。open 模式判定与 TokenSet.is_open 同语义。
+    pub fn empty() -> Self { Self { file: PathBuf::new(), inner: Mutex::new(HashMap::new()) } }
+    pub fn is_open(&self) -> bool { self.inner.lock().unwrap_or_else(|p| p.into_inner()).is_empty() }
+
+    /// 生成新 token：随机 32 字节 hex（前缀 ehr-），scope 由调用方给。
+    /// 返回明文（**只在本次回执出现**）；表即时生效。
+    pub fn create(&self, name: &str, scope: Scope) -> Result<(String, TokenListEntry), String> {
+        let b: [u8; 24] = rand::random();
+        let token = format!("ehr-{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>());
+        {
+            let m = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            if m.values().any(|(n, _)| n == name) {
+                return Err(format!("token name {name:?} already exists"));
+            }
+        }
+        let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.append_line(&serde_json::json!({"op":"add","name":name,"token":token,"scope":scope.as_str(),"at":at}))?;
+        let entry = TokenListEntry {
+            name: name.to_string(),
+            scope,
+            token_prefix: token.chars().take(10).collect(),
+            source: "file",
+            at,
+        };
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).insert(token.clone(), (name.to_string(), scope));
+        Ok((token, entry))
+    }
+
+    pub fn list(&self) -> Vec<TokenListEntry> {
+        let m = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut out: Vec<TokenListEntry> = m.iter().map(|(t, (n, s))| TokenListEntry {
+            name: n.clone(), scope: *s,
+            token_prefix: t.chars().take(10).collect(),
+            source: "env", at: String::new(),
+        }).collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    pub fn revoke(&self, name: &str) -> Result<bool, String> {
+        let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let existed = {
+            let mut m = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            let before = m.len();
+            m.retain(|_, (n, _)| n != name);
+            before != m.len()
+        };
+        if existed {
+            self.append_line(&serde_json::json!({"op":"revoke","name":name,"at":at}))?;
+        }
+        Ok(existed)
+    }
+
+    /// 与 TokenSet::authenticate 同签名/同语义（供中间件）：入参=完整 Authorization 值。
+    /// 运行期表可变 ⇒ 认证走 manager（Web 生成的 token 即时生效，无需重启）。
+    pub fn authenticate(&self, bearer: &str) -> Option<(String, Scope)> {
+        let token = bearer.strip_prefix("Bearer ").or_else(|| bearer.strip_prefix("bearer "))?;
+        let token = token.trim();
+        if token.is_empty() {
+            return None;
+        }
+        let m = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        m.get(token).cloned()
     }
 }
