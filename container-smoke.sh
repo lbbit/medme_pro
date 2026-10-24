@@ -7,6 +7,18 @@
 set -u
 B=http://127.0.0.1:8585
 fail=0
+# T46 后服务默认带 token 鉴权(deploy/.env 注入) → smoke 探针必须带 token。
+# token 来源优先级: 环境变量 EHR_API_TOKEN > deploy/.env.tokens 解析 > deploy/.env 的 EHR_API_TOKEN
+# 全都拿不到 ⇒ 显式报错退出(不静默打 401 假红——那不是被测对象的错)。
+if [ -z "${EHR_API_TOKEN:-}" ]; then
+  ENVFILE="$(cd "$(dirname "$0")" && pwd)/deploy/.env"
+  [ -f "$ENVFILE" ] && EHR_API_TOKEN=$(grep -m1 '^EHR_API_TOKEN=' "$ENVFILE" | cut -d= -f2-)
+fi
+if [ -z "${EHR_API_TOKEN:-}" ]; then
+  echo "[FAIL] 拿不到 token：服务已开鉴权。设 EHR_API_TOKEN 或确认 deploy/.env 存在"; exit 1
+fi
+AUTH="Bearer $EHR_API_TOKEN"
+echo "[证据] smoke 使用 token 前缀=${EHR_API_TOKEN:0:10}…"
 ck(){ if [ "$2" = "$3" ]; then echo "[PASS] $1 ($2)"; else echo "[FAIL] $1: got=$2 want=$3"; fail=$((fail+1)); fi; }
 
 echo "== 1 healthz =="
@@ -14,12 +26,12 @@ H=$(curl -s -m 5 "$B/api/v1/healthz"); echo "$H"
 ck "healthz" "$(printf '%s' "$H"|python3 -c 'import json,sys;print(json.load(sys.stdin)["status"])')" "ok"
 
 echo "== 2 建档(中文名) =="
-R=$(curl -s -m 5 -X POST "$B/api/v1/persons" -H 'content-type: application/json' -d '{"name":"容器验收·李四"}')
+R=$(curl -s -m 5 -X POST "$B/api/v1/persons" -H "Authorization: $AUTH" -H 'content-type: application/json' -d '{"name":"容器验收·李四"}')
 ID=$(printf '%s' "$R"|python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 echo "person_id=$ID"; [ -n "$ID" ] || { echo "[FAIL] id 空"; fail=$((fail+1)); }
 
 echo "== 3 timeline(空档 count==0 且 200) =="
-T=$(curl -s -m 5 -w ' HTTP=%{http_code}' "$B/api/v1/persons/$ID/timeline"); echo "$T"
+T=$(curl -s -m 5 -w ' HTTP=%{http_code}' -H "Authorization: $AUTH" "$B/api/v1/persons/$ID/timeline"); echo "$T"
 ck "timeline.count" "$(printf '%s' "$T"|python3 -c 'import json,sys;print(json.loads(sys.stdin.read().rsplit(" HTTP",1)[0])["count"])')" "0"
 ck "timeline.http" "$(printf '%s' "$T"|grep -o 'HTTP=[0-9]*')" "HTTP=200"
 
