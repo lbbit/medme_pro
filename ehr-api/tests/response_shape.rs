@@ -155,6 +155,34 @@ async fn get_body(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
 /// ⚠️ 为什么要带 `Content-Type`：`GET .../original` 回的是 **`application/octet-stream`**
 /// （CAS 原始字节），**不是 JSON** ⇒ 形状门对它的判据不是「JSON schema」，
 /// 而是「**回的类型与声明的类型一致**」（D5：形状不许粉饰，二进制端点也不能被当成 JSON 端点）。
+/// DELETE 探针（T46，带认证）：create 后表非空 ⇒ 管理/删除都需要 rw 明文。
+async fn delete_json_auth(app: &axum::Router, uri: &str, token: &str) -> (StatusCode, Value) {
+    let res = app
+        .clone()
+        .oneshot(Request::delete(uri)
+            .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    let v: Value = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap_or(Value::Null) };
+    (status, v)
+}
+
+/// DELETE 探针（T46）：回 JSON body。
+async fn delete_json(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
+    let res = app
+        .clone()
+        .oneshot(Request::delete(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    let v: Value = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap_or(Value::Null) };
+    (status, v)
+}
+
 async fn get_raw(app: &axum::Router, uri: &str) -> (StatusCode, String, Value) {
     let res = app
         .clone()
@@ -380,6 +408,40 @@ async fn probe_all(app: &axum::Router, pid: &str) -> Vec<Probed> {
         serde_json::to_string(&v).unwrap()
     );
     out.push(Probed { label: "PUT /api/v1/persons/{pid}/documents/{sha}/extraction".into(), body: v, ct: "application/json".into() });
+
+
+    // --- T46 token 管理面三探针（POST/GET/DELETE /api/v1/tokens…）---
+    // 管理面要求 rw —— 测试路由是 open 模式（无 token 表）⇒ 放行，直接打即可。
+    let (st, v) = post_json(
+        app,
+        "/api/v1/tokens",
+        serde_json::json!({"name": "probe-token", "scope": "rw"}),
+    )
+    .await;
+    assert!(st.is_success(), "POST /tokens 探针自身失败：{st}");
+    out.push(Probed { label: "POST /api/v1/tokens".into(), body: v.clone(), ct: "application/json".into() });
+
+    // ⚠️ create 之后表非空 ⇒ 管理面立即要求 rw（open 模式被第一条 token 关闭——安全语义）。
+    //    后续 GET/DELETE 必须带刚生成的明文 token（探针自证：生成→用→吊销全链）。
+    let created_token = v["token"].as_str().expect("create 回执无 token").to_string();
+
+    let (st, v) = {
+        let res = app.clone()
+            .oneshot(Request::get("/api/v1/tokens")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {created_token}"))
+                .body(Body::empty()).unwrap())
+            .await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, v)
+    };
+    assert!(st.is_success(), "GET /tokens 探针自身失败：{st}");
+    out.push(Probed { label: "GET /api/v1/tokens".into(), body: v, ct: "application/json".into() });
+
+    let (st, v) = delete_json_auth(app, "/api/v1/tokens/probe-token", &created_token).await;
+    assert!(st.is_success(), "DELETE /tokens 探针自身失败：{st}");
+    out.push(Probed { label: "DELETE /api/v1/tokens/{name}".into(), body: v, ct: "application/json".into() });
 
     out
 }

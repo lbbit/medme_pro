@@ -53,8 +53,10 @@ impl AppState {
         let home = home.into();
         Arc::new(AppState {
             store: PersonStore::new(home.clone()),
-            home,
-            auth: Arc::new(auth::TokenManager::empty()),
+            home: home.clone(),
+            // T46：open 模式也要**可持久化**的 manager——首个 token 生成即落盘+关闸
+            //（empty() 的空路径会让 create 409，D-064 坑②）。
+            auth: Arc::new(auth::TokenManager::open_mode(&home)),
             max_upload_bytes: capabilities::max_upload_bytes_from_env(),
         })
     }
@@ -729,6 +731,11 @@ fn extract_bearer(headers: &axum::http::HeaderMap) -> String {
 }
 
 fn require_rw(st: &AppState, bearer: &str) -> Result<(), ApiError> {
+    // open 模式（未配置任何 token ⇒ 单机自用）⇒ 视为隐式 rw，放行。
+    // 鉴权开启后必须持 rw token（ro 管理令牌 = 提权，防）。
+    if st.auth.is_open() {
+        return Ok(());
+    }
     let Some((_name, scope)) = st.auth.authenticate(bearer) else {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid bearer token".into()));
     };
@@ -775,6 +782,9 @@ pub struct TokenCreated {
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct TokenRevoked { pub revoked: bool, pub name: String }
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct TokenListReply { pub tokens: Vec<auth::TokenListEntry> }
 
 #[utoipa::path(get, path = "/api/v1/tokens", tag = "tokens", responses(
@@ -791,7 +801,7 @@ async fn list_tokens(
 
 #[utoipa::path(delete, path = "/api/v1/tokens/{name}", tag = "tokens",
     params(("name" = String, Path, description = "token name")),
-    responses((status = 200, description = "revoked (or already absent)"),
+    responses((status = 200, description = "revoked (or already absent)", body = TokenRevoked),
         (status = 401), (status = 403)))]
 async fn revoke_token(
     State(st): State<Arc<AppState>>,

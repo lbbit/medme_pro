@@ -311,6 +311,11 @@ impl TokenManager {
 
     /// 空表构造（tests/dry-run）。open 模式判定与 TokenSet.is_open 同语义。
     pub fn empty() -> Self { Self { file: PathBuf::new(), inner: Mutex::new(HashMap::new()) } }
+    /// open 模式下的持久化 manager：file 指向真实路径（首条 token 落盘 + 即时关闸）。
+    /// empty() 的 file 为空路径 ⇒ create 会失败 ⇒ open 模式必须用这个构造。
+    pub fn open_mode(home: &std::path::Path) -> Self {
+        Self { file: home.join("registry").join("tokens.jsonl"), inner: Mutex::new(HashMap::new()) }
+    }
     pub fn is_open(&self) -> bool { self.inner.lock().unwrap_or_else(|p| p.into_inner()).is_empty() }
 
     /// 生成新 token：随机 32 字节 hex（前缀 ehr-），scope 由调用方给。
