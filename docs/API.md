@@ -63,6 +63,9 @@
 | `GET` | `/api/v1/persons/{pid}/medications` | 用药跨度——与 labs 同一批文档、同一次 parser::aggregate 的另一块输出（D-026）。 证据回链 mention.docref（CAS sha）可一路溯源到原件字节；剂量/日期**原样透传不改写**（D2）。 | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/search` | FTS5+jieba 全文检索(中文分词 POC步骤06实证)。q 必填；limit 缺省20、钳 [1,100]。 | ✅ 已实装 |
 | `GET` | `/api/v1/persons/{pid}/timeline` | 健康事件时间线 —— Vault::timeline 直出；按 doc_date DESC、无日期件排在最后(内核 ORDER BY 语义)。 | ✅ 已实装 |
+| `GET` | `/api/v1/tokens` |  | ✅ 已实装 |
+| `POST` | `/api/v1/tokens` |  | ✅ 已实装 |
+| `DELETE` | `/api/v1/tokens/{name}` |  | ✅ 已实装 |
 
 ## 5. 端点详解
 
@@ -616,6 +619,87 @@ curl -X GET \
   'http://127.0.0.1:8443/api/v1/persons/<person_id>/timeline'
 ```
 
+### `GET /api/v1/tokens`
+
+
+
+- 鉴权：需要 Bearer token
+**响应**
+
+| 码 | 说明 |
+|---|---|
+| `200` |  |
+| `401` |  |
+| `403` | ro token cannot list tokens |
+
+
+**示例**
+
+```bash
+curl -X GET \
+  -H 'Authorization: Bearer $EHR_API_TOKEN' \
+  'http://127.0.0.1:8443/api/v1/tokens'
+```
+
+### `POST /api/v1/tokens`
+
+
+
+- 鉴权：需要 Bearer token
+
+**请求体**（content-type: application/json）
+
+```json
+TokenCreateReq
+```
+
+**响应**
+
+| 码 | 说明 |
+|---|---|
+| `200` | token created; 明文只在本次回执出现 |
+| `401` |  |
+| `403` | ro token cannot manage tokens |
+
+
+**示例**
+
+```bash
+curl -X POST \
+  -H 'Authorization: Bearer $EHR_API_TOKEN' \
+  'http://127.0.0.1:8443/api/v1/tokens' \
+  -H 'content-type: application/json' \
+  -d '<JSON body>'
+```
+
+### `DELETE /api/v1/tokens/{name}`
+
+
+
+- 鉴权：需要 Bearer token
+
+**参数**
+
+| 名 | 位置 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | path | 是 | token name |
+**响应**
+
+| 码 | 说明 |
+|---|---|
+| `200` | revoked (or already absent) |
+| `401` |  |
+| `403` |  |
+
+
+**示例**
+
+```bash
+curl -X DELETE \
+  -H 'Authorization: Bearer $EHR_API_TOKEN' \
+  'http://127.0.0.1:8443/api/v1/tokens/{name}'
+```
+
 ## 6. 数据模型（components.schemas）
 
 ### `AuditEntryOut`
@@ -986,6 +1070,10 @@ measurements 投影的整个回执。
 | `package` | string | 是 | 病种包 id（如 `sle`）。 |
 | `payload` | object | 否 | 载荷 JSON **对象**（规则只按键取值；`null`/数组/裸数字对任何规则都只是噪音）。 |
 
+### `Scope`
+
+token 权限级别
+
 ### `SearchItem`
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -1049,6 +1137,38 @@ measurements 投影的整个回执。
 | `count` | integer | 是 | 命中条目数（= items.len()） |
 | `items` | array<TimelineItem> | 是 |  |
 | `person_id` | string | 是 |  |
+
+### `TokenCreateReq`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | string | 是 |  |
+| `scope` | string | 否 |  |
+
+### `TokenCreated`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `at` | string | 是 |  |
+| `name` | string | 是 |  |
+| `scope` | Scope | 是 |  |
+| `token` | string | 是 |  |
+
+### `TokenListEntry`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `at` | string | 是 |  |
+| `name` | string | 是 |  |
+| `scope` | Scope | 是 |  |
+| `source` | string | 是 |  |
+| `token_prefix` | string | 是 |  |
+
+### `TokenListReply`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `tokens` | array<TokenListEntry> | 是 |  |
 
 ### `UploadReply`
 
