@@ -27,6 +27,9 @@ Base：`$EHR_API_BASE/api/v1`（默认 `http://127.0.0.1:8585/api/v1`）。
 | `POST /persons/{pid}/documents` | 上传原件（multipart，字段名 `file`） | `content_hash`/`deduped`/`document_id`/`text_indexed`/`stored_raw_only`/`messages[]`；可选键：`doc_type`（无索引行时缺省） |
 | `GET /persons/{pid}/medications` | 用药跨度（跨文档聚合；**只从处方类原件抽药**） | `person_id`/`documents_scanned`/`med_count`/`mention_count`/`medications[]`：`drug_key`/`name`/`raw_names`/`atc`/`latest_dose`/`latest_raw_name`/`status`(恒 `active`=不推断停药)/`docrefs[]`/`unverified`/`mentions[]`：`date`/`dose`/`raw_name`/`docref`/`origin`(`regex`/`llm`)/`unverified`；可选键：`start`、`end`（无日期来源时缺省） |
 | `GET /persons/{pid}/conditions` | 病程泳道（与 labs/medications 同一批文档、同一次聚合的第三块输出） | `person_id`/`documents_scanned`/`condition_count`/`conditions[]`：`raw_text`（诊断原文）/`icd_code`/`docrefs[]`；可选键：`onset`（来源文档无日期时缺省） |
+| `POST /tokens` | **生成 API 令牌**（T46；**需 rw**——ro 管理令牌=提权） | 200 + `token`(明文**只此一次**)/`name`/`scope`/`at`；重名 409 |
+| `GET /tokens` | 令牌列表（**需 rw**） | `tokens[]`：`name`/`scope`/`token_prefix`(前 10 位指纹，明文不回传)/`source`(env\|file)/`at` |
+| `DELETE /tokens/{name}` | 吊销令牌（**需 rw**；即时生效，使用方立刻 401） | `revoked`(bool)/`name` |
 | `GET /persons/{pid}/measurements` | 手动条目（自测值/笔记/动作事件）投影，可 `?kind=&from=&to=` 过滤 | `person_id`/`count`/`measurements[]`：`document_id`/`kind`/`taken_at`/`title`/`docref`/`values[]`(`analyte_key`/`value`/`unit`/`ref_high`/`ref_source`/`flag`)/`event_kind`/`event_package`/`event_at`/`event_payload`/`text`/`payload_readable`；可选键：`ref_low`（无区间下限时缺省） |
 | `POST /persons/{pid}/entries/self-measurement` | 写一条自测记录（body: `values[]`=`analyte_key`/`value`/`unit`；`taken_at` 可选） | 201 + `document_id`/`content_hash`/`doc_type`/`title`/`taken_at`/`deduped`；不可能的值 ⇒ **400**（带原因） |
 | `POST /persons/{pid}/entries/note` | 写一条纯文本笔记（body: `text`；`taken_at` 可选） | 201 + 同上回执 |

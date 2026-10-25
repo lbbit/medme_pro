@@ -220,6 +220,24 @@ print(json.dumps(b,ensure_ascii=False))
   original)
     PID="${1:-}"; SHA="${2:-}"; [ -n "$PID" ] && [ -n "$SHA" ] || die "original 需要 person_id 与 sha256"
     _c "$BASE/persons/$PID/documents/$SHA/original" ;;
+  token-list)
+    _c "$BASE/tokens" | _pp ;;
+  token-create)
+    # 参数形态: token-create NAME [--scope ro|rw]（支持任意顺序）
+    ARGS=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --scope) SCOPE_ARG="$2"; shift 2;;
+        *) ARGS="$ARGS $1"; shift;;
+      esac
+    done
+    set -- $ARGS
+    NAME="${1:-}"; SCOPE="${SCOPE_ARG:-rw}"; [ -n "$NAME" ] || die "token-create 需要 name（可选 scope: ro|rw，默认 rw）"
+    _c -X POST "$BASE/tokens" -H 'content-type: application/json' -d "{\"name\":\"$NAME\",\"scope\":\"$SCOPE\"}" | _pp
+    echo "明文只显示这一次，请立即复制保存" ;;
+  token-revoke)
+    NAME="${1:-}"; [ -n "$NAME" ] || die "token-revoke 需要 name"
+    _c -X DELETE "$BASE/tokens/$NAME" | _pp ;;
   upload)
     PID="${1:-}"; FILE="${2:-}"; [ -n "$PID" ] && [ -n "$FILE" ] || die "upload 需要 person_id 与文件路径"
     [ -f "$FILE" ] || die "文件不存在: $FILE"

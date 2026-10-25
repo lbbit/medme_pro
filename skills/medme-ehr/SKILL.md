@@ -9,7 +9,7 @@ metadata:
 
 # medme-ehr 档案工具集（REST 优先 · MCP 可选）
 
-服务端是 `ehr-api` 的 REST API（OpenAPI 自动生成，17 路径 / 19 operation，base = `$EHR_API_BASE/api/v1`）。
+服务端是 `ehr-api` 的 REST API（OpenAPI 自动生成，19 路径 / 22 operation，base = `$EHR_API_BASE/api/v1`）。
 > 这两个数字**由 `skill-contract-check.sh` 核对**（实现派生清单 `--print-rest-manifest` 为真源），不是手抄快照。
 **本 skill 只需一个能执行 shell 的 agent**（Copilot CLI / codex / QwenPaw / 手机端脚本），零注册、零守护进程。
 
@@ -40,6 +40,7 @@ metadata:
 | 「把这份报告原文给我看」 | `ehr.sh detail PID SHA` | 含 OCR 文本层 / extraction |
 | 「把这份报告的结构化结论写进档案」 | `ehr.sh extraction PID SHA result.json --mode text\|image` | **字段级 evidence 闸**：每条字段须是**原文逐字子串**（抄原文，别规范化日期/单位）；判假的字段被清空并标 `unverified`；**未经核验的模型输出进不了真相层** |
 | 「下载原件」 | `ehr.sh original PID SHA` | CAS 按 hash 寻址，服务端每次核 sha256 |
+| 「生成一个只读 token 给手机 App」 | `ehr.sh token-create NAME --scope ro` | **需 rw**；明文**只显示一次**；列表见 `token-list`（只给指纹）；`token-revoke NAME` 吊销 |
 | 「给某人建个档」 | `ehr.sh person-create "张三" --gender male --birthday 1990-01-02` | 返回 `id`；建档前先 `persons` 核对同名者 |
 | 「把这张化验单存进档案」 | `ehr.sh upload PID 文件.txt` | 仅 .txt/.pdf；重传同字节 `deduped=true` |
 | 「这个人档案里都发生过什么 / 谁动过」 | `ehr.sh audit [--person PID] [--op OP]` | **两层真相层**：`source=registry`（建档/改档/归档）与 `source=vault`（导入/删除）；`--op` 取 `create\|update\|delete` 或上游中文名 `导入\|导出\|分享\|删除` |
