@@ -40,6 +40,10 @@ usage() {
                             --backend B --model-version M [--mode text|image] [--schema N]
                             字段级 evidence 闸：每条字段须是原文逐字子串；判假的字段被清空/标 unverified
   original PID SHA            下载原件字节（CAS 按 hash 寻址，每次核 sha256）
+  token-list                  列出 API 令牌（需 rw）
+  token-create NAME [--scope ro|rw]
+                              生成新令牌（明文只显示一次；需 rw）
+  token-revoke NAME           吊销令牌（即时生效；需 rw）
   upload PID FILE             上传原件（multipart，仅 .txt/.pdf）
   audit [--person PID] [--op OP]
                             审计视图（两层真相层：registry 建档/改档/归档 + vault 导入/删除）
@@ -234,7 +238,7 @@ print(json.dumps(b,ensure_ascii=False))
     set -- $ARGS
     NAME="${1:-}"; SCOPE="${SCOPE_ARG:-rw}"; [ -n "$NAME" ] || die "token-create 需要 name（可选 scope: ro|rw，默认 rw）"
     _c -X POST "$BASE/tokens" -H 'content-type: application/json' -d "{\"name\":\"$NAME\",\"scope\":\"$SCOPE\"}" | _pp
-    echo "明文只显示这一次，请立即复制保存" ;;
+    echo "明文只显示这一次，请立即复制保存" >&2 ;;
   token-revoke)
     NAME="${1:-}"; [ -n "$NAME" ] || die "token-revoke 需要 name"
     _c -X DELETE "$BASE/tokens/$NAME" | _pp ;;

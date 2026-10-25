@@ -1170,6 +1170,13 @@ token 权限级别
 |---|---|---|---|
 | `tokens` | array<TokenListEntry> | 是 |  |
 
+### `TokenRevoked`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | string | 是 |  |
+| `revoked` | boolean | 是 |  |
+
 ### `UploadReply`
 
 | 字段 | 类型 | 必填 | 说明 |

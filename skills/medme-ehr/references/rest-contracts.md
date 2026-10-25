@@ -1,4 +1,4 @@
-# medme-ehr REST 契约（17 路径 / 19 operation · OpenAPI 自动生成）
+# medme-ehr REST 契约（19 路径 / 22 operation · OpenAPI 自动生成）
 
 真源：`ehr-api` 运行时 `GET /openapi.json`（现合成，paths=17 / operations=19）。本文件是人类可读镜像；改动须两边同步。
 > T16：这两个数字**由门禁核对**，不靠人记——`skill-contract-check.sh` 从 `ehr-api --print-rest-manifest`（实现派生清单）取值，

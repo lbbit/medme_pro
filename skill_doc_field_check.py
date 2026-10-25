@@ -78,6 +78,10 @@ FREE_FORM = {"text", "payload", "event_payload", "raw", "json", "snippet", "deta
 def http(method, url, body=None):
     data = json.dumps(body).encode() if body is not None else None
     hdr = {"content-type": "application/json"} if data else {}
+    # T46: 服务带种子 token（见 env）⇒ 直连 http() 也要带（否则写侧 401）
+    tok = "gate"  # 与服务端 env EHR_API_TOKENS=gate:rw 配套（本门自起的自用服务）
+    if tok:
+        hdr["Authorization"] = f"Bearer {tok}"
     r = urllib.request.Request(url, data=data, headers=hdr, method=method)
     with urllib.request.urlopen(r) as f:
         return json.loads(f.read() or b"{}")
@@ -152,7 +156,8 @@ def scalar_values(o, acc=None, inside_free=False, depth=0):
 # ================= 造真数据（字段级门必须自己造数据，否则恒绿） =================
 work = tempfile.mkdtemp(prefix="skill-doc-gate-")
 os.makedirs(os.path.join(work, "vaults"), exist_ok=True)
-env = dict(os.environ, EHR_HOME=work, EHR_API_BASE=BASE)
+env = dict(os.environ, EHR_HOME=work, EHR_API_BASE=BASE,
+           EHR_API_TOKENS='gate:rw', EHR_API_TOKEN='gate')  # T46: 预置 rw 种子 ⇒ 管理/写侧探针全通
 srv = subprocess.Popen([BIN, f"--addr=127.0.0.1:{PORT}"], env=env,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 for _ in range(80):
@@ -176,6 +181,7 @@ for fname, body in [
     p = os.path.join(work, fname)
     open(p, "w").write(body)
     out = subprocess.run(["curl", "-s", "-X", "POST", f"{BASE}/api/v1/persons/{pid}/documents",
+                          "-H", "Authorization: Bearer gate",
                           "-F", f"file=@{p}"], capture_output=True, text=True).stdout
     try:
         docs[fname] = json.loads(out).get("content_hash")
@@ -211,6 +217,10 @@ CALLS = {
     "profile-event": ["profile-event", pid, "--kind", "flare", "--package", "sle",
                       "--at", "2026-10-20"],
     "self-measure": ["self-measure", pid, "--value", "bp_systolic=128", "--unit", "mmHg"],
+    # T46 token 管理三命令（create→list→revoke 全链；创建的 ro token 用后即吊销）
+    "token-create": ["token-create", "契约门禁令牌", "--scope", "ro"],
+    "token-list": ["token-list"],
+    "token-revoke": ["token-revoke", "契约门禁令牌"],
 }
 # 非 JSON 输出的命令（原始字节流）⇒ 不参与字段级判据（内容不是 JSON 契约）
 NON_JSON = {"original"}

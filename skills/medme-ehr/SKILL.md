@@ -40,9 +40,10 @@ metadata:
 | 「把这份报告原文给我看」 | `ehr.sh detail PID SHA` | 含 OCR 文本层 / extraction |
 | 「把这份报告的结构化结论写进档案」 | `ehr.sh extraction PID SHA result.json --mode text\|image` | **字段级 evidence 闸**：每条字段须是**原文逐字子串**（抄原文，别规范化日期/单位）；判假的字段被清空并标 `unverified`；**未经核验的模型输出进不了真相层** |
 | 「下载原件」 | `ehr.sh original PID SHA` | CAS 按 hash 寻址，服务端每次核 sha256 |
-| 「生成一个只读 token 给手机 App」 | `ehr.sh token-create NAME --scope ro` | **需 rw**；明文**只显示一次**；列表见 `token-list`（只给指纹）；`token-revoke NAME` 吊销 |
+| 「生成一个只读 token 给手机 App」 | `ehr.sh token-create NAME --scope ro` | **需 rw**；明文**只显示一次**；（列表与吊销用同名的 token 管理命令） |
 | 「给某人建个档」 | `ehr.sh person-create "张三" --gender male --birthday 1990-01-02` | 返回 `id`；建档前先 `persons` 核对同名者 |
 | 「把这张化验单存进档案」 | `ehr.sh upload PID 文件.txt` | 仅 .txt/.pdf；重传同字节 `deduped=true` |
+| 「生成一个手机 App 用的只读令牌」 | `ehr.sh token-create NAME --scope ro` | **需 rw**；明文**只显示一次**立即复制（列表与吊销见同名的 token 管理命令） |
 | 「这个人档案里都发生过什么 / 谁动过」 | `ehr.sh audit [--person PID] [--op OP]` | **两层真相层**：`source=registry`（建档/改档/归档）与 `source=vault`（导入/删除）；`--op` 取 `create\|update\|delete` 或上游中文名 `导入\|导出\|分享\|删除` |
 
 完整字段契约见 `references/rest-contracts.md`（真源 = 运行时 `GET /openapi.json`）。
@@ -75,6 +76,9 @@ metadata:
 | `ehr.sh profile-event PID` | `document_id` `content_hash` `doc_type` `title` `taken_at` `deduped` |
 | `ehr.sh self-measure PID` | `document_id` `content_hash` `doc_type` `title` `taken_at` `deduped` |
 | `ehr.sh original PID SHA` | 原始字节（非 JSON） |
+| `ehr.sh token-create NAME` | `token` `name` `scope` `at`（明文只此一次） |
+| `ehr.sh token-list` | `tokens[]`：`name` `scope` `token_prefix` `source` `at` |
+| `ehr.sh token-revoke NAME` | `revoked` `name` |
 
 
 ## 组合套路
@@ -147,6 +151,9 @@ REST 命令 ↔ MCP 工具一一对应（同一真相层，任选其一）：
 | `capabilities` | `get_capabilities` | 读 |
 | `person-create NAME` | `create_person` | 写 |
 | `upload PID FILE` | `upload_document` | 写 |
+| `token-create NAME [--scope ro\|rw]` | —（REST 独有，无 MCP 工具） | 写 |
+| `token-list` | —（REST 独有） | 写 |
+| `token-revoke NAME` | —（REST 独有） | 写 |
 
 MCP 错误码：`-32602` 参数非法 / `-32601` 未知工具 / `-32001` 查无此人 / `-32002` 内部错误 / `-32003` 文件类型不支持。
 
